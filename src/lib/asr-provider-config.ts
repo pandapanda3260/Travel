@@ -1,4 +1,4 @@
-import { loadOptionalEnvFile, parseBoolean } from "./env-file";
+import { getEnvConfigDisplayName, loadOptionalEnvFile, parseBoolean } from "./env-file";
 
 export type AsrRuntime = {
   liveEnabled: boolean;
@@ -12,8 +12,9 @@ export type AsrRuntime = {
 };
 
 export function getAsrRuntime(): AsrRuntime {
-  const configFileName = "audio.env.local";
-  const localConfig = loadOptionalEnvFile(configFileName);
+  const localConfigFileName = "audio.env.local";
+  const configFileName = getEnvConfigDisplayName(localConfigFileName);
+  const localConfig = loadOptionalEnvFile(localConfigFileName);
 
   const appId =
     process.env.VOLCENGINE_ASR_APP_ID ??
@@ -34,12 +35,9 @@ export function getAsrRuntime(): AsrRuntime {
     localConfig.VOLCENGINE_AUDIO_API_BASE ??
     "https://openspeech.bytedance.com";
   const resourceId =
-    process.env.VOLCENGINE_ASR_RESOURCE_ID ??
-    localConfig.VOLCENGINE_ASR_RESOURCE_ID ??
-    "volc.bigasr.auc_turbo";
+    process.env.VOLCENGINE_ASR_RESOURCE_ID ?? localConfig.VOLCENGINE_ASR_RESOURCE_ID ?? "volc.bigasr.auc_turbo";
   const liveEnabled = parseBoolean(
-    process.env.VOLCENGINE_ASR_LIVE_ENABLED ??
-      localConfig.VOLCENGINE_ASR_LIVE_ENABLED,
+    process.env.VOLCENGINE_ASR_LIVE_ENABLED ?? localConfig.VOLCENGINE_ASR_LIVE_ENABLED,
     true,
   );
 

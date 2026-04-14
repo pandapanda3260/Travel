@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import { deleteVideoJob, listVideoJobs } from "./video-job-store";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
 export type CompositionStatus = "DRAFT" | "PROCESSING" | "COMPLETED" | "FAILED";
 export type CompositionAspectRatio = "16:9" | "9:16" | "1:1";
@@ -83,9 +84,8 @@ export type VideoCompositionRecord = {
   updatedAt: string;
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "video-compositions";
-const legacyJsonPath = join(dataDir, "video-compositions.json");
+const legacyJsonPath = joinRuntimeDataPath("video-compositions.json");
 
 function createDefaultAudioPlan(audioMode: CompositionAudioMode, backgroundMusicUrl: string | null): CompositionAudioPlan {
   const tracks: CompositionAudioTrack[] = [];
@@ -124,7 +124,7 @@ function createDefaultAudioPlan(audioMode: CompositionAudioMode, backgroundMusic
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as VideoCompositionRecord).compositionId);
     migrated = true;
@@ -204,7 +204,7 @@ export function deleteVideoComposition(compositionId: string) {
   if (!currentRecord) return null;
 
   if (currentRecord.outputVideoUrl?.startsWith("/")) {
-    const localFilePath = join(process.cwd(), "public", currentRecord.outputVideoUrl.slice(1));
+    const localFilePath = resolveRuntimeAssetUrlToPath(currentRecord.outputVideoUrl);
 
     if (existsSync(localFilePath)) {
       unlinkSync(localFilePath);
@@ -212,7 +212,7 @@ export function deleteVideoComposition(compositionId: string) {
   }
 
   if (currentRecord.subtitleSrtUrl?.startsWith("/")) {
-    const localSubtitlePath = join(process.cwd(), "public", currentRecord.subtitleSrtUrl.slice(1));
+    const localSubtitlePath = resolveRuntimeAssetUrlToPath(currentRecord.subtitleSrtUrl);
 
     if (existsSync(localSubtitlePath)) {
       unlinkSync(localSubtitlePath);

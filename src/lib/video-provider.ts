@@ -1,9 +1,8 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 import type { KlingGenerationSettings } from "./prompt";
 import type { VideoJobRecord } from "./video-job-store";
+import { loadOptionalEnvFile } from "./env-file";
 import { getProviderRuntime } from "./video-provider-config";
 import { withRetry } from "./retry";
 
@@ -15,35 +14,7 @@ type SubmittedLiveVideoJob = {
   message: string;
 };
 
-type RefreshedLiveVideoJob = Pick<
-  VideoJobRecord,
-  "status" | "logs" | "videoUrl" | "remoteVideoUrl" | "error"
->;
-
-function loadOptionalEnvFile(fileName: string) {
-  const filePath = join(process.cwd(), fileName);
-
-  if (!existsSync(filePath)) {
-    return {} as Record<string, string>;
-  }
-
-  return readFileSync(filePath, "utf8")
-    .split(/\r?\n/)
-    .reduce<Record<string, string>>((accumulator, line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) {
-        return accumulator;
-      }
-
-      const separatorIndex = trimmed.indexOf("=");
-      if (separatorIndex <= 0) {
-        return accumulator;
-      }
-
-      accumulator[trimmed.slice(0, separatorIndex).trim()] = trimmed.slice(separatorIndex + 1).trim();
-      return accumulator;
-    }, {});
-}
+type RefreshedLiveVideoJob = Pick<VideoJobRecord, "status" | "logs" | "videoUrl" | "remoteVideoUrl" | "error">;
 
 function getKlingApiToken() {
   const localConfig = loadOptionalEnvFile("video.env.local");
@@ -68,11 +39,7 @@ function getKlingTokenExpireSeconds() {
 }
 
 function toBase64Url(value: string | Buffer) {
-  return Buffer.from(value)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return Buffer.from(value).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 function generateKlingJwtToken(accessKey: string, secretKey: string) {
@@ -234,11 +201,7 @@ export async function submitLiveVideoJob(
     jobId: taskId,
     provider: "kling",
     modelId: runtime.modelId,
-    logs: [
-      `文生视频任务已提交：${taskId}`,
-      `模型：${runtime.modelId}`,
-      `模式：${generationSettings.mode}`,
-    ],
+    logs: [`文生视频任务已提交：${taskId}`, `模型：${runtime.modelId}`, `模式：${generationSettings.mode}`],
     message: "Kling 文生视频任务已提交，正在生成中。",
   };
 }
@@ -282,7 +245,9 @@ export async function submitLiveImageToVideoJob(
         sound: generationSettings.generateAudio ? "on" : "off",
         duration: String(generationSettings.durationSeconds),
         aspect_ratio: generationSettings.aspectRatio,
-        ...(!generationSettings.multiShot && !generationSettings.tailImageBase64 && buildKlingCameraControl(generationSettings.cameraControl)
+        ...(!generationSettings.multiShot &&
+        !generationSettings.tailImageBase64 &&
+        buildKlingCameraControl(generationSettings.cameraControl)
           ? { camera_control: buildKlingCameraControl(generationSettings.cameraControl) }
           : {}),
         watermark: { enabled: generationSettings.watermark },
@@ -368,11 +333,7 @@ export async function submitLipSyncJob(input: {
     jobId: taskId,
     provider: "kling",
     modelId: runtime.modelId,
-    logs: [
-      `口型同步任务已提交：${taskId}`,
-      `模型：${runtime.modelId}`,
-      `模式：audio2video`,
-    ],
+    logs: [`口型同步任务已提交：${taskId}`, `模型：${runtime.modelId}`, `模式：audio2video`],
     message: "Kling 口型同步任务已提交，正在处理中。",
   };
 }
@@ -415,18 +376,16 @@ export async function refreshProviderVideoJob(job: VideoJobRecord): Promise<Refr
 
     const taskStatus = payload.data?.task_status;
     const mappedStatus = mapKlingStatus(taskStatus);
-    const remoteVideoUrl = mappedStatus === "COMPLETED"
-      ? extractKlingVideoUrl(payload.data?.task_result ?? payload.data)
-      : null;
+    const remoteVideoUrl =
+      mappedStatus === "COMPLETED" ? extractKlingVideoUrl(payload.data?.task_result ?? payload.data) : null;
 
     return {
       status: mappedStatus,
       logs: [...job.logs, `Kling 口型同步状态更新：${taskStatus ?? "unknown"}`],
       videoUrl: job.videoUrl,
       remoteVideoUrl: remoteVideoUrl ?? job.remoteVideoUrl ?? null,
-      error: mappedStatus === "FAILED"
-        ? payload.data?.task_status_msg ?? payload.message ?? "口型同步生成失败"
-        : null,
+      error:
+        mappedStatus === "FAILED" ? (payload.data?.task_status_msg ?? payload.message ?? "口型同步生成失败") : null,
     };
   }
 
@@ -452,18 +411,16 @@ export async function refreshProviderVideoJob(job: VideoJobRecord): Promise<Refr
 
     const taskStatus = payload.data?.task_status;
     const mappedStatus = mapKlingStatus(taskStatus);
-    const remoteVideoUrl = mappedStatus === "COMPLETED"
-      ? extractKlingVideoUrl(payload.data?.task_result ?? payload.data)
-      : null;
+    const remoteVideoUrl =
+      mappedStatus === "COMPLETED" ? extractKlingVideoUrl(payload.data?.task_result ?? payload.data) : null;
 
     return {
       status: mappedStatus,
       logs: [...job.logs, `Kling 状态更新：${taskStatus ?? "unknown"}`],
       videoUrl: job.videoUrl,
       remoteVideoUrl: remoteVideoUrl ?? job.remoteVideoUrl ?? null,
-      error: mappedStatus === "FAILED"
-        ? payload.data?.task_status_msg ?? payload.message ?? "任务片段生成失败"
-        : null,
+      error:
+        mappedStatus === "FAILED" ? (payload.data?.task_status_msg ?? payload.message ?? "任务片段生成失败") : null,
     };
   }
 

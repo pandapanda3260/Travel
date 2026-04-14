@@ -1,4 +1,4 @@
-import { loadOptionalEnvFile, parseBoolean } from "./env-file";
+import { getEnvConfigDisplayName, loadOptionalEnvFile, parseBoolean } from "./env-file";
 
 export type ImageGenerationRuntime = {
   liveEnabled: boolean;
@@ -11,17 +11,16 @@ export type ImageGenerationRuntime = {
 };
 
 export function getImageGenerationRuntime(): ImageGenerationRuntime {
-  const configFileName = "image.env.local";
-  const localConfig = loadOptionalEnvFile("image.env.local");
+  const localConfigFileName = "image.env.local";
+  const configFileName = getEnvConfigDisplayName(localConfigFileName);
+  const localConfig = loadOptionalEnvFile(localConfigFileName);
   const apiKey = process.env.VOLCENGINE_IMAGE_API_KEY ?? localConfig.VOLCENGINE_IMAGE_API_KEY ?? "";
   const apiBase =
     process.env.VOLCENGINE_IMAGE_API_BASE ??
     localConfig.VOLCENGINE_IMAGE_API_BASE ??
     "https://ark.cn-beijing.volces.com";
   const modelId =
-    process.env.VOLCENGINE_IMAGE_MODEL ??
-    localConfig.VOLCENGINE_IMAGE_MODEL ??
-    "doubao-seedream-4-5-251128";
+    process.env.VOLCENGINE_IMAGE_MODEL ?? localConfig.VOLCENGINE_IMAGE_MODEL ?? "doubao-seedream-4-5-251128";
   const liveEnabled = parseBoolean(
     process.env.VOLCENGINE_IMAGE_LIVE_ENABLED ?? localConfig.VOLCENGINE_IMAGE_LIVE_ENABLED,
     false,

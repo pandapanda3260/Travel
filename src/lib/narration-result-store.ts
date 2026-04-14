@@ -1,10 +1,11 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { buildMergedNarrationAudio, deleteMergedNarrationAudio } from "./narration-audio-bundle";
+import { buildMergedNarrationAudio, deleteMergedNarrationAudio, deleteNarrationAudioTempArtifacts } from "./narration-audio-bundle";
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import type { NarrationDraft, NarrationDraftClip } from "./narration";
 import { sanitizeNarrationText } from "./narration";
+import { joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { buildSrtFromSubtitleCues, buildSubtitleCuesFromNarrationClips, writeSrtSubtitleFile } from "./subtitle-export";
 
 export type NarrationResultRecord = {
@@ -24,9 +25,8 @@ export type NarrationResultRecord = {
   updatedAt: string;
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "narration-results";
-const legacyJsonPath = join(dataDir, "narration-results.json");
+const legacyJsonPath = joinRuntimeDataPath("narration-results.json");
 
 let migrated = false;
 function ensureStore() {
@@ -91,7 +91,7 @@ function deleteLocalAudioFile(audioUrl: string | null | undefined) {
     return;
   }
 
-  const localFilePath = join(process.cwd(), "public", audioUrl.slice(1));
+  const localFilePath = resolveRuntimeAssetUrlToPath(audioUrl);
   if (existsSync(localFilePath)) {
     unlinkSync(localFilePath);
   }
@@ -102,7 +102,7 @@ function deleteLocalSubtitleFile(subtitleUrl: string | null | undefined) {
     return;
   }
 
-  const localFilePath = join(process.cwd(), "public", subtitleUrl.slice(1));
+  const localFilePath = resolveRuntimeAssetUrlToPath(subtitleUrl);
   if (existsSync(localFilePath)) {
     unlinkSync(localFilePath);
   }
@@ -196,6 +196,7 @@ export function deleteNarrationResult(resultId: string) {
   }
   deleteLocalSubtitleFile(current.subtitleSrtUrl);
   deleteMergedNarrationAudio(current.mergedAudioUrl);
+  deleteNarrationAudioTempArtifacts(resultId);
   dbDelete(COLLECTION, resultId);
   return current;
 }

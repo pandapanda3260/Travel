@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { dbGetSingleton, dbSetSingleton, migrateJsonSingletonIfNeeded } from "./db";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
 export type ClonedVoiceRecord = {
   cloneId: string;
@@ -29,13 +30,12 @@ type VoiceManagementStore = {
   clonedVoices: ClonedVoiceRecord[];
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "voice-management";
-const legacyJsonPath = join(dataDir, "voice-management.json");
+const legacyJsonPath = joinRuntimeDataPath("voice-management.json");
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonSingletonIfNeeded(COLLECTION, legacyJsonPath);
     migrated = true;
@@ -63,7 +63,7 @@ function deleteLocalDemoAudio(audioUrl: string | null | undefined) {
     return;
   }
 
-  const localPath = join(process.cwd(), "public", audioUrl.slice(1));
+  const localPath = resolveRuntimeAssetUrlToPath(audioUrl);
   if (existsSync(localPath)) {
     unlinkSync(localPath);
   }

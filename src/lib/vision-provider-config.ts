@@ -1,4 +1,4 @@
-import { loadOptionalEnvFile, parseBoolean } from "./env-file";
+import { getEnvConfigDisplayName, loadOptionalEnvFile, parseBoolean } from "./env-file";
 
 export type OpenAIProviderRuntime = {
   liveEnabled: boolean;
@@ -12,19 +12,17 @@ export type OpenAIProviderRuntime = {
 };
 
 function loadOpenAIConfig() {
-  const configFileName = "openai.env.local";
-  const localConfig = loadOptionalEnvFile(configFileName);
-  const apiKey =
-    process.env.OPENAI_VISION_API_KEY ?? localConfig.OPENAI_VISION_API_KEY ?? "";
+  const localConfigFileName = "openai.env.local";
+  const configFileName = getEnvConfigDisplayName(localConfigFileName);
+  const localConfig = loadOptionalEnvFile(localConfigFileName);
+  const apiKey = process.env.OPENAI_VISION_API_KEY ?? localConfig.OPENAI_VISION_API_KEY ?? "";
   const apiBase = (
     process.env.OPENAI_VISION_API_BASE ??
     localConfig.OPENAI_VISION_API_BASE ??
     "https://api.openai.com"
   ).replace(/\/$/, "");
   const chatEndpoint =
-    process.env.OPENAI_VISION_CHAT_ENDPOINT ??
-    localConfig.OPENAI_VISION_CHAT_ENDPOINT ??
-    "/v1/chat/completions";
+    process.env.OPENAI_VISION_CHAT_ENDPOINT ?? localConfig.OPENAI_VISION_CHAT_ENDPOINT ?? "/v1/chat/completions";
 
   return { configFileName, localConfig, apiKey, apiBase, chatEndpoint };
 }
@@ -32,13 +30,9 @@ function loadOpenAIConfig() {
 /** GPT-4o vision runtime (frame analysis) */
 export function getVisionRuntime(): OpenAIProviderRuntime {
   const { configFileName, localConfig, apiKey, apiBase, chatEndpoint } = loadOpenAIConfig();
-  const modelId =
-    process.env.OPENAI_VISION_MODEL ??
-    localConfig.OPENAI_VISION_MODEL ??
-    "gpt-4o";
+  const modelId = process.env.OPENAI_VISION_MODEL ?? localConfig.OPENAI_VISION_MODEL ?? "gpt-4o";
   const liveEnabled = parseBoolean(
-    process.env.OPENAI_VISION_LIVE_ENABLED ??
-      localConfig.OPENAI_VISION_LIVE_ENABLED,
+    process.env.OPENAI_VISION_LIVE_ENABLED ?? localConfig.OPENAI_VISION_LIVE_ENABLED,
     false,
   );
 
@@ -57,13 +51,9 @@ export function getVisionRuntime(): OpenAIProviderRuntime {
 /** GPT-5.4 generation runtime (content script / prompt / subtitle) */
 export function getGenerationRuntime(): OpenAIProviderRuntime {
   const { configFileName, localConfig, apiKey, apiBase, chatEndpoint } = loadOpenAIConfig();
-  const modelId =
-    process.env.OPENAI_GENERATION_MODEL ??
-    localConfig.OPENAI_GENERATION_MODEL ??
-    "gpt-5.4";
+  const modelId = process.env.OPENAI_GENERATION_MODEL ?? localConfig.OPENAI_GENERATION_MODEL ?? "gpt-5.4";
   const liveEnabled = parseBoolean(
-    process.env.OPENAI_GENERATION_LIVE_ENABLED ??
-      localConfig.OPENAI_GENERATION_LIVE_ENABLED,
+    process.env.OPENAI_GENERATION_LIVE_ENABLED ?? localConfig.OPENAI_GENERATION_LIVE_ENABLED,
     false,
   );
 

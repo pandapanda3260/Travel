@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { TimbreItem } from "./doubao-timbre-service";
 import { dbGetSingleton, dbSetSingleton, migrateJsonSingletonIfNeeded } from "./db";
+import { ensureRuntimeDataDir, joinRuntimeDataPath } from "./runtime-storage";
 
 export type StoredTimbreLibraryItem = TimbreItem & {
   searchText: string;
@@ -14,13 +15,12 @@ type TimbreLibraryStore = {
   items: StoredTimbreLibraryItem[];
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "timbre-library";
-const legacyJsonPath = join(dataDir, "timbre-library.json");
+const legacyJsonPath = joinRuntimeDataPath("timbre-library.json");
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonSingletonIfNeeded(COLLECTION, legacyJsonPath);
     migrated = true;

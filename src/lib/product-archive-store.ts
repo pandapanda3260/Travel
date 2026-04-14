@@ -2,6 +2,8 @@ import { existsSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { importLegacyProductArchivesIfNeeded } from "./legacy-local-data-import";
+import { joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
 export type ProductArchiveKeyInfo = {
   productName: string;
@@ -31,14 +33,14 @@ export type ProductArchiveRecord = {
   updatedAt: string;
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "product-archives";
-const legacyJsonPath = join(dataDir, "product-archives.json");
+const legacyJsonPath = joinRuntimeDataPath("product-archives.json");
 
 let migrated = false;
 function ensureStore() {
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as ProductArchiveRecord).archiveId);
+    importLegacyProductArchivesIfNeeded();
     migrated = true;
   }
 }
@@ -104,7 +106,7 @@ function writeStore(records: ProductArchiveRecord[]) {
 }
 
 function getArchivePublicDir(archiveId: string) {
-  return join(process.cwd(), "public", "product-archives", archiveId);
+  return joinRuntimePublicStoragePath("product-archives", archiveId);
 }
 
 function deleteLocalFile(publicUrl: string | null | undefined) {
@@ -112,7 +114,7 @@ function deleteLocalFile(publicUrl: string | null | undefined) {
     return;
   }
 
-  const absolutePath = join(process.cwd(), "public", publicUrl.replace(/^\//, ""));
+  const absolutePath = resolveRuntimeAssetUrlToPath(publicUrl);
   if (existsSync(absolutePath)) {
     unlinkSync(absolutePath);
   }

@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { dbGetAll, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { ensureRuntimeDataDir, joinRuntimeDataPath } from "./runtime-storage";
 
 export type MaterialAssetType = "image" | "video";
 export type MaterialSourceType = "image-generation-archive" | "video-generation-job" | "video-composition-output";
@@ -24,13 +25,12 @@ export type MaterialLibraryItem = {
   sourceSessionId: string;
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "material-library";
-const legacyJsonPath = join(dataDir, "material-library.json");
+const legacyJsonPath = joinRuntimeDataPath("material-library.json");
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as MaterialLibraryItem).materialId);
     migrated = true;

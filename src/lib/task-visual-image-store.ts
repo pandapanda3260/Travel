@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { ImageGenerationResult } from "./image-provider";
 import { dbGetAll, dbUpsert, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import { getTaskDirectorPlan } from "./video-task-director";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import type { VideoTaskRecord } from "./video-task-schema";
 
 export type TaskVisualImageCandidate = {
@@ -54,21 +55,20 @@ export type TaskVisualSelectedImageItem = {
 
 type PersistedImageAsset = ImageGenerationResult;
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "task-visual-image-shots";
-const legacyJsonPath = join(dataDir, "task-visual-image-shots.json");
+const legacyJsonPath = joinRuntimeDataPath("task-visual-image-shots.json");
 
 function shotKey(taskId: string, shotIndex: number) {
   return `${taskId}:${shotIndex}`;
 }
 
 function getTaskVisualImageShotDir(taskId: string, segmentId: string) {
-  return join(process.cwd(), "public", "generated-images", taskId.trim() || "_unassigned", "task-visual-shots", segmentId);
+  return joinRuntimePublicStoragePath("generated-images", taskId.trim() || "_unassigned", "task-visual-shots", segmentId);
 }
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => {
       const r = item as Partial<TaskVisualImageShotRecord>;
@@ -475,7 +475,7 @@ export function getTaskVisualSelectedImageDataUrl(sessionId: string) {
     return null;
   }
 
-  const absolutePath = join(process.cwd(), "public", selectedCandidate.imageUrl.replace(/^\//, ""));
+  const absolutePath = resolveRuntimeAssetUrlToPath(selectedCandidate.imageUrl);
   if (!existsSync(absolutePath)) {
     return null;
   }
@@ -495,7 +495,7 @@ export function getTaskVisualSelectedImageDataUrl(sessionId: string) {
 export function deleteTaskVisualImageShotsByTaskId(taskId: string) {
   const remaining = readStore().filter((record) => record.taskId !== taskId);
   writeStore(remaining);
-  rmSync(join(process.cwd(), "public", "generated-images", taskId.trim() || "_unassigned", "task-visual-shots"), {
+  rmSync(joinRuntimePublicStoragePath("generated-images", taskId.trim() || "_unassigned", "task-visual-shots"), {
     recursive: true,
     force: true,
   });

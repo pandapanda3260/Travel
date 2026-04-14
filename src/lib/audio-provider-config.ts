@@ -1,4 +1,4 @@
-import { loadOptionalEnvFile, parseBoolean, parseNumber } from "./env-file";
+import { getEnvConfigDisplayName, loadOptionalEnvFile, parseBoolean, parseNumber } from "./env-file";
 
 export type SpeechSynthesisRuntime = {
   liveEnabled: boolean;
@@ -14,8 +14,9 @@ export type SpeechSynthesisRuntime = {
 };
 
 export function getSpeechSynthesisRuntime(): SpeechSynthesisRuntime {
-  const configFileName = "audio.env.local";
-  const localConfig = loadOptionalEnvFile(configFileName);
+  const localConfigFileName = "audio.env.local";
+  const configFileName = getEnvConfigDisplayName(localConfigFileName);
+  const localConfig = loadOptionalEnvFile(localConfigFileName);
   const appId = process.env.VOLCENGINE_AUDIO_APP_ID ?? localConfig.VOLCENGINE_AUDIO_APP_ID ?? "";
   const accessToken = process.env.VOLCENGINE_AUDIO_ACCESS_TOKEN ?? localConfig.VOLCENGINE_AUDIO_ACCESS_TOKEN ?? "";
   const apiBase =

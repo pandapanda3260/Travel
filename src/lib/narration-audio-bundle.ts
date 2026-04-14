@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { NarrationDraftClip } from "./narration";
+import { joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
 const execFileAsync = promisify(execFile);
 const packageRequire = createRequire(process.cwd() + "/package.json");
-const dataDir = join(process.cwd(), "data", "narration-audio-temp");
+const dataDir = joinRuntimeDataPath("narration-audio-temp");
 
 function resolveFfmpegPath() {
   const runtimePath = packageRequire("ffmpeg-static") as string | null;
@@ -21,7 +22,7 @@ function resolveFfmpegPath() {
 }
 
 function toAbsoluteLocalPath(publicUrl: string) {
-  return join(process.cwd(), "public", publicUrl.replace(/^\//, ""));
+  return resolveRuntimeAssetUrlToPath(publicUrl);
 }
 
 export function deleteMergedNarrationAudio(audioUrl: string | null | undefined) {
@@ -35,8 +36,26 @@ export function deleteMergedNarrationAudio(audioUrl: string | null | undefined) 
   }
 }
 
+export function deleteNarrationAudioTempArtifacts(resultId: string) {
+  const normalizedResultId = resultId.trim();
+  if (!normalizedResultId) {
+    return;
+  }
+
+  const tempPaths = [
+    join(dataDir, `${normalizedResultId}-concat.txt`),
+    ...Array.from({ length: 24 }, (_, index) => join(dataDir, `${normalizedResultId}-trim-${index}.mp3`)),
+  ];
+
+  for (const absolutePath of tempPaths) {
+    if (existsSync(absolutePath)) {
+      unlinkSync(absolutePath);
+    }
+  }
+}
+
 function getMergedNarrationOutputDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-audio", taskId?.trim() || "_unassigned", "narration-merged");
+  return joinRuntimePublicStoragePath("generated-audio", taskId?.trim() || "_unassigned", "narration-merged");
 }
 
 async function trimAudioToDuration(ffmpegPath: string, inputPath: string, outputPath: string, maxDurationSeconds: number) {
@@ -63,46 +82,52 @@ export async function buildMergedNarrationAudio(resultId: string, clips: Narrati
 
   const ffmpegPath = resolveFfmpegPath();
 
-  const trimmedPaths: string[] = [];
-  for (let i = 0; i < clips.length; i++) {
-    const clip = clips[i];
-    const srcPath = toAbsoluteLocalPath(sourceUrls[i]);
-    const preferredDuration = clip.audioDurationSeconds ?? clip.durationSeconds;
-    if (preferredDuration && preferredDuration > 0) {
-      const trimmedPath = join(dataDir, `${resultId}-trim-${i}.mp3`);
-      await trimAudioToDuration(ffmpegPath, srcPath, trimmedPath, preferredDuration);
-      trimmedPaths.push(trimmedPath);
-    } else {
-      trimmedPaths.push(srcPath);
-    }
-  }
-
   const listFilePath = join(dataDir, `${resultId}-concat.txt`);
   const outputFileName = `${resultId}.mp3`;
   const outputPath = join(outputDir, outputFileName);
+  const trimmedPaths: string[] = [];
 
-  writeFileSync(
-    listFilePath,
-    trimmedPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n"),
-    "utf8",
-  );
+  try {
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      const srcPath = toAbsoluteLocalPath(sourceUrls[i]);
+      const preferredDuration = clip.audioDurationSeconds ?? clip.durationSeconds;
+      if (preferredDuration && preferredDuration > 0) {
+        const trimmedPath = join(dataDir, `${resultId}-trim-${i}.mp3`);
+        await trimAudioToDuration(ffmpegPath, srcPath, trimmedPath, preferredDuration);
+        trimmedPaths.push(trimmedPath);
+      } else {
+        trimmedPaths.push(srcPath);
+      }
+    }
 
-  await execFileAsync(ffmpegPath, [
-    "-y",
-    "-f", "concat",
-    "-safe", "0",
-    "-i", listFilePath,
-    "-c", "copy",
-    outputPath,
-  ]);
+    writeFileSync(
+      listFilePath,
+      trimmedPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n"),
+      "utf8",
+    );
 
-  for (const p of trimmedPaths) {
-    if (p.includes("-trim-") && existsSync(p)) {
-      unlinkSync(p);
+    await execFileAsync(ffmpegPath, [
+      "-y",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listFilePath,
+      "-c", "copy",
+      outputPath,
+    ]);
+
+    return {
+      publicUrl: `/generated-audio/${taskId?.trim() || "_unassigned"}/narration-merged/${outputFileName}`,
+    };
+  } finally {
+    for (const p of trimmedPaths) {
+      if (p.includes("-trim-") && existsSync(p)) {
+        unlinkSync(p);
+      }
+    }
+
+    if (existsSync(listFilePath)) {
+      unlinkSync(listFilePath);
     }
   }
-
-  return {
-    publicUrl: `/generated-audio/${taskId?.trim() || "_unassigned"}/narration-merged/${outputFileName}`,
-  };
 }

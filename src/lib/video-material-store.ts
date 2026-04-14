@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { importLegacyVideoMaterialsIfNeeded } from "./legacy-local-data-import";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath } from "./runtime-storage";
 
 export type VideoMaterialStatus =
   | "uploading"
@@ -50,16 +52,16 @@ export type VideoTaskReferenceMaterialOption = {
   videoTemplatePrompt: string;
 };
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "video-materials";
-const legacyJsonPath = join(dataDir, "video-materials.json");
-const uploadsDir = join(process.cwd(), "public", "video-materials");
+const legacyJsonPath = joinRuntimeDataPath("video-materials.json");
+const uploadsDir = joinRuntimePublicStoragePath("video-materials");
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as { materialId: string }).materialId);
+    importLegacyVideoMaterialsIfNeeded();
     migrated = true;
   }
 }

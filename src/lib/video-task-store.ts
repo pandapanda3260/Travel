@@ -1,6 +1,8 @@
 import { join } from "node:path";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { importLegacyVideoTasksIfNeeded } from "./legacy-local-data-import";
+import { joinRuntimeDataPath } from "./runtime-storage";
 import {
   audioFormatOptions,
   audioLoudnessRateOptions,
@@ -23,14 +25,14 @@ import {
   type VideoTaskSource,
 } from "./video-task-schema";
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "video-tasks";
-const legacyJsonPath = join(dataDir, "video-tasks.json");
+const legacyJsonPath = joinRuntimeDataPath("video-tasks.json");
 
 let migrated = false;
 function ensureStore() {
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as VideoTaskRecord).taskId);
+    importLegacyVideoTasksIfNeeded();
     migrated = true;
   }
 }

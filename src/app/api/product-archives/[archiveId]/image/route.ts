@@ -6,6 +6,7 @@ import sharp from "sharp";
 
 import { getProductArchive, patchProductArchive } from "../../../../../lib/product-archive-store";
 import { extractProductArchiveFromImageChunks } from "../../../../../lib/product-archive-vision";
+import { joinRuntimePublicStoragePath } from "../../../../../lib/runtime-storage";
 
 type RouteContext = {
   params: Promise<{
@@ -209,7 +210,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const imageChunks = await buildVisionImageChunks(bytes, file.type, extension);
     const parsed = await extractProductArchiveFromImageChunks(imageChunks);
 
-    const imageDir = join(process.cwd(), "public", "product-archives", archiveId, "source");
+    const imageDir = joinRuntimePublicStoragePath("product-archives", archiveId, "source");
     mkdirSync(imageDir, { recursive: true });
     const fileName = `${crypto.randomUUID()}.${extension}`;
     const absolutePath = join(imageDir, fileName);

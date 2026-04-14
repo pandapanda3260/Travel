@@ -8,6 +8,7 @@ import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { dbGetAll, dbUpsert, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import type { NarrationDraftClip } from "./narration";
 import { listNarrationResults, type NarrationResultRecord } from "./narration-result-store";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { getTaskDirectorPlan } from "./video-task-director";
 import {
   ensureLocalVideoForJob,
@@ -20,9 +21,8 @@ import type { VideoTaskRecord } from "./video-task-schema";
 
 const execFileAsync = promisify(execFile);
 const packageRequire = createRequire(process.cwd() + "/package.json");
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "task-clip-shots";
-const legacyJsonPath = join(dataDir, "task-clip-shots.json");
+const legacyJsonPath = joinRuntimeDataPath("task-clip-shots.json");
 
 function clipKey(taskId: string, shotIndex: number) {
   return `${taskId}:${shotIndex}`;
@@ -89,12 +89,12 @@ export type TaskClipShotPayload = {
 };
 
 function getTaskClipThumbnailDir(taskId: string) {
-  return join(process.cwd(), "public", "generated-videos", taskId.trim() || "_unassigned", "thumbnails");
+  return joinRuntimePublicStoragePath("generated-videos", taskId.trim() || "_unassigned", "thumbnails");
 }
 
 let migrated = false;
 function ensureStore() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   if (!migrated) {
     migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => {
       const r = item as Partial<TaskClipShotRecord>;
@@ -263,7 +263,7 @@ export async function ensureTaskClipThumbnail(taskId: string, videoJobId: string
     return null;
   }
 
-  const inputPath = join(process.cwd(), "public", latestJob.videoUrl.replace(/^\//, ""));
+  const inputPath = resolveRuntimeAssetUrlToPath(latestJob.videoUrl);
   if (!existsSync(inputPath)) {
     return null;
   }
@@ -335,7 +335,7 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
 export function deleteTaskClipShotsByTaskId(taskId: string) {
   const records = readStore().filter((record) => record.taskId !== taskId);
   writeStore(records);
-  rmSync(join(process.cwd(), "public", "generated-videos", taskId.trim() || "_unassigned", "thumbnails"), {
+  rmSync(joinRuntimePublicStoragePath("generated-videos", taskId.trim() || "_unassigned", "thumbnails"), {
     recursive: true,
     force: true,
   });

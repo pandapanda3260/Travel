@@ -8,7 +8,7 @@ const maxFileSizeBytes = 8 * 1024 * 1024;
 
 function getFileExtension(name: string) {
   const segments = name.toLowerCase().split(".");
-  return segments.length > 1 ? segments.pop() ?? "" : "";
+  return segments.length > 1 ? (segments.pop() ?? "") : "";
 }
 
 export async function POST(request: NextRequest) {
@@ -17,8 +17,7 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const title = String(formData.get("title") ?? "").trim();
     const transcript = String(formData.get("transcript") ?? "").trim();
-    const speakerId =
-      String(formData.get("speakerId") ?? "").trim() || runtime.defaultCloneSpeakerId;
+    const speakerId = String(formData.get("speakerId") ?? "").trim() || runtime.defaultCloneSpeakerId;
     const language = (String(formData.get("language") ?? "cn").trim() || "cn") as "cn" | "en";
     const modelType = Number(formData.get("modelType") ?? 4) as 4 | 5;
     const enableDenoise = String(formData.get("enableDenoise") ?? "0") === "1";
@@ -29,7 +28,7 @@ export async function POST(request: NextRequest) {
         {
           error:
             "缺少音色槽位 ID。请在火山引擎控制台「语音技术 → 声音复刻」中购买槽位，获取 S_xxxxxxx 格式的 ID 后，" +
-            "填入声音复刻页面的「音色槽位 ID」字段，或在 voice.env.local 中配置 VOLCENGINE_VOICECLONE_DEFAULT_SPEAKER_ID。",
+            `填入声音复刻页面的「音色槽位 ID」字段，或在 ${runtime.configFileName} 中配置 VOLCENGINE_VOICECLONE_DEFAULT_SPEAKER_ID。`,
         },
         { status: 400 },
       );
@@ -45,10 +44,7 @@ export async function POST(request: NextRequest) {
 
     const format = getFileExtension(file.name);
     if (!supportedCloneFormats.includes(format as (typeof supportedCloneFormats)[number])) {
-      return NextResponse.json(
-        { error: "仅支持 wav、mp3、ogg、m4a、aac、pcm 格式" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "仅支持 wav、mp3、ogg、m4a、aac、pcm 格式" }, { status: 400 });
     }
 
     const cloneId = crypto.randomUUID();
@@ -117,9 +113,6 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "声音复刻提交失败" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: error instanceof Error ? error.message : "声音复刻提交失败" }, { status: 500 });
   }
 }

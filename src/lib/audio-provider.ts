@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { getSpeechSynthesisRuntime } from "./audio-provider-config";
+import { joinRuntimePublicStoragePath } from "./runtime-storage";
 import { withRetry } from "./retry";
 
 const execFileAsync = promisify(execFile);
@@ -49,7 +50,7 @@ function getOutputExtension(format: SpeechSynthesisRequest["format"]) {
 }
 
 function getAudioOutputDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-audio", taskId?.trim() || "_unassigned", "narration");
+  return joinRuntimePublicStoragePath("generated-audio", taskId?.trim() || "_unassigned", "narration");
 }
 
 function getAudioOutputUrl(taskId: string | null | undefined, fileName: string) {

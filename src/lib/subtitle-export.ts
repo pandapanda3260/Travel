@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { NarrationDraftClip } from "./narration";
 import type { NarrationResultRecord } from "./narration-result-store";
+import { joinRuntimePublicStoragePath } from "./runtime-storage";
 
 export type SubtitleCue = {
   cueId: string;
@@ -15,7 +16,7 @@ export type SubtitleCue = {
 };
 
 function getSubtitleOutputDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-subtitles", taskId?.trim() || "_unassigned");
+  return joinRuntimePublicStoragePath("generated-subtitles", taskId?.trim() || "_unassigned");
 }
 
 function ensureSubtitleOutputDir(taskId?: string | null) {

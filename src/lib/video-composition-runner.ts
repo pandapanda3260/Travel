@@ -22,17 +22,18 @@ import {
 import { getVideoTask, patchVideoTask } from "./video-task-store";
 import { getVideoTaskStatusIndex } from "./video-task-schema";
 import { upsertVideoJob } from "./video-job-store";
+import { joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
 const execFileAsync = promisify(execFile);
 const packageRequire = createRequire(process.cwd() + "/package.json");
-const tempDir = join(process.cwd(), "data", "composition-temp");
+const tempDir = joinRuntimeDataPath("composition-temp");
 
 function getCompositionOutputDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-compositions", taskId?.trim() || "_unassigned");
+  return joinRuntimePublicStoragePath("generated-compositions", taskId?.trim() || "_unassigned");
 }
 
 function getGeneratedVideoDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-videos", taskId?.trim() || "_unassigned");
+  return joinRuntimePublicStoragePath("generated-videos", taskId?.trim() || "_unassigned");
 }
 
 function resolveFfmpegPath() {
@@ -63,7 +64,7 @@ function getOutputSize(aspectRatio: CompositionAspectRatio) {
 
 function getLocalSourcePath(sourceVideoUrl: string, fileId: string) {
   if (sourceVideoUrl.startsWith("/")) {
-    return join(process.cwd(), "public", sourceVideoUrl);
+    return resolveRuntimeAssetUrlToPath(sourceVideoUrl);
   }
 
   return join(tempDir, `${fileId}-source${sourceVideoUrl.endsWith(".mp3") ? ".mp3" : ".mp4"}`);
@@ -448,7 +449,7 @@ async function burnSubtitles(baseVideoPath: string, record: VideoCompositionReco
     return null;
   }
 
-  const subtitlePath = join(process.cwd(), "public", record.subtitleSrtUrl.replace(/^\//, ""));
+  const subtitlePath = resolveRuntimeAssetUrlToPath(record.subtitleSrtUrl);
   if (!existsSync(subtitlePath)) {
     return null;
   }

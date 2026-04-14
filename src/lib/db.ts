@@ -12,10 +12,11 @@ import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
-const dataDir = join(process.cwd(), "data");
-mkdirSync(dataDir, { recursive: true });
+import { ensureRuntimeDataDir, joinRuntimeDataPath } from "./runtime-storage";
 
-const db = new Database(join(dataDir, "app.db"));
+const dataDir = ensureRuntimeDataDir();
+
+const db = new Database(joinRuntimeDataPath("app.db"));
 
 // WAL 模式：允许并发读，序列化写；NORMAL 同步模式在崩溃时有极小风险但性能更好
 db.pragma("journal_mode = WAL");

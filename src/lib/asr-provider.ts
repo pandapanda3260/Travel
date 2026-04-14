@@ -20,15 +20,12 @@ function normalizeApiBase(apiBase: string) {
  * Reads the file from local disk, encodes to base64, and sends directly.
  * No public URL needed; result is returned synchronously.
  */
-export async function transcribeAudioFile(
-  audioFilePath: string,
-  format: string = "wav",
-): Promise<AsrResult> {
+export async function transcribeAudioFile(audioFilePath: string, format: string = "wav"): Promise<AsrResult> {
   const runtime = getAsrRuntime();
 
   if (!runtime.liveEnabled) {
     throw new Error(
-      "火山方舟 Doubao-录音文件识别2.0 当前未启用，请检查 audio.env.local 中 VOLCENGINE_AUDIO_APP_ID 和 VOLCENGINE_AUDIO_ACCESS_TOKEN 是否已配置。",
+      `火山方舟 Doubao-录音文件识别2.0 当前未启用，请检查 ${runtime.configFileName} 中的 VOLCENGINE_AUDIO_APP_ID 和 VOLCENGINE_AUDIO_ACCESS_TOKEN 是否已配置。`,
     );
   }
 
@@ -37,31 +34,28 @@ export async function transcribeAudioFile(
   const requestId = crypto.randomUUID();
   const apiBase = normalizeApiBase(runtime.apiBase);
 
-  const response = await fetch(
-    `${apiBase}/api/v3/auc/bigmodel/recognize/flash`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Api-App-Key": runtime.appId,
-        "X-Api-Access-Key": runtime.accessToken,
-        "X-Api-Resource-Id": runtime.resourceId,
-        "X-Api-Request-Id": requestId,
-        "X-Api-Sequence": "-1",
-      },
-      body: JSON.stringify({
-        audio: {
-          data: audioBase64,
-          format: format,
-        },
-        request: {
-          model_name: "bigmodel",
-          enable_itn: true,
-          enable_punc: true,
-        },
-      }),
+  const response = await fetch(`${apiBase}/api/v3/auc/bigmodel/recognize/flash`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Api-App-Key": runtime.appId,
+      "X-Api-Access-Key": runtime.accessToken,
+      "X-Api-Resource-Id": runtime.resourceId,
+      "X-Api-Request-Id": requestId,
+      "X-Api-Sequence": "-1",
     },
-  );
+    body: JSON.stringify({
+      audio: {
+        data: audioBase64,
+        format: format,
+      },
+      request: {
+        model_name: "bigmodel",
+        enable_itn: true,
+        enable_punc: true,
+      },
+    }),
+  });
 
   const responseData = (await response.json()) as {
     resp?: { code?: number; message?: string };
@@ -76,17 +70,11 @@ export async function transcribeAudioFile(
   };
 
   if (!response.ok) {
-    throw new Error(
-      responseData.resp?.message ??
-        `语音识别请求失败 (HTTP ${response.status})`,
-    );
+    throw new Error(responseData.resp?.message ?? `语音识别请求失败 (HTTP ${response.status})`);
   }
 
   if (responseData.resp?.code && responseData.resp.code !== 0) {
-    throw new Error(
-      responseData.resp.message ??
-        `语音识别失败 (code: ${responseData.resp.code})`,
-    );
+    throw new Error(responseData.resp.message ?? `语音识别失败 (code: ${responseData.resp.code})`);
   }
 
   return {

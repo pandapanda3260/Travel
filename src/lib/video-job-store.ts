@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import type { KlingGenerationSettings } from "./prompt";
 import type { LiveVideoProvider } from "./video-provider-config";
 
@@ -47,12 +48,11 @@ export type VideoJobRecord = {
 
 const MAX_JOB_LOG_ENTRIES = 80;
 
-const dataDir = join(process.cwd(), "data");
 const COLLECTION = "video-jobs";
-const legacyJsonPath = join(dataDir, "video-jobs.json");
+const legacyJsonPath = joinRuntimeDataPath("video-jobs.json");
 
 function getVideoJobOutputDir(taskId?: string | null) {
-  return join(process.cwd(), "public", "generated-videos", taskId?.trim() || "_unassigned");
+  return joinRuntimePublicStoragePath("generated-videos", taskId?.trim() || "_unassigned");
 }
 
 export function deriveTaskName(prompt: string) {
@@ -67,7 +67,7 @@ export function deriveTaskName(prompt: string) {
 }
 
 function ensureDirectories() {
-  mkdirSync(dataDir, { recursive: true });
+  ensureRuntimeDataDir();
   mkdirSync(getVideoJobOutputDir(), { recursive: true });
   // 首次启动：若 SQLite 为空且旧 JSON 文件存在，自动迁移
   migrateJsonArrayIfNeeded(COLLECTION, legacyJsonPath, (item) => (item as VideoJobRecord).jobId);
@@ -267,7 +267,7 @@ export async function ensureResolvedDurationForJob(jobId: string) {
     return latestJob ?? currentJob;
   }
 
-  const localFilePath = join(process.cwd(), "public", latestJob.videoUrl.slice(1));
+  const localFilePath = resolveRuntimeAssetUrlToPath(latestJob.videoUrl);
   if (!existsSync(localFilePath)) {
     return latestJob;
   }
@@ -294,7 +294,7 @@ export function removeVideoJobLocalArtifacts(job: VideoJobRecord) {
   }
 
   if (job.videoUrl?.startsWith("/")) {
-    const customLocalPath = join(process.cwd(), "public", job.videoUrl.replace(/^\//, ""));
+    const customLocalPath = resolveRuntimeAssetUrlToPath(job.videoUrl);
 
     if (existsSync(customLocalPath)) {
       unlinkSync(customLocalPath);
@@ -303,7 +303,7 @@ export function removeVideoJobLocalArtifacts(job: VideoJobRecord) {
 
   if (job.sourceTaskId) {
     const taskFolder = job.sourceTaskId.trim() || "_unassigned";
-    const clipThumbPath = join(process.cwd(), "public", "generated-videos", taskFolder, "thumbnails", `${jobId}.jpg`);
+    const clipThumbPath = joinRuntimePublicStoragePath("generated-videos", taskFolder, "thumbnails", `${jobId}.jpg`);
     if (existsSync(clipThumbPath)) {
       unlinkSync(clipThumbPath);
     }

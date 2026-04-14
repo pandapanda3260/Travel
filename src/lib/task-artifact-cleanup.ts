@@ -1,14 +1,16 @@
 import { existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { joinRuntimePublicStoragePath } from "./runtime-storage";
+
 function getTaskArtifactRoots() {
   return [
-    join(process.cwd(), "public", "generated-images"),
-    join(process.cwd(), "public", "generated-audio"),
-    join(process.cwd(), "public", "generated-subtitles"),
-    join(process.cwd(), "public", "generated-videos"),
-    join(process.cwd(), "public", "generated-compositions"),
-    join(process.cwd(), "public", "generated-final-videos"),
+    joinRuntimePublicStoragePath("generated-images"),
+    joinRuntimePublicStoragePath("generated-audio"),
+    joinRuntimePublicStoragePath("generated-subtitles"),
+    joinRuntimePublicStoragePath("generated-videos"),
+    joinRuntimePublicStoragePath("generated-compositions"),
+    joinRuntimePublicStoragePath("generated-final-videos"),
   ];
 }
 

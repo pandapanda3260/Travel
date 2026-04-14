@@ -13,6 +13,7 @@ import {
   deriveTaskName,
 } from "./video-job-store";
 import { createVideoJobRecord, scheduleVideoJobPolling } from "./video-job-runner";
+import { resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { submitLipSyncJob } from "./video-provider";
 import { getVideoTask } from "./video-task-store";
 
@@ -20,7 +21,7 @@ function audioFileToBase64(audioUrl: string): string {
   if (!audioUrl.startsWith("/")) {
     throw new Error("仅支持本地音频文件进行口型同步");
   }
-  const absolutePath = join(process.cwd(), "public", audioUrl.replace(/^\//, ""));
+  const absolutePath = resolveRuntimeAssetUrlToPath(audioUrl);
   return readFileSync(absolutePath).toString("base64");
 }
 
