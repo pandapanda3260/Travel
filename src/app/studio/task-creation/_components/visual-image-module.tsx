@@ -3,9 +3,21 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getVideoTaskStatusIndex, type VideoTaskRecord } from "../../../../lib/video-task-schema";
+import {
+  directorPrimaryStepActionKeys,
+  directorSecondaryStepActionKeys,
+  getDirectorPrimaryStepButtonLabel,
+} from "../../../../lib/director-step-actions";
+import { isTaskStageProgressRunning, type TaskStageProgressSnapshot } from "../../../../lib/task-stage-progress";
+import {
+  getVideoTaskStatusIndex,
+  type VideoTaskRecord,
+  usesCapturedMaterialFirstWorkflow,
+} from "../../../../lib/video-task-schema";
 
-import { formatRuntimeDisplay, TaskStatusHintPanel, type TaskStatusHintItem } from "./task-ui";
+import type { VisualPipelineSummary } from "./pipeline-flow";
+import { type TaskStepActionState } from "./task-ui";
+import { useStreamProgress } from "./use-stream-progress";
 
 type VisualImageCandidate = {
   candidateId: string;
@@ -18,12 +30,15 @@ type VisualImageCandidate = {
   score: number;
   scoreLabel: string;
   scoreReasons: string[];
+  source: "generated" | "uploaded";
 };
 
 type VisualImageShot = {
   shotIndex: number;
   shotTitle: string;
   prompt: string;
+  generationMode: string | null;
+  referenceImageUrl: string | null;
   size: string;
   guidanceScale: number;
   watermark: boolean;
@@ -48,24 +63,33 @@ type VisualImageResponse = {
   error?: string;
 };
 
-function formatWatermarkLabel(watermark: boolean) {
-  return watermark ? "有水印" : "无水印";
-}
+type PreviewImageState = {
+  shotIndex: number;
+  candidateId: string;
+  mode: "strip" | "candidate";
+};
 
-function shouldAllowPromptExpand(prompt: string) {
-  return prompt.replace(/\s+/g, "").length > 72;
+function isReferenceBackedMaterialShot(shot: VisualImageShot) {
+  return Boolean(
+    shot.referenceImageUrl &&
+      (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v"),
+  );
 }
 
 export function VisualImageModule({
   task,
+  persistedStageProgress,
   onTaskUpdate,
   onPrimaryActionChange,
+  onSummaryChange,
+  workflowLocked = false,
 }: {
   task: VideoTaskRecord | null;
+  persistedStageProgress?: TaskStageProgressSnapshot | null;
   onTaskUpdate: (task: VideoTaskRecord) => void;
-  onPrimaryActionChange?:
-    | ((config: { label: string; disabled: boolean; onAction: () => void } | null) => void)
-    | undefined;
+  onPrimaryActionChange?: ((config: TaskStepActionState | null) => void) | undefined;
+  onSummaryChange?: ((summary: VisualPipelineSummary | null) => void) | undefined;
+  workflowLocked?: boolean;
 }) {
   const taskId = task?.taskId ?? null;
   const [shots, setShots] = useState<VisualImageShot[]>([]);
@@ -74,42 +98,51 @@ export function VisualImageModule({
   const [generatingAll, setGeneratingAll] = useState(false);
   const [generatingShotIndex, setGeneratingShotIndex] = useState<number | null>(null);
   const [submittingShotIndex, setSubmittingShotIndex] = useState<number | null>(null);
-  const [expandedPromptKeys, setExpandedPromptKeys] = useState<string[]>([]);
-  const [previewImage, setPreviewImage] = useState<{ imageUrl: string; title: string } | null>(null);
-  const [runtimeLabel, setRuntimeLabel] = useState("Doubao-Seedream-4.5");
-  const [runtimeModelId, setRuntimeModelId] = useState("");
-  const [runtimeLiveEnabled, setRuntimeLiveEnabled] = useState(true);
+  const [activeShotIndex, setActiveShotIndex] = useState<number | null>(null);
+  const [previewImage, setPreviewImage] = useState<PreviewImageState | null>(null);
+  const batchStreamProgress = useStreamProgress();
+  const batchProgressMessage = batchStreamProgress.progress.message;
+  const batchProgressValue = batchStreamProgress.progress.percent;
+  const readBatchStream = batchStreamProgress.readStream;
+  const resetBatchStream = batchStreamProgress.reset;
+
+  const loadShots = useCallback(
+    async (silently = false) => {
+      if (!taskId) {
+        setShots([]);
+        setLoadingStatus("idle");
+        return [] as VisualImageShot[];
+      }
+
+      if (!silently) {
+        setLoadingStatus("loading");
+      }
+      setError(null);
+
+      const response = await fetch(`/api/video-tasks/${taskId}/visual-images`, { cache: "no-store" });
+      const data = (await response.json()) as VisualImageResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "视觉图片加载失败");
+      }
+
+      const nextShots = data.shots ?? [];
+      setShots(nextShots);
+      if (data.task) {
+        onTaskUpdate(data.task);
+      }
+      setLoadingStatus("success");
+      return nextShots;
+    },
+    [onTaskUpdate, taskId],
+  );
 
   useEffect(() => {
     let isActive = true;
 
-    const loadShots = async () => {
-      if (!taskId) {
-        setShots([]);
-        setLoadingStatus("idle");
-        return;
-      }
-
-      setLoadingStatus("loading");
-      setError(null);
-
+    const run = async () => {
       try {
-        const response = await fetch(`/api/video-tasks/${taskId}/visual-images`, { cache: "no-store" });
-        const data = (await response.json()) as VisualImageResponse;
-
-        if (!response.ok) {
-          throw new Error(data.error ?? "视觉图片加载失败");
-        }
-
-        if (!isActive) {
-          return;
-        }
-
-        setShots(data.shots ?? []);
-        setRuntimeLabel(data.runtime?.providerLabel ?? "Doubao-Seedream-4.5");
-        setRuntimeModelId(data.runtime?.modelId ?? "");
-        setRuntimeLiveEnabled(data.runtime?.liveEnabled ?? true);
-        setLoadingStatus("success");
+        await loadShots();
       } catch (loadError) {
         if (!isActive) {
           return;
@@ -119,108 +152,161 @@ export function VisualImageModule({
       }
     };
 
-    void loadShots();
+    void run();
 
     return () => {
       isActive = false;
     };
-  }, [taskId]);
+  }, [loadShots]);
 
-  const hasGeneratedShots = useMemo(() => shots.some((shot) => shot.candidates.length > 0), [shots]);
   const subtitleAudioReadyIndex = getVideoTaskStatusIndex("SUBTITLE_AUDIO_READY");
   const imagesReadyIndex = getVideoTaskStatusIndex("IMAGES_READY");
   const currentStatusIndex = task ? getVideoTaskStatusIndex(task.status) : -1;
+  const capturedMaterialFirst = task ? usesCapturedMaterialFirstWorkflow(task.parameters.video.videoType) : false;
   const prevStepSucceeded = currentStatusIndex >= subtitleAudioReadyIndex;
   const visualStageComplete = currentStatusIndex >= imagesReadyIndex;
+  const shotTotal = shots.length;
+  const generatedShotCount = useMemo(() => shots.filter((shot) => shot.candidates.length > 0).length, [shots]);
+  const materialBackedShotCount = useMemo(() => shots.filter(isReferenceBackedMaterialShot).length, [shots]);
+  const pendingMaterialBackedCount = useMemo(
+    () => shots.filter((shot) => isReferenceBackedMaterialShot(shot) && shot.candidates.length === 0).length,
+    [shots],
+  );
+  const pendingAiFallbackCount = useMemo(
+    () => shots.filter((shot) => !isReferenceBackedMaterialShot(shot) && shot.candidates.length === 0).length,
+    [shots],
+  );
+  const hasPartialGeneratedShots = shotTotal > 0 && generatedShotCount > 0 && generatedShotCount < shotTotal;
+  const allShotsGenerated = shotTotal > 0 && generatedShotCount === shotTotal;
+  const shouldShowRerun = visualStageComplete || allShotsGenerated;
+  const persistedRunning = isTaskStageProgressRunning(persistedStageProgress);
+  const visualStageRunning = generatingAll || persistedRunning;
+  const generationMutationLocked = workflowLocked || visualStageRunning;
+  const shouldPollGeneratedShots = !generatingAll && (persistedRunning || workflowLocked);
+  const isInitialVisualListLoading = Boolean(
+    taskId && (loadingStatus === "idle" || loadingStatus === "loading") && !shots.length,
+  );
+  const batchProgressPercent = generatingAll
+    ? batchProgressValue
+    : persistedRunning
+      ? (persistedStageProgress?.percent ?? 0)
+      : 0;
+  const activeShot = useMemo(
+    () => shots.find((shot) => shot.shotIndex === activeShotIndex) ?? shots[0] ?? null,
+    [activeShotIndex, shots],
+  );
+  const previewShot = useMemo(
+    () => (previewImage ? (shots.find((shot) => shot.shotIndex === previewImage.shotIndex) ?? null) : null),
+    [previewImage, shots],
+  );
+  const previewCandidateIndex = useMemo(() => {
+    if (!previewImage || !previewShot) {
+      return -1;
+    }
+    return previewShot.candidates.findIndex((candidate) => candidate.candidateId === previewImage.candidateId);
+  }, [previewImage, previewShot]);
+  const previewCandidate =
+    previewShot && previewCandidateIndex >= 0 ? previewShot.candidates[previewCandidateIndex] : null;
+  const previewMode = previewImage?.mode ?? "candidate";
+  const previewHasPrevious = previewMode === "candidate" && previewCandidateIndex > 0;
+  const previewHasNext =
+    previewMode === "candidate" &&
+    previewShot !== null &&
+    previewCandidateIndex >= 0 &&
+    previewCandidateIndex < previewShot.candidates.length - 1;
+  const previewIsSelected = Boolean(
+    previewShot && previewCandidate && previewShot.selectedCandidateId === previewCandidate.candidateId,
+  );
 
   const primaryActionLabel = useMemo(() => {
-    if (generatingAll) {
-      return "生成中...";
+    if (isInitialVisualListLoading) {
+      return capturedMaterialFirst ? "素材镜头列表加载中..." : "参考图列表加载中...";
     }
-    if (visualStageComplete) {
-      return "重新生成图片";
+
+    if (capturedMaterialFirst) {
+      if (visualStageRunning) {
+        return batchProgressMessage || persistedStageProgress?.message || "素材镜头处理中...";
+      }
+      if (shouldShowRerun && materialBackedShotCount > 0) {
+        return "重新同步素材镜头";
+      }
+      if (pendingMaterialBackedCount > 0) {
+        return `同步素材镜头（${materialBackedShotCount - pendingMaterialBackedCount}/${materialBackedShotCount}）`;
+      }
+      if (pendingAiFallbackCount > 0) {
+        return `补齐 AI 镜头（${shotTotal - pendingAiFallbackCount}/${shotTotal}）`;
+      }
+      return "确认素材镜头";
     }
-    return "点击进行下一步";
-  }, [generatingAll, visualStageComplete]);
 
-  const visualHintItems = useMemo((): TaskStatusHintItem[] => {
-    const total = shots.length;
-    const withCandidates = shots.filter((s) => s.candidates.length > 0).length;
-    const withSelection = shots.filter((s) => s.selectedCandidate).length;
-    const loadTone: TaskStatusHintItem["tone"] =
-      loadingStatus === "error"
-        ? "danger"
-        : loadingStatus === "success"
-          ? "success"
-          : loadingStatus === "loading"
-            ? "progress"
-            : "neutral";
-    const loadValue =
-      loadingStatus === "loading"
-        ? "加载中"
-        : loadingStatus === "success"
-          ? "已同步"
-          : loadingStatus === "error"
-            ? "失败（可看顶部报错）"
-            : "待加载";
-
-    return [
-      {
-        label: "上游字幕音频",
-        value: prevStepSucceeded ? "已完成（可批量出图）" : "未完成（主按钮禁用）",
-        tone: prevStepSucceeded ? "success" : "danger",
-      },
-      {
-        label: "视觉列表接口",
-        value: loadValue,
-        tone: loadTone,
-      },
-      {
-        label: "图片生成模型",
-        value: formatRuntimeDisplay({
-          providerLabel: runtimeLabel,
-          modelId: runtimeModelId,
-          liveEnabled: runtimeLiveEnabled,
-          offlineLabel: "离线/不可用",
-        }),
-        tone: runtimeLiveEnabled ? "success" : "danger",
-      },
-      {
-        label: "镜头数量",
-        value: total ? `${total} 镜` : "暂无数据",
-        tone: total ? "neutral" : "progress",
-      },
-      {
-        label: "候选图覆盖",
-        value: total ? `${withCandidates}/${total} 镜已出候选` : "—",
-        tone: !total ? "neutral" : withCandidates === total ? "success" : withCandidates > 0 ? "progress" : "danger",
-      },
-      {
-        label: "定稿选图",
-        value: total ? `${withSelection}/${total} 镜已选定` : "—",
-        tone: !total ? "neutral" : withSelection === total ? "success" : "danger",
-      },
-      {
-        label: "任务状态位",
-        value: task?.status ?? "—",
-        tone: visualStageComplete ? "success" : "neutral",
-      },
-    ];
+    const base = capturedMaterialFirst
+      ? visualStageRunning
+        ? "同步中..."
+        : shouldShowRerun
+          ? "重新同步素材镜头"
+          : "同步素材镜头"
+      : getDirectorPrimaryStepButtonLabel(directorPrimaryStepActionKeys.buildVisualReferences, {
+          running: visualStageRunning,
+          rerun: shouldShowRerun,
+        });
+    if (!visualStageRunning && hasPartialGeneratedShots) {
+      return `${capturedMaterialFirst ? "继续同步素材镜头" : "继续生成参考图"}（${generatedShotCount}/${shotTotal}）`;
+    }
+    if (generatingAll && batchProgressMessage) {
+      return batchProgressMessage;
+    }
+    if (persistedRunning && persistedStageProgress?.message) {
+      return persistedStageProgress.message;
+    }
+    return base;
   }, [
-    loadingStatus,
-    prevStepSucceeded,
-    runtimeLabel,
-    runtimeLiveEnabled,
-    runtimeModelId,
-    shots,
-    task?.status,
-    visualStageComplete,
+    batchProgressMessage,
+    generatingAll,
+    generatedShotCount,
+    hasPartialGeneratedShots,
+    persistedRunning,
+    persistedStageProgress?.message,
+    pendingAiFallbackCount,
+    pendingMaterialBackedCount,
+    materialBackedShotCount,
+    shouldShowRerun,
+    shotTotal,
+    visualStageRunning,
+    capturedMaterialFirst,
+    isInitialVisualListLoading,
   ]);
+
+  useEffect(() => {
+    if (!onSummaryChange) {
+      return;
+    }
+
+    if (!task || loadingStatus !== "success") {
+      onSummaryChange(null);
+      return;
+    }
+
+    onSummaryChange({
+      totalCount: shotTotal,
+      candidateReadyCount: shots.filter((shot) => shot.candidates.length > 0).length,
+      finalSelectedCount: shots.filter((shot) => Boolean(shot.selectedCandidate)).length,
+    });
+  }, [loadingStatus, onSummaryChange, shotTotal, shots, task]);
+
+  useEffect(() => {
+    if (!onSummaryChange) {
+      return;
+    }
+
+    return () => {
+      onSummaryChange(null);
+    };
+  }, [onSummaryChange]);
 
   const submitAction = useCallback(
     async (body: Record<string, unknown>) => {
       if (!taskId) {
-        return;
+        return [] as VisualImageShot[];
       }
 
       const response = await fetch(`/api/video-tasks/${taskId}/visual-images`, {
@@ -236,15 +322,14 @@ export function VisualImageModule({
         throw new Error(data.error ?? "视觉图片操作失败");
       }
 
-      setShots(data.shots ?? []);
-      setRuntimeLabel(data.runtime?.providerLabel ?? runtimeLabel);
-      setRuntimeModelId(data.runtime?.modelId ?? runtimeModelId);
-      setRuntimeLiveEnabled(data.runtime?.liveEnabled ?? runtimeLiveEnabled);
+      const nextShots = data.shots ?? [];
+      setShots(nextShots);
       if (data.task) {
         onTaskUpdate(data.task);
       }
+      return nextShots;
     },
-    [onTaskUpdate, runtimeLabel, runtimeLiveEnabled, runtimeModelId, taskId],
+    [onTaskUpdate, taskId],
   );
 
   const handleGenerateAll = useCallback(async () => {
@@ -252,13 +337,57 @@ export function VisualImageModule({
     setError(null);
 
     try {
-      await submitAction({ action: "generate_all" });
+      if (
+        capturedMaterialFirst &&
+        materialBackedShotCount > 0 &&
+        (pendingMaterialBackedCount > 0 || shouldShowRerun)
+      ) {
+        await submitAction({
+          action: "sync_captured_material_shots",
+          force: shouldShowRerun,
+        });
+        return;
+      }
+
+      const data = await readBatchStream<VisualImageResponse>(`/api/video-tasks/${taskId}/visual-images`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: directorPrimaryStepActionKeys.buildVisualReferences,
+          regenerateAll: shouldShowRerun,
+        }),
+      });
+
+      const nextShots = data.shots ?? [];
+      setShots(nextShots);
+      if (data.task) {
+        onTaskUpdate(data.task);
+      }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "视觉图片生成失败");
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : capturedMaterialFirst
+            ? "素材镜头同步失败"
+            : "视觉图片生成失败",
+      );
     } finally {
       setGeneratingAll(false);
+      resetBatchStream();
     }
-  }, [submitAction]);
+  }, [
+    capturedMaterialFirst,
+    materialBackedShotCount,
+    onTaskUpdate,
+    pendingMaterialBackedCount,
+    readBatchStream,
+    resetBatchStream,
+    shouldShowRerun,
+    submitAction,
+    taskId,
+  ]);
 
   useEffect(() => {
     if (!onPrimaryActionChange) {
@@ -270,33 +399,92 @@ export function VisualImageModule({
       return;
     }
 
+    const blockedReason = !prevStepSucceeded
+      ? capturedMaterialFirst
+        ? "请先完成字幕配音，再同步素材镜头。"
+        : "请先完成字幕配音，再生成参考图。"
+      : isInitialVisualListLoading
+        ? capturedMaterialFirst
+          ? "素材镜头列表加载中，请稍后再试。"
+          : "参考图列表加载中，请稍后再试。"
+        : loadingStatus === "success" && shotTotal === 0
+          ? capturedMaterialFirst
+            ? "当前没有可同步的素材镜头，请先检查镜头规划。"
+            : "当前没有可出图镜头，请先检查镜头规划。"
+          : null;
+
     onPrimaryActionChange({
       label: primaryActionLabel,
-      disabled: generatingAll || loadingStatus === "loading" || !prevStepSucceeded,
+      isRunning: visualStageRunning || isInitialVisualListLoading,
+      progressPercent: batchProgressPercent,
+      canRun: !blockedReason,
+      blockedReason,
       onAction: () => {
         void handleGenerateAll();
       },
     });
+  }, [
+    visualStageRunning,
+    handleGenerateAll,
+    isInitialVisualListLoading,
+    loadingStatus,
+    onPrimaryActionChange,
+    batchProgressPercent,
+    prevStepSucceeded,
+    primaryActionLabel,
+    shotTotal,
+    taskId,
+    capturedMaterialFirst,
+  ]);
+
+  useEffect(() => {
+    if (!taskId || !shouldPollGeneratedShots) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadShots(true);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [loadShots, shouldPollGeneratedShots, taskId]);
+
+  useEffect(() => {
+    if (!onPrimaryActionChange) {
+      return;
+    }
 
     return () => {
       onPrimaryActionChange(null);
     };
-  }, [
-    generatingAll,
-    handleGenerateAll,
-    loadingStatus,
-    onPrimaryActionChange,
-    prevStepSucceeded,
-    primaryActionLabel,
-    taskId,
-  ]);
+  }, [onPrimaryActionChange]);
+
+  useEffect(() => {
+    if (!previewImage) {
+      return;
+    }
+    if (!previewShot || !previewCandidate) {
+      setPreviewImage(null);
+    }
+  }, [previewCandidate, previewImage, previewShot]);
+
+  useEffect(() => {
+    if (!shots.length) {
+      setActiveShotIndex(null);
+      return;
+    }
+
+    setActiveShotIndex((current) => (shots.some((shot) => shot.shotIndex === current) ? current : shots[0].shotIndex));
+  }, [shots]);
 
   async function handleGenerateShot(shotIndex: number) {
     setGeneratingShotIndex(shotIndex);
     setError(null);
 
     try {
-      await submitAction({ action: "generate_shot", shotIndex });
+      await submitAction({ action: directorSecondaryStepActionKeys.regenerateShotImages, shotIndex });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "镜头图片生成失败");
     } finally {
@@ -309,7 +497,7 @@ export function VisualImageModule({
     setError(null);
 
     try {
-      await submitAction({ action: "select_candidate", shotIndex, candidateId });
+      await submitAction({ action: directorSecondaryStepActionKeys.selectVisualCandidate, shotIndex, candidateId });
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "选择图片失败");
     } finally {
@@ -317,143 +505,161 @@ export function VisualImageModule({
     }
   }
 
-  async function handleClearSelection(shotIndex: number) {
-    setSubmittingShotIndex(shotIndex);
+  const [uploadingShotIndex, setUploadingShotIndex] = useState<number | null>(null);
+
+  async function handleUploadImage(shotIndex: number, event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !taskId) return;
+
+    setUploadingShotIndex(shotIndex);
     setError(null);
 
     try {
-      await submitAction({ action: "clear_selection", shotIndex });
+      const formData = new FormData();
+      formData.append("action", "upload_image");
+      formData.append("shotIndex", String(shotIndex));
+      formData.append("file", file);
+
+      const response = await fetch(`/api/video-tasks/${taskId}/visual-images`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = (await response.json()) as {
+        shots?: VisualImageShot[];
+        task?: Record<string, unknown>;
+        runtime?: { providerLabel?: string; modelId?: string; liveEnabled?: boolean };
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "上传图片失败");
+      }
+
+      if (data.shots) setShots(data.shots);
+      if (data.task) onTaskUpdate(data.task as Parameters<typeof onTaskUpdate>[0]);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "重新选择失败");
+      setError(submitError instanceof Error ? submitError.message : "上传图片失败");
     } finally {
-      setSubmittingShotIndex(null);
+      setUploadingShotIndex(null);
+      event.target.value = "";
     }
   }
 
-  function togglePromptExpand(key: string) {
-    setExpandedPromptKeys((current) =>
-      current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
-    );
+  function openPreview(shotIndex: number, candidateId: string, mode: "strip" | "candidate" = "candidate") {
+    setPreviewImage({ shotIndex, candidateId, mode });
+  }
+
+  function handleSelectShot(shot: VisualImageShot) {
+    if (activeShot?.shotIndex === shot.shotIndex) {
+      if (shot.selectedCandidate) {
+        openPreview(shot.shotIndex, shot.selectedCandidate.candidateId, "strip");
+      }
+      return;
+    }
+
+    setActiveShotIndex(shot.shotIndex);
+  }
+
+  function handlePreviewNavigate(direction: "prev" | "next") {
+    if (!previewShot || previewCandidateIndex < 0) {
+      return;
+    }
+
+    const nextIndex = direction === "prev" ? previewCandidateIndex - 1 : previewCandidateIndex + 1;
+    const nextCandidate = previewShot.candidates[nextIndex];
+    if (!nextCandidate) {
+      return;
+    }
+
+    setPreviewImage({ shotIndex: previewShot.shotIndex, candidateId: nextCandidate.candidateId, mode: "candidate" });
   }
 
   if (!task) {
     return <div className="task-module-empty">完成字幕音频制作后，这里会按镜头生成视觉图片并供你逐张确认。</div>;
   }
 
+  if (isInitialVisualListLoading) {
+    return <div className="task-module-empty">{capturedMaterialFirst ? "素材镜头列表加载中…" : "参考图列表加载中…"}</div>;
+  }
+
   return (
     <div className="task-visual-image-module">
       {error ? <div className="error-box">{error}</div> : null}
-      <TaskStatusHintPanel
-        description="关注上游字幕是否完成、列表接口是否可用、候选图是否全覆盖，以及是否每镜选定参考图；未定稿会直接阻塞片段生成。"
-        items={visualHintItems}
-      />
-      <div className="task-visual-image-toolbar">
-        <span>
-          {hasGeneratedShots
-            ? "已为镜头生成候选视觉图，可继续选择或单镜头重生。"
-            : "根据文生图提示词与当前图片参数，为每个镜头生成 6 张视觉候选图。"}
-        </span>
-      </div>
-
+      {workflowLocked ? (
+        <div className="notice-bar compact inline">
+          <strong>关键素材任务执行中</strong>
+          <span>已生成的镜头图组可以先选择，生成和上传操作会在流程结束后开放。</span>
+        </div>
+      ) : null}
       <div className="task-visual-image-stack">
-        {shots.map((shot) => {
-          const isExpanded = expandedPromptKeys.includes(`shot-${shot.shotIndex}`);
-          const hasSelection = Boolean(shot.selectedCandidate);
-          const shouldShowExpand = shouldAllowPromptExpand(shot.prompt);
-
-          return (
-            <article key={shot.shotIndex} className="task-visual-shot-card">
-              <div className="task-visual-shot-selected">
-                <div className="task-visual-shot-selected-media">
-                  {shot.selectedCandidate ? (
-                    <button
-                      className="task-visual-shot-selected-trigger image-preview-trigger"
-                      type="button"
-                      onClick={() =>
-                        setPreviewImage({
-                          imageUrl: shot.selectedCandidate!.imageUrl,
-                          title: `${shot.shotTitle} 已选图片`,
-                        })
-                      }
-                    >
-                      <Image
-                        src={shot.selectedCandidate.imageUrl}
-                        alt={`${shot.shotTitle} 已选图片`}
-                        width={900}
-                        height={1350}
-                        unoptimized
-                      />
-                    </button>
-                  ) : (
-                    <div className="task-visual-shot-empty">请在右方选择视觉图</div>
-                  )}
-                </div>
-                <p className="task-visual-shot-selected-label">{`${shot.shotTitle}  已选图片`}</p>
+        {shots.length ? (
+          <>
+            <section className="task-visual-shot-strip-card">
+              <div className="task-visual-shot-strip-head">
+                <strong className="task-visual-section-title">镜头选择</strong>
               </div>
-
-              <div className="task-visual-shot-meta">
-                <div className="task-visual-shot-meta-head">
-                  <strong>{shot.shotTitle}</strong>
-                </div>
-                <div className="task-visual-shot-prompt-wrap">
-                  <p className={`task-visual-shot-prompt ${isExpanded ? "expanded" : ""}`}>{shot.prompt}</p>
-                  {shouldShowExpand ? (
+              <div className="task-visual-shot-strip-list">
+                {shots.map((shot) => {
+                  const isActive = activeShot?.shotIndex === shot.shotIndex;
+                  return (
                     <button
-                      className="task-visual-shot-expand"
+                      key={shot.shotIndex}
+                      className={`task-visual-shot-strip-item ${isActive ? "active" : ""}`}
                       type="button"
-                      onClick={() => togglePromptExpand(`shot-${shot.shotIndex}`)}
+                      onClick={() => handleSelectShot(shot)}
                     >
-                      <span>{isExpanded ? "收起" : "展开"}</span>
-                      <span className={`task-visual-shot-expand-icon ${isExpanded ? "expanded" : ""}`}>⌄</span>
+                      <div className="task-visual-shot-strip-media">
+                        {shot.selectedCandidate ? (
+                          <Image
+                            src={shot.selectedCandidate.imageUrl}
+                            alt={`镜头${shot.shotIndex}已选图片`}
+                            width={900}
+                            height={1350}
+                            unoptimized
+                          />
+                        ) : (
+                          <div className="task-visual-shot-empty">{capturedMaterialFirst ? "待同步" : "待选图"}</div>
+                        )}
+                      </div>
+                      <span className="task-visual-shot-strip-label">{`镜头${shot.shotIndex}`}</span>
                     </button>
-                  ) : null}
-                </div>
-                <div className="task-visual-shot-params">
-                  <span>{shot.size}</span>
-                  <span>{`细节档 ${shot.guidanceScale}`}</span>
-                  <span>{formatWatermarkLabel(shot.watermark)}</span>
-                  <span>{new Date(shot.generatedAt ?? shot.updatedAt ?? task.updatedAt).toLocaleString("zh-CN")}</span>
-                </div>
-                <div className="task-visual-shot-actions">
-                  <button
-                    className="btn-pill"
-                    type="button"
-                    disabled={!shot.selectedCandidate}
-                    onClick={() =>
-                      shot.selectedCandidate &&
-                      setPreviewImage({ imageUrl: shot.selectedCandidate.imageUrl, title: `${shot.shotTitle} 原图` })
-                    }
-                  >
-                    查看大图
-                  </button>
-                  <button
-                    className="btn-pill"
-                    type="button"
-                    disabled={!hasSelection || submittingShotIndex === shot.shotIndex}
-                    onClick={() => void handleClearSelection(shot.shotIndex)}
-                  >
-                    重新选择
-                  </button>
-                </div>
+                  );
+                })}
               </div>
+            </section>
 
-              <div className="task-visual-shot-picker">
+            {activeShot ? (
+              <section className="task-visual-shot-picker-card">
                 <div className="task-visual-shot-picker-head">
-                  <strong>图片选择区域</strong>
-                  <button
-                    className="btn-pill"
-                    type="button"
-                    disabled={generatingShotIndex === shot.shotIndex}
-                    onClick={() => void handleGenerateShot(shot.shotIndex)}
-                  >
-                    {generatingShotIndex === shot.shotIndex ? "重新生成中..." : "重新生成一批"}
-                  </button>
+                  <strong className="task-visual-section-title">{`${
+                    capturedMaterialFirst ? "素材确认" : "图片选择"
+                  }（当前镜头${activeShot.shotIndex}）`}</strong>
+                  <div className="task-visual-shot-picker-actions">
+                    <label className="btn-pill task-visual-upload-label">
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(event) => void handleUploadImage(activeShot.shotIndex, event)}
+                        disabled={uploadingShotIndex === activeShot.shotIndex || generationMutationLocked}
+                        hidden
+                      />
+                      {uploadingShotIndex === activeShot.shotIndex ? "上传中..." : "上传图片"}
+                    </label>
+                    <button
+                      className="btn-pill"
+                      type="button"
+                      disabled={generatingShotIndex === activeShot.shotIndex || generationMutationLocked}
+                      onClick={() => void handleGenerateShot(activeShot.shotIndex)}
+                    >
+                      {generatingShotIndex === activeShot.shotIndex ? "重新生成中..." : "重新生成一批"}
+                    </button>
+                  </div>
                 </div>
                 <div className="task-visual-shot-candidate-list">
-                  {shot.candidates.length ? (
-                    shot.candidates.map((candidate) => {
-                      const isRecommended = candidate.candidateId === shot.recommendedCandidateId;
-                      const isSelected = candidate.candidateId === shot.selectedCandidateId;
+                  {activeShot.candidates.length ? (
+                    activeShot.candidates.map((candidate) => {
+                      const isRecommended = candidate.candidateId === activeShot.recommendedCandidateId;
+                      const isSelected = candidate.candidateId === activeShot.selectedCandidateId;
                       return (
                         <article
                           key={candidate.candidateId}
@@ -462,61 +668,72 @@ export function VisualImageModule({
                           <button
                             className="task-visual-shot-candidate-trigger image-preview-trigger"
                             type="button"
-                            onClick={() =>
-                              setPreviewImage({ imageUrl: candidate.imageUrl, title: `${shot.shotTitle} 候选图` })
-                            }
+                            onClick={() => openPreview(activeShot.shotIndex, candidate.candidateId, "candidate")}
                           >
                             <Image
                               src={candidate.imageUrl}
-                              alt={`${shot.shotTitle} 候选图`}
+                              alt={`镜头 ${activeShot.shotIndex} 候选图`}
                               width={1200}
                               height={900}
                               unoptimized
                             />
                           </button>
                           <div className="task-visual-shot-candidate-foot">
-                            <div className="task-visual-shot-candidate-tags">
-                              {isRecommended ? (
-                                <span className="task-visual-shot-recommended">✓ 系统推荐</span>
-                              ) : (
-                                <span className="task-visual-shot-score">{candidate.scoreLabel}</span>
-                              )}
-                            </div>
                             <button
-                              className="btn-pill"
+                              className={`btn-pill task-visual-shot-select-button ${isSelected ? "is-selected" : ""}`}
                               type="button"
-                              disabled={hasSelection || submittingShotIndex === shot.shotIndex}
-                              onClick={() => void handleSelectCandidate(shot.shotIndex, candidate.candidateId)}
+                              disabled={
+                                isSelected ||
+                                submittingShotIndex === activeShot.shotIndex ||
+                                generatingShotIndex === activeShot.shotIndex
+                              }
+                              onClick={() => void handleSelectCandidate(activeShot.shotIndex, candidate.candidateId)}
                             >
-                              {isSelected ? "已选择" : "选择这一张"}
+                              {isSelected ? "✓ 已选择" : "选择这一张"}
                             </button>
+                            <div className="task-visual-shot-candidate-tags">
+                              {candidate.source === "uploaded" ? (
+                                <span className="task-visual-shot-score">用户上传</span>
+                              ) : isRecommended ? (
+                                <span className="task-visual-shot-recommended">✓ 系统推荐</span>
+                              ) : null}
+                            </div>
                           </div>
                         </article>
                       );
                     })
                   ) : (
                     <div className="task-visual-shot-candidate-empty">
-                      点击“重新生成一批”或上方批量按钮后，这里会展示该镜头的 6 张候选图。
+                      {workflowLocked || visualStageRunning
+                        ? "当前镜头图组生成中。"
+                        : "这里会展示所选镜头的 6 张候选图。"}
                     </div>
                   )}
                 </div>
-              </div>
-            </article>
-          );
-        })}
+              </section>
+            ) : null}
+          </>
+        ) : (
+          <div className="task-module-empty">当前任务还没有可选参考图。</div>
+        )}
       </div>
 
-      {previewImage ? (
+      {previewImage && previewShot && previewCandidate ? (
         <div className="modal-overlay" role="presentation" onClick={() => setPreviewImage(null)}>
           <div
-            className="modal-panel image-preview-panel"
+            className={`modal-panel image-preview-panel${previewMode === "strip" ? " image-preview-panel--single" : ""}`}
             role="dialog"
             aria-modal="true"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="modal-head">
               <div>
-                <h3>{previewImage.title}</h3>
+                <h3>
+                  {previewMode === "strip" ? `${previewShot.shotTitle}已选图片` : `${previewShot.shotTitle} 候选图`}
+                </h3>
+                {previewMode === "candidate" ? (
+                  <p className="modal-head-subtitle">{`第 ${previewCandidateIndex + 1} / ${previewShot.candidates.length} 张`}</p>
+                ) : null}
               </div>
               <button className="btn-secondary small" type="button" onClick={() => setPreviewImage(null)}>
                 关闭
@@ -524,8 +741,60 @@ export function VisualImageModule({
             </div>
             <div className="modal-body image-preview-body">
               <div className="image-preview-stage">
-                <Image src={previewImage.imageUrl} alt={previewImage.title} width={1600} height={1600} unoptimized />
+                <div className="image-preview-canvas">
+                  {previewMode === "candidate" ? (
+                    <button
+                      className="image-preview-nav image-preview-nav-prev"
+                      type="button"
+                      disabled={!previewHasPrevious}
+                      aria-label="上一张图片"
+                      onClick={() => handlePreviewNavigate("prev")}
+                    >
+                      {"<"}
+                    </button>
+                  ) : null}
+                  <Image
+                    src={previewCandidate.imageUrl}
+                    alt={
+                      previewMode === "strip" ? `${previewShot.shotTitle}已选图片` : `${previewShot.shotTitle} 候选图`
+                    }
+                    width={1600}
+                    height={1600}
+                    unoptimized
+                  />
+                  {previewMode === "candidate" ? (
+                    <button
+                      className="image-preview-nav image-preview-nav-next"
+                      type="button"
+                      disabled={!previewHasNext}
+                      aria-label="下一张图片"
+                      onClick={() => handlePreviewNavigate("next")}
+                    >
+                      {">"}
+                    </button>
+                  ) : null}
+                </div>
               </div>
+              {previewMode === "candidate" ? (
+                <div className="image-preview-actions">
+                  <button
+                    className="btn-primary small image-preview-select-button"
+                    type="button"
+                    disabled={
+                      previewIsSelected ||
+                      submittingShotIndex === previewShot.shotIndex ||
+                      generatingShotIndex === previewShot.shotIndex
+                    }
+                    onClick={() => void handleSelectCandidate(previewShot.shotIndex, previewCandidate.candidateId)}
+                  >
+                    {previewIsSelected
+                      ? "已选择这一张"
+                      : submittingShotIndex === previewShot.shotIndex
+                        ? "选择中..."
+                        : "选择这一张"}
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>

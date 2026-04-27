@@ -22,6 +22,7 @@ export type ProductArchiveParsedData = {
 
 export type ProductArchiveRecord = {
   archiveId: string;
+  ownerUserId: string | null;
   title: string;
   sourceImageUrl: string | null;
   sourceImageFileName: string | null;
@@ -79,6 +80,7 @@ function normalizeRecord(record: Partial<ProductArchiveRecord>): ProductArchiveR
 
   return {
     archiveId: record.archiveId ?? crypto.randomUUID(),
+    ownerUserId: record.ownerUserId ?? null,
     title: record.title ?? parsedData.summaryTitle ?? "未命名商品档案",
     sourceImageUrl: record.sourceImageUrl ?? null,
     sourceImageFileName: record.sourceImageFileName ?? null,
@@ -124,15 +126,23 @@ export function listProductArchives() {
   return readStore().sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
+export function listAccessibleProductArchives(userId: string) {
+  return listProductArchives().filter((item) => item.ownerUserId === null || item.ownerUserId === userId);
+}
+
+export function countOwnedProductArchives(userId: string) {
+  return listProductArchives().filter((item) => item.ownerUserId === userId).length;
+}
+
 export function getProductArchive(archiveId: string) {
   return readStore().find((item) => item.archiveId === archiveId) ?? null;
 }
 
-export function createProductArchive() {
-  const records = readStore();
+export function createProductArchive(input?: { ownerUserId?: string | null }) {
   const now = new Date().toISOString();
   const record: ProductArchiveRecord = {
     archiveId: crypto.randomUUID(),
+    ownerUserId: input?.ownerUserId ?? null,
     title: "未命名商品档案",
     sourceImageUrl: null,
     sourceImageFileName: null,

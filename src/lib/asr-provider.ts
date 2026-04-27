@@ -1,6 +1,8 @@
+import { statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 
 import { getAsrRuntime } from "./asr-provider-config";
+import { recordModelUsage } from "./model-usage-service";
 
 export type AsrResult = {
   text: string;
@@ -13,6 +15,20 @@ export type AsrResult = {
 
 function normalizeApiBase(apiBase: string) {
   return apiBase.replace(/\/$/, "");
+}
+
+function estimateAudioSeconds(audioFilePath: string, format: string) {
+  if (format !== "wav") {
+    return 0;
+  }
+
+  try {
+    const fileSize = statSync(audioFilePath).size;
+    const pcmBytes = Math.max(fileSize - 44, 0);
+    return Math.max(pcmBytes / 32000, 0);
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -76,6 +92,19 @@ export async function transcribeAudioFile(audioFilePath: string, format: string 
   if (responseData.resp?.code && responseData.resp.code !== 0) {
     throw new Error(responseData.resp.message ?? `语音识别失败 (code: ${responseData.resp.code})`);
   }
+
+  recordModelUsage({
+    pricingKey: "doubao.asr.file.2.0",
+    serviceName: "audio.asr",
+    provider: runtime.providerLabel,
+    modelId: runtime.resourceId,
+    metrics: {
+      audioSeconds: estimateAudioSeconds(audioFilePath, format),
+      requestCount: 1,
+    },
+    requestId,
+    remark: "录音文件识别",
+  });
 
   return {
     text: responseData.result?.text ?? "",

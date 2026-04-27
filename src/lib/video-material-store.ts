@@ -1,49 +1,34 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import sharp from "sharp";
+
+import { dbDelete, dbGetAll, dbUpsert, migrateJsonArrayIfNeeded } from "./db";
 import { importLegacyVideoMaterialsIfNeeded } from "./legacy-local-data-import";
-import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath } from "./runtime-storage";
+import {
+  ensureRuntimeDataDir,
+  joinRuntimeDataPath,
+  joinRuntimePublicStoragePath,
+  resolveRuntimeAssetUrlToPath,
+} from "./runtime-storage";
+import { extractVisualSubtitleLinesFromAnalysis } from "./video-material-subtitles";
+import { sortVideoMaterialsByUploadTimeDesc } from "./video-material-sort";
+import type {
+  ProcessingMode,
+  VideoMaterialImageAsset,
+  VideoMaterialImageCleaningJob,
+  VideoMaterialRecord,
+  VideoMaterialStatus,
+  VideoMaterialSummary,
+} from "./video-material-types";
 
-export type VideoMaterialStatus =
-  | "uploading"
-  | "converting"
-  | "transcribing"
-  | "analyzing"
-  | "generating"
-  | "ready"
-  | "error";
-
-export type ProcessingMode = "auto_all" | "audio_only";
-
-export type VideoMaterialRecord = {
-  materialId: string;
-  name: string;
-  status: VideoMaterialStatus;
-  statusMessage: string;
-  processingMode: ProcessingMode;
-
-  videoFileName: string | null;
-  videoFileUrl: string | null;
-  videoUploadedAt: string | null;
-
-  audioFileName: string | null;
-  audioFileUrl: string | null;
-  audioConvertedAt: string | null;
-
-  framesExtracted: number;
-  videoAnalysis: string;
-  videoAnalysisCompletedAt: string | null;
-
-  rawTranscript: string;
-  contentScript: string;
-  /** 无具体文案/商品信息的表达框架，供后续新视频参考结构 */
-  videoTemplatePrompt: string;
-  reversePrompt: string;
-  subtitle: string;
-
-  createdAt: string;
-  updatedAt: string;
+export type {
+  ProcessingMode,
+  VideoMaterialImageAsset,
+  VideoMaterialImageCleaningJob,
+  VideoMaterialRecord,
+  VideoMaterialStatus,
+  VideoMaterialSummary,
 };
 
 export type VideoTaskReferenceMaterialOption = {
@@ -71,10 +56,193 @@ export function ensureUploadsDir() {
   return uploadsDir;
 }
 
+function getVideoMaterialAssetDir(materialId: string) {
+  return join(ensureUploadsDir(), materialId);
+}
+
+function getVideoMaterialExtractedFramesDir(materialId: string) {
+  return join(getVideoMaterialAssetDir(materialId), "frames");
+}
+
+function getVideoMaterialCleanedFramesDir(materialId: string) {
+  return join(getVideoMaterialAssetDir(materialId), "cleaned");
+}
+
+export function clearVideoMaterialDerivedAssets(materialId: string) {
+  try {
+    rmSync(getVideoMaterialAssetDir(materialId), { recursive: true, force: true });
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+async function getImageMetadata(bytes: Buffer) {
+  try {
+    const metadata = await sharp(bytes).metadata();
+    return {
+      width: metadata.width ?? null,
+      height: metadata.height ?? null,
+      format: metadata.format ?? null,
+    };
+  } catch {
+    return {
+      width: null,
+      height: null,
+      format: null,
+    };
+  }
+}
+
+function sortCleanedFramesBySource(
+  extractedFrames: VideoMaterialImageAsset[],
+  cleanedFrames: VideoMaterialImageAsset[],
+) {
+  const sourceOrder = new Map(extractedFrames.map((frame, index) => [frame.imageId, index]));
+  return [...cleanedFrames].sort((left, right) => {
+    const leftIndex = left.sourceImageId
+      ? (sourceOrder.get(left.sourceImageId) ?? Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    const rightIndex = right.sourceImageId
+      ? (sourceOrder.get(right.sourceImageId) ?? Number.MAX_SAFE_INTEGER)
+      : Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+    return left.label.localeCompare(right.label, "zh-CN");
+  });
+}
+
+export function createIdleVideoMaterialImageCleaningJob(): VideoMaterialImageCleaningJob {
+  return {
+    status: "idle",
+    requestedImageIds: [],
+    totalCount: 0,
+    processedCount: 0,
+    cleanedCount: 0,
+    failedImageIds: [],
+    currentImageId: null,
+    message: "",
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: null,
+  };
+}
+
+export async function persistVideoMaterialExtractedFrames(
+  materialId: string,
+  frames: Array<{ base64: string; timestamp: number; index: number }>,
+) {
+  const framesDir = getVideoMaterialExtractedFramesDir(materialId);
+  mkdirSync(framesDir, { recursive: true });
+
+  return Promise.all(
+    frames.map(async (frame, index) => {
+      const fileName = `frame_${String(index + 1).padStart(4, "0")}.jpg`;
+      const bytes = Buffer.from(frame.base64, "base64");
+      const filePath = join(framesDir, fileName);
+      writeFileSync(filePath, bytes);
+      const metadata = await getImageMetadata(bytes);
+
+      return {
+        imageId: `frame-${String(index + 1).padStart(4, "0")}`,
+        imageUrl: `/video-materials/${materialId}/frames/${fileName}`,
+        fileName,
+        width: metadata.width,
+        height: metadata.height,
+        byteSize: bytes.byteLength,
+        timestampSeconds: Number.isFinite(frame.timestamp) ? Math.max(0, frame.timestamp) : null,
+        label: `抽帧${index + 1}`,
+        sourceImageId: null,
+        createdAt: new Date().toISOString(),
+      } satisfies VideoMaterialImageAsset;
+    }),
+  );
+}
+
+export function persistVideoMaterialCleanedFrameDirectory(materialId: string) {
+  const cleanedDir = getVideoMaterialCleanedFramesDir(materialId);
+  mkdirSync(cleanedDir, { recursive: true });
+  return cleanedDir;
+}
+
+export function removeVideoMaterialImageAsset(asset: Pick<VideoMaterialImageAsset, "imageUrl">) {
+  try {
+    const filePath = resolveRuntimeAssetUrlToPath(asset.imageUrl);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+export function upsertVideoMaterialCleanedFrames(materialId: string, nextFrames: VideoMaterialImageAsset[]) {
+  const material = getVideoMaterial(materialId);
+  if (!material) {
+    return null;
+  }
+
+  const replacedSourceIds = new Set(
+    nextFrames.map((frame) => frame.sourceImageId).filter((value): value is string => Boolean(value)),
+  );
+  const preservedFrames = material.cleanedFrames.filter((frame) => {
+    if (!frame.sourceImageId || !replacedSourceIds.has(frame.sourceImageId)) {
+      return true;
+    }
+    removeVideoMaterialImageAsset(frame);
+    return false;
+  });
+
+  return updateVideoMaterial(materialId, {
+    cleanedFrames: sortCleanedFramesBySource(material.extractedFrames, [...preservedFrames, ...nextFrames]),
+  });
+}
+
+export function deleteVideoMaterialCleanedFrames(materialId: string, imageIds: string[]) {
+  const material = getVideoMaterial(materialId);
+  if (!material) {
+    return null;
+  }
+
+  const targetIds = new Set(imageIds);
+  if (!targetIds.size) {
+    return material;
+  }
+
+  const nextCleanedFrames = material.cleanedFrames.filter((frame) => {
+    if (!targetIds.has(frame.imageId)) {
+      return true;
+    }
+    removeVideoMaterialImageAsset(frame);
+    return false;
+  });
+
+  return updateVideoMaterial(materialId, {
+    cleanedFrames: nextCleanedFrames,
+    imageCleaningJob: {
+      ...material.imageCleaningJob,
+      cleanedCount: nextCleanedFrames.filter((frame) =>
+        material.imageCleaningJob.requestedImageIds.includes(frame.sourceImageId ?? ""),
+      ).length,
+    },
+  });
+}
+
 function normalizeMaterial(record: VideoMaterialRecord): VideoMaterialRecord {
+  const visualSubtitleLines = Array.isArray(record.visualSubtitleLines)
+    ? record.visualSubtitleLines
+    : extractVisualSubtitleLinesFromAnalysis(record.videoAnalysis);
+
   return {
     ...record,
+    ownerUserId: record.ownerUserId ?? null,
     videoTemplatePrompt: record.videoTemplatePrompt ?? "",
+    transcriptLines: Array.isArray(record.transcriptLines) ? record.transcriptLines : [],
+    visualSubtitleLines,
+    visualSubtitleText: record.visualSubtitleText ?? visualSubtitleLines.join("\n"),
+    extractedFrames: Array.isArray(record.extractedFrames) ? record.extractedFrames : [],
+    cleanedFrames: Array.isArray(record.cleanedFrames) ? record.cleanedFrames : [],
+    imageCleaningJob: record.imageCleaningJob ?? createIdleVideoMaterialImageCleaningJob(),
   };
 }
 
@@ -85,14 +253,6 @@ function readStore(): VideoMaterialRecord[] {
   } catch {
     return [];
   }
-}
-
-function writeStore(items: VideoMaterialRecord[]) {
-  ensureStore();
-  dbReplaceAll(
-    COLLECTION,
-    items.map((item) => ({ key: item.materialId, data: item })),
-  );
 }
 
 function generateId() {
@@ -144,8 +304,9 @@ export function getMaterialDisplayName(record: VideoMaterialRecord): string {
   return "未命名素材";
 }
 
-export function listVideoTaskReferenceMaterials(): VideoTaskReferenceMaterialOption[] {
+export function listVideoTaskReferenceMaterials(ownerUserId?: string | null): VideoTaskReferenceMaterialOption[] {
   return listVideoMaterials()
+    .filter((item) => !ownerUserId || item.ownerUserId === null || item.ownerUserId === ownerUserId)
     .filter((item) => item.status === "ready")
     .filter((item) => item.videoTemplatePrompt.trim())
     .map((item) => ({
@@ -155,8 +316,48 @@ export function listVideoTaskReferenceMaterials(): VideoTaskReferenceMaterialOpt
     }));
 }
 
+export function listAccessibleVideoMaterials(userId: string) {
+  return listVideoMaterials().filter((item) => item.ownerUserId === null || item.ownerUserId === userId);
+}
+
+export function toVideoMaterialSummary(record: VideoMaterialRecord): VideoMaterialSummary {
+  const {
+    videoAnalysis,
+    rawTranscript,
+    visualSubtitleText,
+    visualSubtitleLines,
+    contentScript,
+    videoTemplatePrompt,
+    reversePrompt,
+    transcriptLines,
+    extractedFrames,
+    cleanedFrames,
+    ...summary
+  } = record;
+  void videoAnalysis;
+  void rawTranscript;
+  void visualSubtitleText;
+  void visualSubtitleLines;
+  void contentScript;
+  void videoTemplatePrompt;
+  void reversePrompt;
+  void transcriptLines;
+  void extractedFrames;
+  void cleanedFrames;
+  return summary;
+}
+
+export function listAccessibleVideoMaterialSummaries(userId: string) {
+  return listAccessibleVideoMaterials(userId).map(toVideoMaterialSummary);
+}
+
+export function countOwnedVideoMaterials(userId: string) {
+  return listVideoMaterials().filter((item) => item.ownerUserId === userId).length;
+}
+
 export function getVideoTaskReferenceMaterialById(
   materialId: string | null | undefined,
+  ownerUserId?: string | null,
 ): VideoTaskReferenceMaterialOption | null {
   if (!materialId?.trim()) {
     return null;
@@ -164,6 +365,9 @@ export function getVideoTaskReferenceMaterialById(
 
   const material = getVideoMaterial(materialId.trim());
   if (!material || !material.videoTemplatePrompt.trim()) {
+    return null;
+  }
+  if (ownerUserId && material.ownerUserId && material.ownerUserId !== ownerUserId) {
     return null;
   }
 
@@ -175,19 +379,23 @@ export function getVideoTaskReferenceMaterialById(
 }
 
 export function listVideoMaterials(): VideoMaterialRecord[] {
-  return readStore().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return sortVideoMaterialsByUploadTimeDesc(readStore());
 }
 
 export function getVideoMaterial(materialId: string): VideoMaterialRecord | null {
   return readStore().find((item) => item.materialId === materialId) ?? null;
 }
 
-export function createVideoMaterial(videoFileName: string): VideoMaterialRecord {
-  const items = readStore();
+export function createVideoMaterial(
+  videoFileName: string,
+  input?: { ownerUserId?: string | null },
+): VideoMaterialRecord {
   const now = new Date().toISOString();
   const record: VideoMaterialRecord = {
     materialId: generateId(),
+    ownerUserId: input?.ownerUserId ?? null,
     name: "",
+    nameEditedAt: null,
     status: "uploading",
     statusMessage: "视频文件已接收，等待处理",
     processingMode: "auto_all",
@@ -198,9 +406,15 @@ export function createVideoMaterial(videoFileName: string): VideoMaterialRecord 
     audioFileUrl: null,
     audioConvertedAt: null,
     framesExtracted: 0,
+    extractedFrames: [],
+    cleanedFrames: [],
+    imageCleaningJob: createIdleVideoMaterialImageCleaningJob(),
     videoAnalysis: "",
     videoAnalysisCompletedAt: null,
     rawTranscript: "",
+    transcriptLines: [],
+    visualSubtitleText: "",
+    visualSubtitleLines: [],
     contentScript: "",
     videoTemplatePrompt: "",
     reversePrompt: "",
@@ -208,8 +422,8 @@ export function createVideoMaterial(videoFileName: string): VideoMaterialRecord 
     createdAt: now,
     updatedAt: now,
   };
-  items.push(record);
-  writeStore(items);
+  ensureStore();
+  dbUpsert(COLLECTION, record.materialId, record);
   return record;
 }
 
@@ -217,17 +431,19 @@ export function updateVideoMaterial(
   materialId: string,
   patch: Partial<Omit<VideoMaterialRecord, "materialId" | "createdAt">>,
 ): VideoMaterialRecord | null {
-  const items = readStore();
-  const index = items.findIndex((item) => item.materialId === materialId);
-  if (index === -1) return null;
+  const current = getVideoMaterial(materialId);
+  if (!current) return null;
 
-  const updated = {
-    ...items[index],
+  const updated: VideoMaterialRecord = {
+    ...current,
     ...patch,
+    cleanedFrames: patch.cleanedFrames
+      ? sortCleanedFramesBySource(patch.extractedFrames ?? current.extractedFrames, patch.cleanedFrames)
+      : current.cleanedFrames,
     updatedAt: new Date().toISOString(),
   };
-  items[index] = updated;
-  writeStore(items);
+  ensureStore();
+  dbUpsert(COLLECTION, materialId, updated);
   return updated;
 }
 
@@ -248,6 +464,9 @@ export function deleteVideoMaterial(materialId: string): boolean {
     }
   }
 
-  writeStore(items.filter((item) => item.materialId !== materialId));
+  clearVideoMaterialDerivedAssets(materialId);
+
+  ensureStore();
+  dbDelete(COLLECTION, materialId);
   return true;
 }

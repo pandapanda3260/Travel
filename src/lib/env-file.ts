@@ -1,14 +1,34 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
-export const DEFAULT_SHARED_TRAVEL_ENV_FILE = "/Users/bytedance/Desktop/Travel 相关文件/key/travel.env.local";
+const LEGACY_SHARED_TRAVEL_ENV_FILE = "/Users/bytedance/Desktop/Travel 相关文件/key/travel.env.local";
+const DEFAULT_SHARED_TRAVEL_ENV_FILE_CANDIDATES = ["travel.shared.env.local", "travel.env.shared.local"];
+
+function joinProjectPath(fileName: string) {
+  return join(/* turbopackIgnore: true */ process.cwd(), fileName);
+}
 
 export function getSharedTravelEnvFilePath() {
-  return process.env.TRAVEL_SHARED_ENV_FILE?.trim() || DEFAULT_SHARED_TRAVEL_ENV_FILE;
+  const explicitPath = process.env.TRAVEL_SHARED_ENV_FILE?.trim();
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  for (const candidate of DEFAULT_SHARED_TRAVEL_ENV_FILE_CANDIDATES) {
+    const candidatePath = joinProjectPath(candidate);
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return existsSync(LEGACY_SHARED_TRAVEL_ENV_FILE) ? LEGACY_SHARED_TRAVEL_ENV_FILE : "";
 }
 
 export function getEnvConfigDisplayName(fileName: string) {
-  return `${fileName}（若未单独配置，则回退到 ${getSharedTravelEnvFilePath()}）`;
+  const sharedPath = getSharedTravelEnvFilePath();
+  return sharedPath
+    ? `${fileName}（若未单独配置，则回退到 ${sharedPath}）`
+    : `${fileName}（若未单独配置，则仅使用当前项目内配置）`;
 }
 
 function normalizeEnvValue(value: string) {
@@ -57,11 +77,19 @@ export function loadOptionalEnvFile(fileName: string) {
     return readEnvFileIfExists(fileName);
   }
 
-  const sharedConfig = readEnvFileIfExists(getSharedTravelEnvFilePath());
-  const localConfig = readEnvFileIfExists(join(process.cwd(), fileName));
+  const sharedEnvPath = getSharedTravelEnvFilePath();
+  const sharedConfig = sharedEnvPath ? readEnvFileIfExists(sharedEnvPath) : {};
+  const localPath = joinProjectPath(fileName);
+  const sharedSiblingPath = sharedEnvPath ? join(dirname(sharedEnvPath), fileName) : "";
+  const sharedSiblingConfig =
+    sharedSiblingPath && resolve(sharedSiblingPath) !== resolve(localPath)
+      ? readEnvFileIfExists(sharedSiblingPath)
+      : {};
+  const localConfig = readEnvFileIfExists(localPath);
 
   return {
     ...sharedConfig,
+    ...sharedSiblingConfig,
     ...localConfig,
   };
 }

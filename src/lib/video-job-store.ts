@@ -1,22 +1,27 @@
 import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
-import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
+import { writeFetchResponseToPath } from "./file-stream";
+import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
+import { defaultMediaDownloadTimeoutMs, fetchWithTimeout } from "./timeout";
+import { withRetry } from "./retry";
+import {
+  ensureRuntimeDataDir,
+  joinRuntimeDataPath,
+  joinRuntimePublicStoragePath,
+  resolveRuntimeAssetUrlToPath,
+} from "./runtime-storage";
+import type { TaskArtifactDeletionOptions } from "./task-artifact-cleanup";
 import type { KlingGenerationSettings } from "./prompt";
 import type { LiveVideoProvider } from "./video-provider-config";
 
 const execFileAsync = promisify(execFile);
-const packageRequire = createRequire(process.cwd() + "/package.json");
 
-export type VideoJobStatus =
-  | "QUEUED"
-  | "IN_PROGRESS"
-  | "COMPLETED"
-  | "FAILED";
+export type VideoJobStatus = "QUEUED" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
 
 export type VideoJobMode = "mock" | "live" | "composition";
 
@@ -47,6 +52,7 @@ export type VideoJobRecord = {
 };
 
 const MAX_JOB_LOG_ENTRIES = 80;
+const activeVideoDownloads = new Map<string, Promise<string>>();
 
 const COLLECTION = "video-jobs";
 const legacyJsonPath = joinRuntimeDataPath("video-jobs.json");
@@ -74,13 +80,7 @@ function ensureDirectories() {
 }
 
 function resolveFfmpegPath() {
-  const runtimePath = packageRequire("ffmpeg-static") as string | null;
-
-  if (!runtimePath || !existsSync(runtimePath)) {
-    throw new Error("当前环境缺少可用的 FFmpeg 可执行文件");
-  }
-
-  return runtimePath;
+  return getFfmpegBinaryPath();
 }
 
 async function probeVideoDurationSeconds(inputPath: string) {
@@ -134,13 +134,11 @@ function normalizeJob(job: Partial<VideoJobRecord>): VideoJobRecord {
     videoUrl: job.videoUrl ?? null,
     remoteVideoUrl: job.remoteVideoUrl ?? null,
     error: job.error ?? null,
-    provider: (
-      job.provider === "kling"
+    provider: (job.provider === "kling" || job.provider === "seedance"
+      ? job.provider
+      : job.mode === "live"
         ? "kling"
-        : job.mode === "live"
-          ? "kling"
-          : null
-    ) as LiveVideoProvider | null,
+        : null) as LiveVideoProvider | null,
     modelId: job.modelId ?? null,
     generationSettings: job.generationSettings ?? null,
     resolvedDurationSeconds: job.resolvedDurationSeconds ?? null,
@@ -161,7 +159,10 @@ function readStore(): VideoJobRecord[] {
 
 function writeStore(jobs: VideoJobRecord[]): void {
   ensureDirectories();
-  dbReplaceAll(COLLECTION, jobs.map((job) => ({ key: job.jobId, data: job })));
+  dbReplaceAll(
+    COLLECTION,
+    jobs.map((job) => ({ key: job.jobId, data: job })),
+  );
 }
 
 export function listVideoJobs() {
@@ -198,20 +199,72 @@ export function patchVideoJob(jobId: string, updates: Partial<VideoJobRecord>) {
 }
 
 export async function saveVideoFile(jobId: string, sourceUrl: string) {
-  ensureDirectories();
-  const currentJob = getVideoJob(jobId);
-
-  const response = await fetch(sourceUrl);
-  if (!response.ok) {
-    throw new Error("生成视频下载失败");
+  const activeDownload = activeVideoDownloads.get(jobId);
+  if (activeDownload) {
+    return activeDownload;
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const download = saveVideoFileWithRetry(jobId, sourceUrl).finally(() => {
+    activeVideoDownloads.delete(jobId);
+  });
+  activeVideoDownloads.set(jobId, download);
+  return download;
+}
+
+function buildDownloadError(response: Response) {
+  const error = new Error(`生成视频下载失败（HTTP ${response.status}）`) as Error & {
+    retryable?: boolean;
+  };
+  if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+    error.retryable = false;
+  }
+  return error;
+}
+
+async function saveVideoFileWithRetry(jobId: string, sourceUrl: string) {
+  ensureDirectories();
+  const currentJob = getVideoJob(jobId);
   const outputDir = getVideoJobOutputDir(currentJob?.sourceTaskId);
+  const localUrl = `/generated-videos/${currentJob?.sourceTaskId?.trim() || "_unassigned"}/${jobId}.mp4`;
+
   mkdirSync(outputDir, { recursive: true });
   const filePath = join(outputDir, `${jobId}.mp4`);
-  writeFileSync(filePath, bytes);
-  return `/generated-videos/${currentJob?.sourceTaskId?.trim() || "_unassigned"}/${jobId}.mp4`;
+
+  return withRetry(
+    async () => {
+      const response = await fetchWithTimeout(
+        sourceUrl,
+        {},
+        {
+          timeoutMs: defaultMediaDownloadTimeoutMs,
+          timeoutMessage: "生成视频下载超时，请重新生成该片段",
+        },
+      );
+      if (!response.ok) {
+        throw buildDownloadError(response);
+      }
+
+      const tempFilePath = join(outputDir, `${jobId}.${randomUUID()}.tmp`);
+      try {
+        await writeFetchResponseToPath(response, tempFilePath);
+        if (statSync(tempFilePath).size <= 0) {
+          throw new Error("生成视频下载失败：文件为空");
+        }
+        renameSync(tempFilePath, filePath);
+      } catch (error) {
+        if (existsSync(tempFilePath)) {
+          unlinkSync(tempFilePath);
+        }
+        throw error;
+      }
+
+      return localUrl;
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 800,
+    },
+  );
 }
 
 export async function ensureLocalVideoForJob(jobId: string) {
@@ -223,7 +276,9 @@ export async function ensureLocalVideoForJob(jobId: string) {
 
   const remoteSourceUrl =
     currentJob.remoteVideoUrl ??
-    (currentJob.videoUrl?.startsWith("http://") || currentJob.videoUrl?.startsWith("https://") ? currentJob.videoUrl : null);
+    (currentJob.videoUrl?.startsWith("http://") || currentJob.videoUrl?.startsWith("https://")
+      ? currentJob.videoUrl
+      : null);
 
   if (!remoteSourceUrl) {
     return currentJob;
@@ -314,7 +369,15 @@ export function removeVideoJobLocalArtifacts(job: VideoJobRecord) {
  * 从 video-jobs 存储中移除指定任务下的全部记录（含已软删条目），并清理对应本地文件。
  * 解决反复重生片段导致 JSON 中 deleted 任务无限膨胀、以及任务删除时漏掉软删 job 的问题。
  */
-export function purgeVideoJobsBySourceTaskId(taskId: string): string[] {
+function assertVideoJobDeletionReason(options: TaskArtifactDeletionOptions | undefined) {
+  if (options?.reason !== "user_manual_delete" && options?.reason !== "successful_replacement") {
+    throw new Error("删除视频任务产物需要明确的手动删除或成功替换原因");
+  }
+}
+
+export function purgeVideoJobsBySourceTaskId(taskId: string, options: TaskArtifactDeletionOptions): string[] {
+  assertVideoJobDeletionReason(options);
+
   const normalized = taskId.trim();
   if (!normalized) {
     return [];
@@ -336,7 +399,9 @@ export function purgeVideoJobsBySourceTaskId(taskId: string): string[] {
   return removedIds;
 }
 
-export function deleteVideoJob(jobId: string) {
+export function deleteVideoJob(jobId: string, options: TaskArtifactDeletionOptions) {
+  assertVideoJobDeletionReason(options);
+
   ensureDirectories();
   const currentJob = dbGetAll<Partial<VideoJobRecord>>(COLLECTION)
     .map(normalizeJob)

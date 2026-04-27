@@ -1,5 +1,7 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
-import { getImageGenerationRuntime } from "./image-provider-config";
+import { getImageGenerationRuntime, type ImageGenerationRuntime } from "./image-provider-config";
+import { createMockImageResults } from "./mock-aigc-assets";
+import { recordModelUsage } from "./model-usage-service";
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
 
@@ -11,6 +13,7 @@ export type ImageGenerationRequest = {
   seed: number | null;
   outputCount?: number;
   referenceImageDataUrl?: string | null;
+  runtimeOverride?: ImageGenerationRuntime;
 };
 
 export type ImageGenerationResult = {
@@ -18,8 +21,100 @@ export type ImageGenerationResult = {
   b64Json: string | null;
 };
 
+export const SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE =
+  "图片生成触发安全拦截，系统已自动降敏重试仍失败，请手动上传图片";
+
 function normalizeApiBase(apiBase: string) {
   return apiBase.endsWith("/api/v3") ? apiBase : `${apiBase.replace(/\/$/, "")}/api/v3`;
+}
+
+const IMAGE_POSITIVE_SUFFIX =
+  "photorealistic, real photograph, shot on DSLR camera, natural lighting, single continuous image, realistic perspective and proportions, natural human anatomy, realistic limb count, no extra or missing arms, legs, hands or feet";
+
+const IMAGE_NEGATIVE_PROMPT = [
+  "text, letters, numbers, words, watermark, logo, signage text, caption, subtitle",
+  "collage, split screen, multi-panel, grid, side by side, montage, diptych, triptych, multiple frames, border, picture frame",
+  "rotated scene, rotated 90 degrees, sideways composition, turned sideways, horizontal scene squeezed into portrait frame, landscape content inside portrait canvas, vertical scene squeezed into landscape frame",
+  "cartoon, anime, illustration, painting, sketch, drawing, CG render, 3D render, digital art, comic, manga",
+  "deformed face, distorted hands, extra fingers, extra limbs, extra arms, extra hands, extra legs, extra feet, third hand, third arm, missing limbs, fused fingers, mutated hands, duplicate limbs, broken anatomy, malformed body",
+  "extra people, wrong number of people, duplicate person, clone",
+  "blurry, low resolution, pixelated, overexposed, underexposed, oversaturated",
+  "unrealistic proportions, physically impossible, floating objects, gravity defying",
+].join(", ");
+
+function parseRequestedSize(size: string) {
+  const match = size.match(/^(\d+)x(\d+)$/);
+  if (!match) {
+    return { width: 0, height: 0 };
+  }
+  return {
+    width: Number(match[1]),
+    height: Number(match[2]),
+  };
+}
+
+function buildOrientationGuardClause(size: string, includeOrientationLabel = true) {
+  const { width, height } = parseRequestedSize(size);
+
+  if (!width || !height) {
+    return includeOrientationLabel
+      ? "竖构图9:16，portrait orientation，主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度"
+      : "主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度";
+  }
+
+  if (width === height) {
+    return includeOrientationLabel
+      ? "方构图1:1，square composition，主体必须完整适配方图画幅，不要把横图或竖图内容硬塞进方图画布"
+      : "主体必须完整适配方图画幅，不要把横图或竖图内容硬塞进方图画布";
+  }
+
+  if (width > height) {
+    return includeOrientationLabel
+      ? "横构图16:9，landscape orientation，主体必须以横版完整呈现，不要把竖图内容硬塞进横版画布，不要画面侧着或旋转90度"
+      : "主体必须以横版完整呈现，不要把竖图内容硬塞进横版画布，不要画面侧着或旋转90度";
+  }
+
+  return includeOrientationLabel
+    ? "竖构图9:16，portrait orientation，主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度"
+    : "主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度";
+}
+
+const IMAGE_TEXT_AND_LAYOUT_GUARD_CLAUSE =
+  "no text, no letters, no words, no numbers, no watermark, no logo, no signage text, no caption, no subtitle, no collage, no split screen, single continuous image";
+
+function appendUniqueClause(baseText: string, clause: string) {
+  const normalizedBase = normalizePromptWhitespace(baseText);
+  const normalizedClause = normalizePromptWhitespace(clause);
+  if (!normalizedClause) {
+    return normalizedBase;
+  }
+
+  const compactBase = normalizedBase.replace(/[，。；,\s]+/g, "").toLowerCase();
+  const compactClause = normalizedClause.replace(/[，。；,\s]+/g, "").toLowerCase();
+  if (compactBase.includes(compactClause)) {
+    return normalizedBase;
+  }
+
+  if (!normalizedBase) {
+    return normalizedClause;
+  }
+
+  return normalizePromptWhitespace(`${normalizedBase}，${normalizedClause}`);
+}
+
+export function applyImagePromptHardRequirements(prompt: string, size: string) {
+  let result = normalizePromptWhitespace(prompt);
+  const compactPrompt = result.replace(/[，。；,\s]+/g, "").toLowerCase();
+  const orientationAlreadyPresent =
+    compactPrompt.includes("竖构图9:16") ||
+    compactPrompt.includes("横构图16:9") ||
+    compactPrompt.includes("方构图1:1") ||
+    compactPrompt.includes("portraitorientation") ||
+    compactPrompt.includes("landscapeorientation") ||
+    compactPrompt.includes("squarecomposition");
+  result = appendUniqueClause(result, buildOrientationGuardClause(size, !orientationAlreadyPresent));
+  result = appendUniqueClause(result, IMAGE_TEXT_AND_LAYOUT_GUARD_CLAUSE);
+  return result;
 }
 
 function enhancePromptWithDetailPreset(prompt: string, guidanceScale: number) {
@@ -32,15 +127,17 @@ function enhancePromptWithDetailPreset(prompt: string, guidanceScale: number) {
   const mid = lines[1] || "保持构图稳定、细节完整和画面自然，兼顾真实度与美观度。";
   const low = lines[2] || "整体风格自然写实，避免过度锐化、过度饱和和夸张变形。";
 
+  const base = prompt.includes("photorealistic") ? prompt : `${prompt}, ${IMAGE_POSITIVE_SUFFIX}`;
+
   if (guidanceScale >= 8.5) {
-    return `${prompt}\n\n补充要求：${high}`;
+    return `${base}\n\n补充要求：${high}`;
   }
 
   if (guidanceScale >= 7.5) {
-    return `${prompt}\n\n补充要求：${mid}`;
+    return `${base}\n\n补充要求：${mid}`;
   }
 
-  return `${prompt}\n\n补充要求：${low}`;
+  return `${base}\n\n补充要求：${low}`;
 }
 
 const imagePromptSensitiveReplacements: Array<{ pattern: RegExp; replacement: string }> = [
@@ -149,6 +246,7 @@ async function requestSingleSeedreamImage(
   apiKey: string,
   modelId: string,
   prompt: string,
+  negativePrompt: string,
   size: string,
   watermark: boolean,
   referenceImageDataUrl?: string | null,
@@ -163,6 +261,7 @@ async function requestSingleSeedreamImage(
       body: JSON.stringify({
         model: modelId,
         prompt,
+        negative_prompt: negativePrompt,
         ...(referenceImageDataUrl ? { image: referenceImageDataUrl } : {}),
         size,
         response_format: "url",
@@ -197,15 +296,20 @@ async function requestSingleSeedreamImage(
 }
 
 export async function generateSeedreamImages(input: ImageGenerationRequest) {
-  const runtime = getImageGenerationRuntime();
+  const runtime = input.runtimeOverride ?? getImageGenerationRuntime();
 
   if (!runtime.liveEnabled) {
-    throw new Error(`${runtime.providerLabel} 当前未启用，请先配置图片生成 API Key。`);
+    return createMockImageResults({
+      prompt: input.prompt,
+      size: input.size,
+      outputCount: input.outputCount ?? 4,
+    });
   }
 
-  const enhancedPrompt = enhancePromptWithDetailPreset(input.prompt, input.guidanceScale);
+  const hardenedPrompt = applyImagePromptHardRequirements(input.prompt, input.size);
+  const enhancedPrompt = enhancePromptWithDetailPreset(hardenedPrompt, input.guidanceScale);
   const sanitizedPrompt = sanitizeImagePromptForModeration(enhancedPrompt);
-  const outputCount = Math.max(1, Math.min(6, input.outputCount ?? 4));
+  const outputCount = Math.max(1, Math.min(10, input.outputCount ?? 4));
   const requestBatch = (prompt: string) =>
     Promise.all(
       Array.from({ length: outputCount }, () =>
@@ -214,6 +318,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
           runtime.apiKey,
           runtime.modelId,
           prompt,
+          IMAGE_NEGATIVE_PROMPT,
           input.size,
           input.watermark,
           input.referenceImageDataUrl,
@@ -222,7 +327,20 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
     );
 
   try {
-    return await requestBatch(sanitizedPrompt);
+    const results = await requestBatch(sanitizedPrompt);
+    recordModelUsage({
+      pricingKey: runtime.modelId.includes("seedream-5-0-lite") ? "doubao.seedream.5.0.lite" : null,
+      serviceName: "image.generate",
+      provider: runtime.providerLabel,
+      modelId: runtime.modelId,
+      metrics: {
+        imageCount: results.length,
+        requestCount: 1,
+      },
+      requestId: crypto.randomUUID(),
+      remark: "图片生成",
+    });
+    return results;
   } catch (error) {
     if (!isSensitivePromptError(error)) {
       throw error;
@@ -231,13 +349,25 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
     const saferPrompt = await rewriteSensitiveImagePrompt(sanitizedPrompt);
 
     try {
-      return await requestBatch(saferPrompt);
+      const results = await requestBatch(saferPrompt);
+      recordModelUsage({
+        pricingKey: runtime.modelId.includes("seedream-5-0-lite") ? "doubao.seedream.5.0.lite" : null,
+        serviceName: "image.generate",
+        provider: runtime.providerLabel,
+        modelId: runtime.modelId,
+        metrics: {
+          imageCount: results.length,
+          requestCount: 1,
+        },
+        requestId: crypto.randomUUID(),
+        remark: "图片生成（安全改写后重试）",
+      });
+      return results;
     } catch (retryError) {
       if (!isSensitivePromptError(retryError)) {
         throw retryError;
       }
-      const message = retryError instanceof Error ? retryError.message : String(retryError ?? "");
-      throw new Error(`图片生成触发安全拦截，系统已自动降敏重试仍失败：${message}`);
+      throw new Error(SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE);
     }
   }
 }

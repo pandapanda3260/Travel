@@ -2,8 +2,15 @@ import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { getDefaultSubtitleConfig, hydrateSubtitleConfig, type SubtitleConfig } from "./subtitle-style-config";
+import {
+  defaultCompositionBackgroundMusicVolume,
+  getCompositionBackgroundMusicVolumeGain,
+  normalizeCompositionBackgroundMusicVolume,
+} from "./task-creation-parameters";
 import { deleteVideoJob, listVideoJobs } from "./video-job-store";
 import { ensureRuntimeDataDir, joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
+import type { TaskArtifactDeletionOptions } from "./task-artifact-cleanup";
 
 export type CompositionStatus = "DRAFT" | "PROCESSING" | "COMPLETED" | "FAILED";
 export type CompositionAspectRatio = "16:9" | "9:16" | "1:1";
@@ -74,8 +81,10 @@ export type VideoCompositionRecord = {
   transitionDurationSeconds: number;
   audioMode: CompositionAudioMode;
   backgroundMusicUrl: string | null;
+  backgroundMusicVolume: number;
   audioPlan: CompositionAudioPlan;
   subtitleSrtUrl: string | null;
+  subtitleConfig: SubtitleConfig;
   segments: CompositionSegment[];
   consistencyProfile: GlobalConsistencyProfile;
   outputVideoUrl: string | null;
@@ -87,17 +96,21 @@ export type VideoCompositionRecord = {
 const COLLECTION = "video-compositions";
 const legacyJsonPath = joinRuntimeDataPath("video-compositions.json");
 
-function createDefaultAudioPlan(audioMode: CompositionAudioMode, backgroundMusicUrl: string | null): CompositionAudioPlan {
+function createDefaultAudioPlan(
+  audioMode: CompositionAudioMode,
+  backgroundMusicUrl: string | null,
+): CompositionAudioPlan {
   const tracks: CompositionAudioTrack[] = [];
 
   if (backgroundMusicUrl) {
+    const bgmVolumeGain = getCompositionBackgroundMusicVolumeGain(defaultCompositionBackgroundMusicVolume);
     tracks.push({
       id: "bgm-track",
       kind: "bgm",
       name: "背景音乐",
       enabled: true,
       mute: false,
-      volume: 1,
+      volume: bgmVolumeGain,
       clips: [
         {
           id: "bgm-clip",
@@ -145,8 +158,11 @@ function readStore() {
       transitionDurationSeconds: record.transitionDurationSeconds ?? 0.6,
       audioMode: record.audioMode ?? "mute",
       backgroundMusicUrl: record.backgroundMusicUrl ?? null,
-      audioPlan: record.audioPlan ?? createDefaultAudioPlan(record.audioMode ?? "mute", record.backgroundMusicUrl ?? null),
+      backgroundMusicVolume: normalizeCompositionBackgroundMusicVolume(record.backgroundMusicVolume),
+      audioPlan:
+        record.audioPlan ?? createDefaultAudioPlan(record.audioMode ?? "mute", record.backgroundMusicUrl ?? null),
       subtitleSrtUrl: record.subtitleSrtUrl ?? null,
+      subtitleConfig: hydrateSubtitleConfig(record.subtitleConfig, getDefaultSubtitleConfig()),
       segments: record.segments ?? [],
       consistencyProfile: record.consistencyProfile ?? {
         subjectRule: "",
@@ -166,11 +182,30 @@ function readStore() {
 
 function writeStore(records: VideoCompositionRecord[]) {
   ensureStore();
-  dbReplaceAll(COLLECTION, records.map((r) => ({ key: r.compositionId, data: r })));
+  dbReplaceAll(
+    COLLECTION,
+    records.map((r) => ({ key: r.compositionId, data: r })),
+  );
 }
 
 export function listVideoCompositions() {
   return readStore().sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+}
+
+export function listTaskVideoCompositions(taskId: string) {
+  return listVideoCompositions().filter((record) => record.taskId === taskId);
+}
+
+export function getLatestTaskVideoComposition(taskId: string) {
+  return listTaskVideoCompositions(taskId)[0] ?? null;
+}
+
+export function getLatestCompletedTaskVideoComposition(taskId: string) {
+  return (
+    listTaskVideoCompositions(taskId).find(
+      (record) => record.status === "COMPLETED" && Boolean(record.outputVideoUrl),
+    ) ?? null
+  );
 }
 
 export function getVideoComposition(compositionId: string) {
@@ -181,6 +216,12 @@ export function upsertVideoComposition(record: VideoCompositionRecord) {
   ensureStore();
   dbUpsert(COLLECTION, record.compositionId, record);
   return record;
+}
+
+function assertCompositionDeletionReason(options: TaskArtifactDeletionOptions | undefined) {
+  if (options?.reason !== "user_manual_delete" && options?.reason !== "successful_replacement") {
+    throw new Error("删除合成视频产物需要明确的手动删除或成功替换原因");
+  }
 }
 
 export function patchVideoComposition(compositionId: string, updates: Partial<VideoCompositionRecord>) {
@@ -198,7 +239,9 @@ export function patchVideoComposition(compositionId: string, updates: Partial<Vi
   return nextRecord;
 }
 
-export function deleteVideoComposition(compositionId: string) {
+export function deleteVideoComposition(compositionId: string, options: TaskArtifactDeletionOptions) {
+  assertCompositionDeletionReason(options);
+
   ensureStore();
   const currentRecord = readStore().find((item) => item.compositionId === compositionId);
   if (!currentRecord) return null;
@@ -221,12 +264,26 @@ export function deleteVideoComposition(compositionId: string) {
 
   dbDelete(COLLECTION, compositionId);
 
-  const compositionJobs = listVideoJobs().filter(
-    (job) => job.mode === "composition" && job.jobId === compositionId,
-  );
+  const compositionJobs = listVideoJobs().filter((job) => job.mode === "composition" && job.jobId === compositionId);
   for (const job of compositionJobs) {
-    deleteVideoJob(job.jobId);
+    deleteVideoJob(job.jobId, options);
   }
 
   return currentRecord;
+}
+
+export function deleteTaskVideoCompositions(
+  taskId: string,
+  options: TaskArtifactDeletionOptions & { excludeCompositionIds?: string[] },
+) {
+  assertCompositionDeletionReason(options);
+
+  const excludedIds = new Set(options?.excludeCompositionIds ?? []);
+  const compositions = listTaskVideoCompositions(taskId).filter((record) => !excludedIds.has(record.compositionId));
+
+  for (const composition of compositions) {
+    deleteVideoComposition(composition.compositionId, options);
+  }
+
+  return compositions;
 }

@@ -1,14 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import {
+  directorPrimaryStepActionKeys,
+  directorSecondaryStepActionKeys,
+} from "../../../../../lib/director-step-actions";
 import { getFfmpegLocalRuntime } from "../../../../../lib/local-service-runtime";
-import { groupWordsIntoPhrases, splitTextIntoPhrases, writeSrtSubtitleFile } from "../../../../../lib/subtitle-export";
+import { writeSrtSubtitleFile } from "../../../../../lib/subtitle-export";
+import {
+  buildSubtitleDisplayUnits,
+  splitSegmentWordTimelineBySubtitleEntries,
+} from "../../../../../lib/subtitle-display";
+import { findNarrationClipsForSegment } from "../../../../../lib/video-composition-timeline";
+import {
+  getDefaultSubtitleConfig,
+  hydrateSubtitleConfig,
+  type SubtitleConfig,
+} from "../../../../../lib/subtitle-style-config";
+import { getSegmentSubtitleEntry } from "../../../../../lib/subtitle-plan-source";
 import { buildTaskClipShotPayloads, getTaskClipNarrationResult } from "../../../../../lib/task-clip-store";
 import { getTaskDirectorPlan } from "../../../../../lib/video-task-director";
 import type { NarrationDraftClip } from "../../../../../lib/narration";
 import { composeVideoProject, createCompositionRecord } from "../../../../../lib/video-composition-runner";
 import {
-  deleteVideoComposition,
-  listVideoCompositions,
+  getLatestCompletedTaskVideoComposition,
+  getLatestTaskVideoComposition,
   upsertVideoComposition,
   type CompositionAudioClip,
   type CompositionAudioPlan,
@@ -16,8 +31,18 @@ import {
   type CompositionSegment,
   type CompositionTransition,
 } from "../../../../../lib/video-composition-store";
+import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
 import { getVideoTask, patchVideoTask } from "../../../../../lib/video-task-store";
 import { getVideoTaskStatusIndex } from "../../../../../lib/video-task-schema";
+import { createProgressStream } from "../../../../../lib/progress-stream";
+import { taskStageProgressKeys } from "../../../../../lib/task-stage-progress";
+import { createTaskStageProgressReporter } from "../../../../../lib/task-stage-progress-store";
+import { normalizeNullableMediaSourceInput } from "../../../../../lib/media-source-input";
+import { collectLocalMediaArtifactErrors } from "../../../../../lib/media-artifact-validator";
+import {
+  getCompositionBackgroundMusicVolumeGain,
+  normalizeCompositionBackgroundMusicVolume,
+} from "../../../../../lib/task-creation-parameters";
 
 type RouteContext = {
   params: Promise<{
@@ -37,24 +62,116 @@ type NormalizedTimelineItem = {
   transition: CompositionTransition;
 };
 
-type CompositionRunRequest =
-  | {
-      action: "compose";
-      timeline: TimelineItem[];
-      includeBackgroundMusic?: boolean;
-      backgroundMusicUrl?: string;
-    }
-  | {
-      action: "regenerate";
-      timeline: TimelineItem[];
-      includeBackgroundMusic?: boolean;
-      backgroundMusicUrl?: string;
-    }
-  | {
-      action: "auto_compose";
-      includeBackgroundMusic?: boolean;
-      backgroundMusicUrl?: string;
-    };
+type CompositionRunRequest = {
+  action?:
+    | typeof directorPrimaryStepActionKeys.composeStoryVideo
+    | typeof directorSecondaryStepActionKeys.autoComposeStoryVideo
+    | "compose"
+    | "regenerate"
+    | "auto_compose";
+  timeline?: TimelineItem[];
+  includeBackgroundMusic?: boolean;
+  backgroundMusicUrl?: string;
+  backgroundMusicVolume?: number;
+  subtitleConfig?: Partial<SubtitleConfig>;
+};
+
+class BadRequestError extends Error {}
+
+const compositionActionOptions = new Set<string>([
+  directorPrimaryStepActionKeys.composeStoryVideo,
+  directorSecondaryStepActionKeys.autoComposeStoryVideo,
+  "compose",
+  "regenerate",
+  "auto_compose",
+]);
+
+function readOptionalBoolean(value: unknown, label: string) {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  throw new BadRequestError(`${label} 必须是布尔值`);
+}
+
+function readOptionalNumber(value: unknown, label: string) {
+  if (value == null || value === "") {
+    return undefined;
+  }
+  const normalized = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(normalized)) {
+    throw new BadRequestError(`${label} 必须是数字`);
+  }
+  return normalized;
+}
+
+function parseTimelineItem(value: unknown, index: number): TimelineItem {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new BadRequestError(`timeline[${index}] 必须是对象`);
+  }
+
+  const item = value as Record<string, unknown>;
+  const rawSegmentId = item.segmentId;
+  const rawShotIndex = item.shotIndex;
+  const rawTransition = item.transition;
+
+  if (rawSegmentId != null && typeof rawSegmentId !== "string") {
+    throw new BadRequestError(`timeline[${index}].segmentId 必须是字符串`);
+  }
+  if (rawShotIndex != null && !["number", "string"].includes(typeof rawShotIndex)) {
+    throw new BadRequestError(`timeline[${index}].shotIndex 必须是数字`);
+  }
+  if (rawTransition != null && rawTransition !== "cut" && rawTransition !== "fade") {
+    throw new BadRequestError(`timeline[${index}].transition 仅支持 cut 或 fade`);
+  }
+
+  return {
+    segmentId: typeof rawSegmentId === "string" ? rawSegmentId : undefined,
+    shotIndex: rawShotIndex == null ? undefined : Number(rawShotIndex),
+    transition: (rawTransition ?? "cut") as CompositionTransition,
+  };
+}
+
+function parseCompositionRunRequest(rawBody: unknown): CompositionRunRequest {
+  if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return {};
+  }
+
+  const body = rawBody as Record<string, unknown>;
+  const rawAction = body.action;
+  if (rawAction != null && typeof rawAction !== "string") {
+    throw new BadRequestError("action 必须是字符串");
+  }
+  if (typeof rawAction === "string" && !compositionActionOptions.has(rawAction)) {
+    throw new BadRequestError("不支持的视频合成操作");
+  }
+
+  const rawTimeline = body.timeline;
+  if (rawTimeline != null && !Array.isArray(rawTimeline)) {
+    throw new BadRequestError("timeline 必须是数组");
+  }
+
+  const rawBackgroundMusicUrl = body.backgroundMusicUrl;
+  if (rawBackgroundMusicUrl != null && typeof rawBackgroundMusicUrl !== "string") {
+    throw new BadRequestError("backgroundMusicUrl 必须是字符串");
+  }
+
+  const rawSubtitleConfig = body.subtitleConfig;
+  if (rawSubtitleConfig != null && (typeof rawSubtitleConfig !== "object" || Array.isArray(rawSubtitleConfig))) {
+    throw new BadRequestError("subtitleConfig 必须是对象");
+  }
+
+  return {
+    action: rawAction as CompositionRunRequest["action"],
+    timeline: (rawTimeline as unknown[] | undefined)?.map(parseTimelineItem),
+    includeBackgroundMusic: readOptionalBoolean(body.includeBackgroundMusic, "includeBackgroundMusic"),
+    backgroundMusicUrl: typeof rawBackgroundMusicUrl === "string" ? rawBackgroundMusicUrl : undefined,
+    backgroundMusicVolume: readOptionalNumber(body.backgroundMusicVolume, "backgroundMusicVolume"),
+    subtitleConfig: rawSubtitleConfig as CompositionRunRequest["subtitleConfig"],
+  };
+}
 
 function toSrtTimestamp(value: number) {
   const totalMilliseconds = Math.max(0, Math.round(value * 1000));
@@ -73,41 +190,26 @@ function buildSrtTextFromTimeline(
     durationSeconds: number;
     words: NarrationDraftClip["words"];
   }>,
+  subtitleConfig: SubtitleConfig,
 ) {
   const blocks: string[] = [];
   let cueIndex = 1;
 
   for (const item of input) {
-    const normalizedWords = item.words?.length ? item.words : null;
+    const displayUnits = buildSubtitleDisplayUnits({
+      text: item.subtitleText,
+      durationSeconds: item.durationSeconds,
+      words: item.words,
+      maxCharsPerLine: subtitleConfig.maxCharsPerLine,
+      displayMode: subtitleConfig.displayMode,
+      trimEstimatedTail: true,
+    });
 
-    if (normalizedWords) {
-      const phrases = groupWordsIntoPhrases(normalizedWords, 8);
-      for (const phrase of phrases) {
-        const start = item.startAtSeconds + phrase.startTime;
-        const end = Math.min(
-          item.startAtSeconds + Math.max(item.durationSeconds, 0.4),
-          item.startAtSeconds + Math.max(phrase.endTime, phrase.startTime + 0.3),
-        );
-        blocks.push(`${cueIndex}\n${toSrtTimestamp(start)} --> ${toSrtTimestamp(end)}\n${phrase.text}`);
-        cueIndex += 1;
-      }
-      continue;
-    }
-
-    const phrases = splitTextIntoPhrases(item.subtitleText, 8);
-    if (phrases.length <= 1) {
-      blocks.push(
-        `${cueIndex}\n${toSrtTimestamp(item.startAtSeconds)} --> ${toSrtTimestamp(item.startAtSeconds + Math.max(item.durationSeconds, 0.6))}\n${phrases[0] ?? item.subtitleText}`,
-      );
+    for (const unit of displayUnits) {
+      const start = item.startAtSeconds + unit.startOffsetSeconds;
+      const end = item.startAtSeconds + unit.endOffsetSeconds;
+      blocks.push(`${cueIndex}\n${toSrtTimestamp(start)} --> ${toSrtTimestamp(end)}\n${unit.text}`);
       cueIndex += 1;
-    } else {
-      const phraseDuration = Math.max(0.4, item.durationSeconds / phrases.length);
-      for (let i = 0; i < phrases.length; i += 1) {
-        const start = item.startAtSeconds + i * phraseDuration;
-        const end = start + phraseDuration;
-        blocks.push(`${cueIndex}\n${toSrtTimestamp(start)} --> ${toSrtTimestamp(end)}\n${phrases[i]}`);
-        cueIndex += 1;
-      }
     }
   }
 
@@ -166,6 +268,29 @@ function resolveNarrationNaturalDuration(clip: NarrationDraftClip | null | undef
   return Math.max(clip.audioDurationSeconds ?? 0, wordDuration, clip.durationSeconds ?? 0, 0.6);
 }
 
+function resolveSubtitleSpeechDuration(input: {
+  words: NarrationDraftClip["words"];
+  audioDurationSeconds?: number | null;
+  audioWindowDurationSeconds?: number | null;
+  fallbackDurationSeconds?: number | null;
+}) {
+  const wordDurationSeconds = input.words?.length
+    ? Math.max(...input.words.map((word) => Number(word.endTime) || 0))
+    : 0;
+  const audioDurationSeconds = Number(input.audioDurationSeconds) || 0;
+  const audioWindowDurationSeconds = Number(input.audioWindowDurationSeconds) || 0;
+  const fallbackDurationSeconds = Number(input.fallbackDurationSeconds) || 0;
+
+  return Math.max(
+    0.2,
+    wordDurationSeconds ||
+      audioDurationSeconds ||
+      audioWindowDurationSeconds ||
+      fallbackDurationSeconds ||
+      0,
+  );
+}
+
 function buildNarrationWindow(input: {
   currentStart: number;
   naturalDuration: number;
@@ -201,8 +326,60 @@ function buildNarrationWindow(input: {
   };
 }
 
-function getLatestTaskComposition(taskId: string) {
-  return listVideoCompositions().find((item) => item.taskId === taskId) ?? null;
+function getSegmentSubtitleEntries(
+  subtitlePlan: NonNullable<ReturnType<typeof getTaskDirectorPlan>>["subtitlePlan"],
+  input: { segmentId?: string | null; segmentIndex?: number | null },
+) {
+  if (!subtitlePlan?.length) {
+    return [];
+  }
+
+  const segment = subtitlePlan.find(
+    (item) =>
+      (input.segmentId && item.segmentId === input.segmentId) ||
+      (input.segmentIndex != null && item.segmentIndex === input.segmentIndex),
+  );
+  return segment?.subtitles ?? [];
+}
+
+function hasPlayableVideo(
+  job:
+    | {
+        status?: string | null;
+        videoUrl?: string | null;
+        remoteVideoUrl?: string | null;
+      }
+    | null
+    | undefined,
+) {
+  return Boolean(job?.status === "COMPLETED" && (job.videoUrl || job.remoteVideoUrl));
+}
+
+function hasEmbeddedSegmentAudio(
+  clipShot:
+    | {
+        job?: {
+          status?: string | null;
+          videoUrl?: string | null;
+          remoteVideoUrl?: string | null;
+          generationSettings?: {
+            generateAudio?: boolean | null;
+          } | null;
+        } | null;
+        lipSyncJob?: {
+          status?: string | null;
+          videoUrl?: string | null;
+          remoteVideoUrl?: string | null;
+        } | null;
+      }
+    | null
+    | undefined,
+) {
+  if (hasPlayableVideo(clipShot?.lipSyncJob)) {
+    return true;
+  }
+
+  return Boolean(hasPlayableVideo(clipShot?.job) && clipShot?.job?.generationSettings?.generateAudio === true);
 }
 
 async function buildCompositionPayload(taskId: string, options?: { readOnly?: boolean }) {
@@ -214,21 +391,40 @@ async function buildCompositionPayload(taskId: string, options?: { readOnly?: bo
   const directorPlan = getTaskDirectorPlan(task);
   const clipShots = await buildTaskClipShotPayloads(task, options);
   const narrationResult = getTaskClipNarrationResult(taskId);
-  const latestComposition = getLatestTaskComposition(taskId);
-  const voiceCueCount = directorPlan.audioCues.filter((cue) => cue.hasVoice).length;
-  const subtitleCueCount = directorPlan.audioCues.filter((cue) => cue.hasSubtitle).length;
-  const narrationReady =
-    voiceCueCount === 0
+  const latestComposition = getLatestTaskVideoComposition(taskId);
+  const latestPlayableComposition = getLatestCompletedTaskVideoComposition(taskId);
+  const voiceSegments = directorPlan.renderSegments.filter((segment) => segment.hasVoice);
+  const subtitleSegments = directorPlan.renderSegments.filter((segment) => segment.hasSubtitle);
+  const sourceAudioReady =
+    voiceSegments.length === 0
       ? true
-      : directorPlan.audioCues
-          .filter((cue) => cue.hasVoice)
-          .every((cue) =>
-            narrationResult?.clips.some(
-              (clip) =>
-                (clip.segmentId === cue.targetSegmentId || clip.bindToSegmentId === cue.targetSegmentId) &&
-                Boolean(clip.audioUrl),
-            ),
-          );
+      : voiceSegments.every((segment) => {
+          const clipShot = clipShots.find((item) => item.segmentId === segment.segmentId) ?? null;
+          return hasEmbeddedSegmentAudio(clipShot);
+        });
+  const narrationTrackReady =
+    voiceSegments.length === 0
+      ? true
+      : voiceSegments.every((segment) =>
+          narrationResult?.clips.some(
+            (clip) =>
+              (clip.segmentId === segment.segmentId || clip.bindToSegmentId === segment.segmentId) &&
+              Boolean(clip.audioUrl),
+          ),
+        );
+  const narrationReady = sourceAudioReady || narrationTrackReady;
+  const subtitleReady =
+    subtitleSegments.length === 0
+      ? true
+      : Boolean(narrationResult?.subtitleSrtUrl) ||
+        subtitleSegments.every((segment) =>
+          Boolean(
+            getSegmentSubtitleEntry(directorPlan.subtitlePlan, {
+              segmentId: segment.segmentId,
+              segmentIndex: segment.segmentIndex,
+            })?.text?.trim() || segment.subtitleText?.trim(),
+          ),
+        );
 
   return {
     task,
@@ -236,13 +432,29 @@ async function buildCompositionPayload(taskId: string, options?: { readOnly?: bo
     clipShots,
     narrationResult,
     latestComposition,
+    latestPlayableComposition,
     statusSummary: {
       clipCount: clipShots.length,
-      completedClipCount: clipShots.filter((item) => item.job?.status === "COMPLETED").length,
-      subtitleReady: subtitleCueCount === 0 ? true : Boolean(narrationResult?.subtitleSrtUrl),
+      completedClipCount: clipShots.filter((item) => hasPlayableVideo(item.job)).length,
+      subtitleReady,
+      subtitleSourceLabel:
+        subtitleSegments.length === 0
+          ? "无需单独字幕轨"
+          : narrationResult?.subtitleSrtUrl
+            ? "独立字幕时间轴已就绪"
+            : "将按第三步字幕主时间轴切分显示",
       narrationReady,
+      narrationSourceLabel:
+        voiceSegments.length === 0
+          ? "无需单独口播"
+          : sourceAudioReady
+            ? "片段原音已就绪"
+            : narrationTrackReady
+              ? "独立 TTS 音频已就绪"
+              : "未检测到独立音频，合成时优先保留片段原音",
       latestResultAt:
         latestComposition?.updatedAt ??
+        latestPlayableComposition?.updatedAt ??
         clipShots.find((item) => item.clipRecord?.generatedAt)?.clipRecord?.generatedAt ??
         narrationResult?.updatedAt ??
         task.updatedAt,
@@ -250,9 +462,13 @@ async function buildCompositionPayload(taskId: string, options?: { readOnly?: bo
   };
 }
 
-export async function GET(_: NextRequest, context: RouteContext) {
+export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const { taskId } = await context.params;
+    const access = requireOwnedVideoTask(request, taskId);
+    if ("response" in access) {
+      return access.response;
+    }
     const payload = await buildCompositionPayload(taskId, { readOnly: true });
     const runtime = getFfmpegLocalRuntime("FFmpeg 本地服务 · video-composition-runner");
 
@@ -275,295 +491,404 @@ export async function GET(_: NextRequest, context: RouteContext) {
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
     const { taskId } = await context.params;
-    const body = (await request.json().catch(() => ({}))) as Partial<CompositionRunRequest> & {
-      timeline?: TimelineItem[];
-    };
-    const payload = await buildCompositionPayload(taskId);
-    const { task, directorPlan, clipShots, narrationResult, latestComposition } = payload;
+    const access = requireOwnedVideoTask(request, taskId, {
+      forbiddenMessage: "无权修改该视频任务",
+    });
+    if ("response" in access) {
+      return access.response;
+    }
+    const body = parseCompositionRunRequest(await request.json().catch(() => ({})));
+    return createProgressStream(async (onProgress) => {
+      const runtime = getFfmpegLocalRuntime("FFmpeg 本地服务 · video-composition-runner");
+      const stageProgress = createTaskStageProgressReporter({
+        taskId,
+        stageKey: taskStageProgressKeys.composition,
+        provider: runtime.serviceLabel,
+        modelId: "ffmpeg",
+        initialMessage: "读取合成任务...",
+        initialPercent: 2,
+      });
+      const emitProgress = (
+        step: string,
+        percent: number,
+        message: string,
+        extra?: Record<string, unknown>,
+      ) => {
+        onProgress(step, percent, message, extra);
+        stageProgress.onProgress(step, percent, message);
+      };
 
-    const isAutoCompose = body.action === "auto_compose";
-    const timeline = normalizeTimelineItems(
-      isAutoCompose
-        ? clipShots
-            .filter((item) => item.job?.status === "COMPLETED")
+      try {
+        emitProgress("composition_prepare", 2, "读取合成任务...");
+        const payload = await buildCompositionPayload(taskId);
+        const { task, directorPlan, clipShots, narrationResult, latestComposition } = payload;
+
+        const timeline = normalizeTimelineItems(
+          clipShots
+            .filter((item) => hasPlayableVideo(item.job))
             .sort((left, right) => left.segmentIndex - right.segmentIndex)
             .map((item) => ({
               segmentId: item.segmentId,
               shotIndex: item.shotIndex,
               transition: "cut" as CompositionTransition,
-            }))
-        : Array.isArray(body.timeline)
-          ? body.timeline
-          : [],
-    );
+            })),
+        );
 
-    if (!timeline.length) {
-      return NextResponse.json(
-        { error: isAutoCompose ? "没有已完成的片段可供自动排列合成" : "请先将素材加入 Timeline 后再生成视频" },
-        { status: 400 },
-      );
-    }
-
-    if (!narrationResult && directorPlan.audioCues.some((cue) => cue.hasVoice || cue.hasSubtitle)) {
-      return NextResponse.json({ error: "请先完成音频/字幕制作" }, { status: 400 });
-    }
-
-    const materialMap = new Map(clipShots.map((item) => [item.segmentId, item]));
-    const transitionDurationSeconds = 0.45;
-    const durationLookup = new Map<string, number>(
-      clipShots.map((item) => [
-        item.segmentId,
-        (item.job?.resolvedDurationSeconds ?? item.durationSeconds) ||
-          item.job?.generationSettings?.durationSeconds ||
-          task.parameters.video.durationSeconds,
-      ]),
-    );
-    const startMap = buildTimelineStarts(timeline, durationLookup, transitionDurationSeconds);
-
-    const segments: CompositionSegment[] = timeline.map((item, index) => {
-      const clipShot = materialMap.get(item.segmentId);
-      if (
-        !clipShot?.job?.jobId ||
-        clipShot.job.status !== "COMPLETED" ||
-        !(clipShot.job.videoUrl || clipShot.job.remoteVideoUrl)
-      ) {
-        throw new Error(`片段 ${item.shotIndex} 尚未生成完成，无法加入视频合成`);
-      }
-
-      const useLipSync =
-        clipShot.lipSyncJob?.status === "COMPLETED" &&
-        Boolean(clipShot.lipSyncJob.videoUrl || clipShot.lipSyncJob.remoteVideoUrl);
-      const effectiveJob = useLipSync ? clipShot.lipSyncJob! : clipShot.job;
-
-      return {
-        id: `${taskId}-${item.segmentId}`,
-        sourceJobId: effectiveJob.jobId,
-        sourceVideoUrl:
-          effectiveJob.videoUrl ??
-          effectiveJob.remoteVideoUrl ??
-          clipShot.job.videoUrl ??
-          clipShot.job.remoteVideoUrl ??
-          "",
-        order: index,
-        durationSeconds: clipShot.durationSeconds,
-        transition: item.transition ?? "cut",
-        promptSnapshot: clipShot.videoPrompt,
-        note: `片段 ${item.shotIndex}${useLipSync ? "（口型同步）" : ""}`,
-      };
-    });
-
-    const timelineEntries = timeline.map((item) => {
-      const clipShot = materialMap.get(item.segmentId);
-      const narrationClip =
-        narrationResult?.clips.find(
-          (clip) => clip.segmentId === item.segmentId || clip.bindToSegmentId === item.segmentId,
-        ) ??
-        narrationResult?.clips.find(
-          (clip) => clip.segmentIndex === item.shotIndex || clip.shotIndex === item.shotIndex,
-        ) ??
-        null;
-      const cue = directorPlan.audioCues.find((audioCue) => audioCue.targetSegmentId === item.segmentId) ?? null;
-      return {
-        item,
-        clipShot,
-        narrationClip,
-        cue,
-        currentStart: startMap.get(item.segmentId) ?? 0,
-        segmentDuration: durationLookup.get(item.segmentId) ?? task.parameters.video.durationSeconds,
-      };
-    });
-
-    const voiceEntries = timelineEntries.filter(
-      (entry) => entry.narrationClip?.hasVoice !== false && Boolean(entry.narrationClip?.audioUrl),
-    );
-    const voiceTimelineEntries = timelineEntries.filter((entry) => entry.cue?.hasVoice);
-    const missingVoiceEntries = timelineEntries.filter(
-      (entry) =>
-        entry.cue?.hasVoice &&
-        !entry.narrationClip?.audioUrl &&
-        !(
-          entry.clipShot?.lipSyncJob?.status === "COMPLETED" &&
-          (entry.clipShot.lipSyncJob.videoUrl || entry.clipShot.lipSyncJob.remoteVideoUrl)
-        ),
-    );
-    if (missingVoiceEntries.length > 0) {
-      throw new Error(`片段 ${missingVoiceEntries[0]?.item.shotIndex ?? ""} 缺少可用口播音频，无法进行视频合成`);
-    }
-    const allVoiceSegmentsLipSynced =
-      voiceTimelineEntries.length > 0 &&
-      voiceTimelineEntries.every(
-        (entry) =>
-          entry.clipShot?.lipSyncJob?.status === "COMPLETED" &&
-          Boolean(entry.clipShot.lipSyncJob.videoUrl || entry.clipShot.lipSyncJob.remoteVideoUrl),
-      );
-    const compositionDurationSeconds = timeline.reduce((maxValue, item) => {
-      const startAtSeconds = startMap.get(item.segmentId) ?? 0;
-      const durationSeconds = durationLookup.get(item.segmentId) ?? 0;
-      return Math.max(maxValue, startAtSeconds + durationSeconds);
-    }, 0);
-
-    const narrationTrackClips: CompositionAudioClip[] = allVoiceSegmentsLipSynced
-      ? []
-      : voiceEntries.map((entry, index) => {
-          const narrationClip = entry.narrationClip!;
-          const nextVoiceStart = index < voiceEntries.length - 1 ? voiceEntries[index + 1].currentStart : null;
-          const naturalDuration = resolveNarrationNaturalDuration(narrationClip);
-          const audioWindow = buildNarrationWindow({
-            currentStart: entry.currentStart,
-            naturalDuration,
-            nextAudioStart: nextVoiceStart,
-            compositionEnd: compositionDurationSeconds,
-          });
-
-          return {
-            id: `${taskId}-narration-${entry.item.segmentId}`,
-            sourceUrl: narrationClip.audioUrl ?? null,
-            startAtSeconds: entry.currentStart,
-            durationSeconds: audioWindow.durationSeconds,
-            fadeOutSeconds: audioWindow.fadeOutSeconds,
-            bindToSegmentId: `${taskId}-${entry.item.segmentId}`,
-            text: narrationClip.subtitleText,
-            note: `片段 ${entry.item.shotIndex} 音频`,
-          } satisfies CompositionAudioClip;
-        });
-
-    const includeBackgroundMusic = body.includeBackgroundMusic === true;
-    const backgroundMusicUrl = includeBackgroundMusic ? String(body.backgroundMusicUrl ?? "").trim() || null : null;
-    const audioTracks: CompositionAudioTrack[] = [];
-    if (narrationTrackClips.length > 0) {
-      audioTracks.push({
-        id: `${taskId}-narration-track`,
-        kind: "narration",
-        name: "分段音频",
-        enabled: true,
-        mute: false,
-        volume: 1,
-        clips: narrationTrackClips,
-      });
-    }
-    if (backgroundMusicUrl) {
-      audioTracks.push({
-        id: `${taskId}-bgm-track`,
-        kind: "bgm",
-        name: "背景音乐",
-        enabled: true,
-        mute: false,
-        volume: 0.42,
-        clips: [
-          {
-            id: `${taskId}-bgm-clip`,
-            sourceUrl: backgroundMusicUrl,
-            startAtSeconds: 0,
-            loop: true,
-            fadeInSeconds: 0.8,
-            volume: 0.42,
-          },
-        ],
-      });
-    }
-    const audioPlan: CompositionAudioPlan = {
-      mode: "multi_track",
-      tracks: audioTracks,
-    };
-    const audioMode = allVoiceSegmentsLipSynced
-      ? backgroundMusicUrl
-        ? "source_with_bgm"
-        : "source_only"
-      : narrationTrackClips.length > 0
-        ? backgroundMusicUrl
-          ? "narration_with_bgm"
-          : "narration_only"
-        : backgroundMusicUrl
-          ? "bgm_only"
-          : "mute";
-
-    const subtitleTimeline = timelineEntries
-      .map((entry) => {
-        const narrationClip = entry.narrationClip;
-        const subtitleText = narrationClip?.subtitleText ?? entry.cue?.subtitleText ?? "";
-        const hasSubtitle = narrationClip?.hasSubtitle ?? entry.cue?.hasSubtitle ?? Boolean(subtitleText);
-        if (!hasSubtitle || !subtitleText.trim()) {
-          return null;
+        if (!timeline.length) {
+          throw new Error("没有已完成的片段可供合成，请先完成视频片段生成");
         }
 
-        const narrationTrackClip = narrationTrackClips.find(
-          (clip) => clip.bindToSegmentId === `${taskId}-${entry.item.segmentId}`,
+        emitProgress("composition_prepare", 5, "整理片段时间线...");
+        const materialMap = new Map(clipShots.map((item) => [item.segmentId, item]));
+        const transitionDurationSeconds = 0.45;
+        const durationLookup = new Map<string, number>(
+          clipShots.map((item) => [
+            item.segmentId,
+            (item.job?.resolvedDurationSeconds ?? item.durationSeconds) ||
+              item.job?.generationSettings?.durationSeconds ||
+              task.parameters.video.durationSeconds,
+          ]),
         );
+        const startMap = buildTimelineStarts(timeline, durationLookup, transitionDurationSeconds);
+
+      const segments: CompositionSegment[] = timeline.map((item, index) => {
+        const clipShot = materialMap.get(item.segmentId);
+        if (
+          !clipShot?.job?.jobId ||
+          clipShot.job.status !== "COMPLETED" ||
+          !(clipShot.job.videoUrl || clipShot.job.remoteVideoUrl)
+        ) {
+          throw new Error(`片段 ${item.shotIndex} 尚未生成完成，无法加入视频合成`);
+        }
+
+        const useLipSync =
+          clipShot.lipSyncJob?.status === "COMPLETED" &&
+          Boolean(clipShot.lipSyncJob.videoUrl || clipShot.lipSyncJob.remoteVideoUrl);
+        const effectiveJob = useLipSync ? clipShot.lipSyncJob! : clipShot.job;
+
         return {
-          subtitleText,
-          startAtSeconds: entry.currentStart,
-          durationSeconds:
-            narrationTrackClip?.durationSeconds ??
-            narrationClip?.audioDurationSeconds ??
-            narrationClip?.durationSeconds ??
-            entry.segmentDuration,
-          words: narrationClip?.words,
+          id: `${taskId}-${item.segmentId}`,
+          sourceJobId: effectiveJob.jobId,
+          sourceVideoUrl:
+            effectiveJob.videoUrl ??
+            effectiveJob.remoteVideoUrl ??
+            clipShot.job.videoUrl ??
+            clipShot.job.remoteVideoUrl ??
+            "",
+          order: index,
+          durationSeconds: clipShot.durationSeconds,
+          transition: item.transition ?? "cut",
+          promptSnapshot: clipShot.videoPrompt,
+          note: `片段 ${item.shotIndex}${useLipSync ? "（口型同步）" : ""}`,
         };
-      })
-      .filter(
-        (
-          item,
-        ): item is {
-          subtitleText: string;
-          startAtSeconds: number;
-          durationSeconds: number;
-          words: NarrationDraftClip["words"];
-        } => Boolean(item),
+      });
+      const segmentArtifactErrors = collectLocalMediaArtifactErrors(
+        segments.map((segment) => ({
+          sourceUrl: segment.sourceVideoUrl,
+          label: segment.note || `片段 ${segment.order + 1}`,
+        })),
       );
-    const srtText = buildSrtTextFromTimeline(subtitleTimeline);
+      if (segmentArtifactErrors.length > 0) {
+        throw new Error(`合成素材校验失败：${segmentArtifactErrors.join("；")}`);
+      }
 
-    if (latestComposition) {
-      deleteVideoComposition(latestComposition.compositionId);
-    }
+      const timelineEntries = timeline.map((item) => {
+        const clipShot = materialMap.get(item.segmentId);
+        const renderSegment = directorPlan.renderSegments.find((segment) => segment.segmentId === item.segmentId) ?? null;
+        const segmentIndex = renderSegment?.segmentIndex ?? item.shotIndex;
+        const subtitleEntry = getSegmentSubtitleEntry(directorPlan.subtitlePlan, {
+          segmentId: item.segmentId,
+          segmentIndex,
+        });
+        const subtitleEntries = getSegmentSubtitleEntries(directorPlan.subtitlePlan, {
+          segmentId: item.segmentId,
+          segmentIndex,
+        });
+        const narrationClips = findNarrationClipsForSegment(narrationResult?.clips ?? [], {
+          segmentId: item.segmentId,
+          segmentIndex,
+          shotIndex: item.shotIndex,
+        });
+        return {
+          item,
+          clipShot,
+          narrationClips,
+          renderSegment,
+          subtitleEntry,
+          subtitleEntries,
+          currentStart: startMap.get(item.segmentId) ?? 0,
+          segmentDuration: durationLookup.get(item.segmentId) ?? task.parameters.video.durationSeconds,
+        };
+      });
 
-    const record = createCompositionRecord({
-      taskId,
-      title: task.title,
-      aspectRatio: task.parameters.video.aspectRatio,
-      transitionMode: timeline.some((item) => item.transition === "fade") ? "fade" : "cut",
-      transitionDurationSeconds,
-      audioMode,
-      backgroundMusicUrl,
-      audioPlan,
-      subtitleSrtUrl: null,
-      segments,
-      consistencyProfile: {
-        subjectRule: task.title,
-        sceneRule: "保持片段衔接流畅，字幕位置和风格统一",
-        styleRule: "全片统一口播风格、字幕字号与安全边距",
-        forbiddenRule: "禁止音画不同步、字幕错位、背景音乐压制台词",
-      },
-    });
+      const timedNarrationEntries = timelineEntries
+        .flatMap((entry) => {
+          const fallbackSubtitleWords = splitSegmentWordTimelineBySubtitleEntries(
+            entry.subtitleEntries.map((subtitle) => ({
+              text: subtitle.text,
+              startAtSeconds: subtitle.startAtSeconds,
+              durationSeconds: subtitle.durationSeconds,
+            })),
+            (entry.clipShot?.wordTimeline ?? []) as Array<{ word: string; startTime: number; endTime: number }>,
+          );
+          const sourceEntries =
+            entry.narrationClips.length > 0
+              ? entry.narrationClips.map((clip, index) => ({
+                  id: clip.id || `${entry.item.segmentId}-clip-${index + 1}`,
+                  bindToSegmentId: entry.item.segmentId,
+                  sourceStartAtSeconds: clip.startAtSeconds,
+                  durationSeconds: clip.durationSeconds,
+                  audioDurationSeconds: clip.audioDurationSeconds ?? null,
+                  subtitleText: clip.subtitleText || clip.narrationText || "",
+                  hasSubtitle: clip.hasSubtitle !== false,
+                  hasVoice: clip.hasVoice !== false,
+                  audioUrl: clip.audioUrl ?? null,
+                  words: clip.words?.length
+                    ? clip.words
+                    : ((fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"]),
+                  narrationClip: clip,
+                }))
+              : entry.subtitleEntries.map((subtitle, index) => ({
+                  id: `${entry.item.segmentId}-subtitle-${index + 1}`,
+                  bindToSegmentId: entry.item.segmentId,
+                  sourceStartAtSeconds: subtitle.startAtSeconds,
+                  durationSeconds: subtitle.durationSeconds,
+                  audioDurationSeconds: null,
+                  subtitleText: subtitle.text,
+                  hasSubtitle: true,
+                  hasVoice: false,
+                  audioUrl: null,
+                  words: (fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"],
+                  narrationClip: null,
+                }));
 
-    const subtitleFile = writeSrtSubtitleFile(record.compositionId, srtText, taskId);
-    const recordWithSubtitle = {
-      ...record,
-      subtitleSrtUrl: subtitleFile.publicUrl,
-    };
-    upsertVideoComposition(recordWithSubtitle);
-    const result = await composeVideoProject(recordWithSubtitle);
+          const segmentBaseSourceStart =
+            sourceEntries[0]?.sourceStartAtSeconds ?? entry.subtitleEntry?.startAtSeconds ?? 0;
 
-    const nextTask = patchVideoTask(taskId, {
-      status:
-        result?.status === "COMPLETED" &&
-        getVideoTaskStatusIndex(task.status) < getVideoTaskStatusIndex("COMPOSITION_READY")
-          ? "COMPOSITION_READY"
-          : task.status,
-    });
+          return sourceEntries.map((sourceEntry) => ({
+            ...sourceEntry,
+            entry,
+            compositionStartAtSeconds:
+              entry.currentStart + Math.max(0, sourceEntry.sourceStartAtSeconds - segmentBaseSourceStart),
+          }));
+        })
+        .sort((left, right) => left.compositionStartAtSeconds - right.compositionStartAtSeconds);
 
-    const nextPayload = await buildCompositionPayload(taskId);
-    const runtime = getFfmpegLocalRuntime("FFmpeg 本地服务 · video-composition-runner");
-    return NextResponse.json({
-      ...nextPayload,
-      task: nextTask ?? getVideoTask(taskId) ?? task,
-      result,
-      runtime: {
-        serviceLabel: runtime.serviceLabel,
-        available: runtime.available,
-        statusLabel: runtime.statusLabel,
-      },
+      const voiceEntries = timedNarrationEntries.filter((entry) => entry.hasVoice && Boolean(entry.audioUrl));
+      const voiceTimelineEntries = timelineEntries.filter((entry) => entry.renderSegment?.hasVoice);
+      const allVoiceSegmentsHaveEmbeddedAudio =
+        voiceTimelineEntries.length === 0 ||
+        voiceTimelineEntries.every((entry) => hasEmbeddedSegmentAudio(entry.clipShot));
+      const compositionDurationSeconds = timeline.reduce((maxValue, item) => {
+        const startAtSeconds = startMap.get(item.segmentId) ?? 0;
+        const durationSeconds = durationLookup.get(item.segmentId) ?? 0;
+        return Math.max(maxValue, startAtSeconds + durationSeconds);
+      }, 0);
+
+      const shouldUseNarrationTracks = !allVoiceSegmentsHaveEmbeddedAudio && voiceEntries.length > 0;
+      const narrationTrackClips: CompositionAudioClip[] = shouldUseNarrationTracks
+        ? voiceEntries.map((voiceEntry, index) => {
+            const nextVoiceStart =
+              index < voiceEntries.length - 1 ? voiceEntries[index + 1].compositionStartAtSeconds : null;
+            const naturalDuration = voiceEntry.narrationClip
+              ? resolveNarrationNaturalDuration(voiceEntry.narrationClip)
+              : Math.max(voiceEntry.audioDurationSeconds ?? 0, voiceEntry.durationSeconds, 0.6);
+            const audioWindow = buildNarrationWindow({
+              currentStart: voiceEntry.compositionStartAtSeconds,
+              naturalDuration,
+              nextAudioStart: nextVoiceStart,
+              compositionEnd: compositionDurationSeconds,
+            });
+
+            return {
+              id: `${taskId}-narration-${voiceEntry.id}`,
+              sourceUrl: voiceEntry.audioUrl ?? null,
+              startAtSeconds: voiceEntry.compositionStartAtSeconds,
+              durationSeconds: audioWindow.durationSeconds,
+              fadeOutSeconds: audioWindow.fadeOutSeconds,
+              bindToSegmentId: `${taskId}-${voiceEntry.bindToSegmentId}`,
+              text: voiceEntry.subtitleText,
+              note: `片段 ${voiceEntry.entry.item.shotIndex} 音频`,
+            } satisfies CompositionAudioClip;
+          })
+        : [];
+
+      const taskCompositionParameters = task.parameters.composition;
+      const includeBackgroundMusic =
+        typeof body.includeBackgroundMusic === "boolean"
+          ? body.includeBackgroundMusic
+          : taskCompositionParameters?.includeBackgroundMusic === true;
+      const backgroundMusicUrl = includeBackgroundMusic
+        ? normalizeNullableMediaSourceInput(body.backgroundMusicUrl ?? taskCompositionParameters?.backgroundMusicUrl)
+        : null;
+      const backgroundMusicVolume = normalizeCompositionBackgroundMusicVolume(
+        body.backgroundMusicVolume ?? taskCompositionParameters?.backgroundMusicVolume,
+      );
+      const backgroundMusicGain = getCompositionBackgroundMusicVolumeGain(backgroundMusicVolume);
+      const subtitleConfig = hydrateSubtitleConfig(
+        body.subtitleConfig,
+        taskCompositionParameters?.subtitleConfig ?? latestComposition?.subtitleConfig ?? getDefaultSubtitleConfig(),
+      );
+      const audioTracks: CompositionAudioTrack[] = [];
+      if (narrationTrackClips.length > 0) {
+        audioTracks.push({
+          id: `${taskId}-narration-track`,
+          kind: "narration",
+          name: "分段音频",
+          enabled: true,
+          mute: false,
+          volume: 1,
+          clips: narrationTrackClips,
+        });
+      }
+      if (backgroundMusicUrl) {
+        audioTracks.push({
+          id: `${taskId}-bgm-track`,
+          kind: "bgm",
+          name: "背景音乐",
+          enabled: true,
+          mute: false,
+          volume: backgroundMusicGain,
+          clips: [
+            {
+              id: `${taskId}-bgm-clip`,
+              sourceUrl: backgroundMusicUrl,
+              startAtSeconds: 0,
+              loop: true,
+              fadeInSeconds: 0.8,
+              volume: 1,
+            },
+          ],
+        });
+      }
+      const audioPlan: CompositionAudioPlan = {
+        mode: "multi_track",
+        tracks: audioTracks,
+      };
+      const audioArtifactErrors = collectLocalMediaArtifactErrors(
+        audioTracks.flatMap((track) =>
+          track.clips
+            .filter((clip) => Boolean(clip.sourceUrl))
+            .map((clip) => ({
+              sourceUrl: clip.sourceUrl,
+              label: `${track.name}${clip.note ? `（${clip.note}）` : ""}`,
+            })),
+        ),
+      );
+      if (audioArtifactErrors.length > 0) {
+        throw new Error(`合成音频校验失败：${audioArtifactErrors.join("；")}`);
+      }
+      const audioMode = allVoiceSegmentsHaveEmbeddedAudio
+        ? backgroundMusicUrl
+          ? "source_with_bgm"
+          : "source_only"
+        : narrationTrackClips.length > 0
+          ? backgroundMusicUrl
+            ? "narration_with_bgm"
+            : "narration_only"
+          : backgroundMusicUrl
+            ? "bgm_only"
+            : "mute";
+
+      const narrationTrackClipMap = new Map(narrationTrackClips.map((clip) => [clip.id, clip]));
+      const subtitleTimeline = timedNarrationEntries
+        .map((entry) => {
+          if (!entry.hasSubtitle || !entry.subtitleText.trim()) {
+            return null;
+          }
+
+          const narrationTrackClip = narrationTrackClipMap.get(`${taskId}-narration-${entry.id}`);
+          return {
+            subtitleText: entry.subtitleText,
+            startAtSeconds: entry.compositionStartAtSeconds,
+            durationSeconds: resolveSubtitleSpeechDuration({
+              words: entry.words,
+              audioDurationSeconds: entry.audioDurationSeconds,
+              audioWindowDurationSeconds: narrationTrackClip?.durationSeconds,
+              fallbackDurationSeconds: entry.durationSeconds ?? entry.entry.segmentDuration,
+            }),
+            words: entry.words,
+          };
+        })
+        .filter(
+          (
+            item,
+          ): item is {
+            subtitleText: string;
+            startAtSeconds: number;
+            durationSeconds: number;
+            words: NarrationDraftClip["words"];
+          } => Boolean(item),
+        );
+      const srtText =
+        subtitleConfig.enabled && subtitleTimeline.length > 0
+          ? buildSrtTextFromTimeline(subtitleTimeline, subtitleConfig)
+          : "";
+
+        emitProgress("composition_prepare", 8, "写入字幕时间轴...");
+        const record = createCompositionRecord({
+          taskId,
+          title: task.title,
+          aspectRatio: task.parameters.video.aspectRatio,
+        transitionMode: timeline.some((item) => item.transition === "fade") ? "fade" : "cut",
+        transitionDurationSeconds,
+        audioMode,
+        backgroundMusicUrl,
+        backgroundMusicVolume,
+        audioPlan,
+        subtitleSrtUrl: null,
+        subtitleConfig,
+        segments,
+        consistencyProfile: {
+          subjectRule: task.title,
+          sceneRule: "保持片段衔接流畅，字幕位置和风格统一",
+          styleRule: "全片统一口播风格、字幕字号与安全边距",
+          forbiddenRule: "禁止音画不同步、字幕错位、背景音乐压制台词",
+          },
+        });
+
+        const subtitleFile =
+          subtitleConfig.enabled && srtText.trim() ? writeSrtSubtitleFile(record.compositionId, srtText, taskId) : null;
+        const recordWithSubtitle = {
+          ...record,
+          subtitleSrtUrl: subtitleFile?.publicUrl ?? null,
+        };
+        upsertVideoComposition(recordWithSubtitle);
+
+        emitProgress("composition_prepare", 12, "提交本地合成服务...");
+        const result = await composeVideoProject(recordWithSubtitle, { onProgress: emitProgress });
+        if (!result || result.status !== "COMPLETED") {
+          throw new Error(result?.error ?? "视频合成失败");
+        }
+
+        const nextTask = patchVideoTask(taskId, {
+          status:
+            getVideoTaskStatusIndex(task.status) < getVideoTaskStatusIndex("COMPOSITION_READY")
+              ? "COMPOSITION_READY"
+              : task.status,
+        });
+
+        const nextPayload = await buildCompositionPayload(taskId);
+        stageProgress.complete("视频合成完成");
+        return {
+          ...nextPayload,
+          task: nextTask ?? getVideoTask(taskId) ?? task,
+          result,
+          runtime: {
+            serviceLabel: runtime.serviceLabel,
+            available: runtime.available,
+            statusLabel: runtime.statusLabel,
+          },
+        };
+      } catch (error) {
+        stageProgress.fail(error);
+        throw error;
+      }
     });
   } catch (error) {
+    if (error instanceof BadRequestError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : "视频合成失败" }, { status: 500 });
   }
 }

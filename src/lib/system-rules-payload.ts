@@ -3,7 +3,7 @@ import {
   getEffectiveConstraintPrompt,
   type ConstraintPromptStageKey,
 } from "./constraint-prompt-store";
-import { getNarrationLengthGuidance } from "./narration";
+import { buildNarrationLengthGuidanceDescription, getNarrationLengthGuidance } from "./narration";
 import {
   getConstraintPresetDetectionDocs,
   taskConstraintPresets,
@@ -26,7 +26,7 @@ export type SystemRulesSection = {
   usedAtStep: string;
   apiEntry: string;
   codeEntry: string;
-  items: Array<{ label?: string; body: string }>;
+  items: Array<{ category: string; label: string; body: string }>;
 };
 
 export type SystemRulesTabPayload = {
@@ -59,7 +59,6 @@ export type SystemRulesPayload = {
 };
 
 function tabShotPlanAndNarration(): SystemRulesTabPayload {
-  const example = getNarrationLengthGuidance(5);
   return {
     id: "shot_plan",
     title: "镜头计划与解说",
@@ -67,40 +66,19 @@ function tabShotPlanAndNarration(): SystemRulesTabPayload {
     sections: [
       {
         title: "镜头计划程序校验（validateShotPlan）",
-        plainPurpose:
-          "检查模型生成的镜头计划能不能继续往下走，先把镜头数不对、留白乱掉、人物约束不满足这些问题拦下来。",
+        plainPurpose: "检查模型生成的镜头计划能不能继续往下走，先把镜头数不对、留白乱掉、人物约束不满足这些问题拦下来。",
         usedAtStep: "导演模式 -> 第二步：镜头计划生成后，进入提示词初稿生成前",
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/lib/video-task-planner.ts -> validateShotPlan",
         items: [
-          {
-            body: "镜头条数必须等于任务参数中的「规划镜头数」（storyShotCount）；否则报错并触发修复流程。",
-          },
-          {
-            body: "每个镜头的 durationSeconds 必须大于 0，并允许在总时长内做不完全平均分配；重点是结构自然而不是机械等长。",
-          },
-          {
-            body: "每个镜头的 sceneDescription 不能为空（去空白后）；否则按镜头编号报错。",
-          },
-          {
-            body: "凡标记为 hasVoice / hasSubtitle 的镜头，narrationHint 不能为空；否则按镜头编号报错。",
-          },
-          {
-            label: "约束：每镜必须有人物",
-            body: "当 requirePeopleInEveryShot 为 true 时，每个镜头的 hasCharacters 必须为 true；否则按镜头编号报错。",
-          },
-          {
-            label: "约束：两成年人为一男一女",
-            body: "当 adultGenderRule 为 one_male_one_female 时：若某镜有至少 2 个被识别为「成年人」的角色标识，则其中须同时包含男性侧（father / dad / 爸）与女性侧（mother / mom / 妈）关键词；成年人识别规则为角色名匹配 father|mother|dad|mom|爸|妈|大人|adult。",
-          },
-          {
-            label: "约束：人物高一致性",
-            body: "当 characterConsistency 为 high 时：若多个镜头均有人物，则任意镜头中出现的人物标识须出现在其他有人物的镜头中出现过的人物集合里；否则视为「未定义的新人物」并报错。",
-          },
-          {
-            label: "混剪口播分布",
-            body: "对于多镜头混剪类视频：程序会检查是否出现“每个镜头都要口播”的过密分布。开场和收尾通常需要口播，但中间应保留至少一部分留白镜头。",
-          },
+          { category: "校验", label: "镜头条数", body: "镜头条数必须等于任务参数中的「规划镜头数」（storyShotCount）；否则报错并触发修复流程。" },
+          { category: "校验", label: "镜头时长", body: "每个镜头的 durationSeconds 必须大于 0，并允许在总时长内做不完全平均分配；重点是结构自然而不是机械等长。" },
+          { category: "校验", label: "场景描述", body: "每个镜头的 sceneDescription 不能为空（去空白后）；否则按镜头编号报错。" },
+          { category: "校验", label: "口播提示词", body: "凡标记为 hasVoice / hasSubtitle 的镜头，narrationHint 不能为空；否则按镜头编号报错。" },
+          { category: "约束", label: "每镜必须有人物", body: "当 requirePeopleInEveryShot 为 true 时，每个镜头的 hasCharacters 必须为 true；否则按镜头编号报错。" },
+          { category: "约束", label: "两成年人为一男一女", body: "当 adultGenderRule 为 one_male_one_female 时：若某镜有至少 2 个被识别为「成年人」的角色标识，则其中须同时包含男性侧（father / dad / 爸）与女性侧（mother / mom / 妈）关键词；成年人识别规则为角色名匹配 father|mother|dad|mom|爸|妈|大人|adult。" },
+          { category: "约束", label: "人物高一致性", body: "当 characterConsistency 为 high 时：若多个镜头均有人物，则任意镜头中出现的人物标识须出现在其他有人物的镜头中出现过的人物集合里；否则视为「未定义的新人物」并报错。" },
+          { category: "规则", label: "混剪口播分布", body: "对于多镜头混剪类视频：程序会检查是否出现「每个镜头都要口播」的过密分布。开场和收尾通常需要口播，但中间应保留至少一部分留白镜头。" },
         ],
       },
       {
@@ -110,9 +88,7 @@ function tabShotPlanAndNarration(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/lib/video-task-planner.ts -> generateVideoTaskDraftBundle",
         items: [
-          {
-            body: `若校验仍有问题，系统最多再请求 LLM ${SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS} 次，每次附上错误列表并要求在保持其余镜头不变的前提下输出完整 JSON。超过轮次后，剩余问题写入 shotPlan.validationErrors，任务仍会继续生成下游提示词。`,
-          },
+          { category: "修复", label: "自动修复轮次", body: `若校验仍有问题，系统最多再请求 LLM ${SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS} 次，每次附上错误列表并要求在保持其余镜头不变的前提下输出完整 JSON。超过轮次后，剩余问题写入 shotPlan.validationErrors，任务仍会继续生成下游提示词。` },
         ],
       },
       {
@@ -122,34 +98,45 @@ function tabShotPlanAndNarration(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/lib/video-task-planner.ts -> repairNarrationIfOverLimit",
         items: [
-          {
-            body: "生成三份草稿后，系统按「镜头N：」格式解析解说词，并对超时风险、机械化 Day 开头、句尾“哦”、句尾标点等问题尝试调用模型重写。",
-          },
-          {
-            body: `缩写助手最多执行 ${NARRATION_LENGTH_MAX_REPAIR_ROUNDS} 轮；仅在文生配置 liveEnabled 时才会调用模型。`,
-          },
-          {
-            label: "字数公式（与 getNarrationLengthGuidance 一致）",
-            body: `设每段时长为 D 秒（至少按 1 秒计），则 minCharacters = max(6, floor(D×1.8))，suggestedCharacters = max(min+1, floor(D×2.4))，maxCharacters = max(suggested+2, floor(D×3.0))。示例 D=5 秒：min=${example.minCharacters}，max=${example.maxCharacters}，建议≈${example.suggestedCharacters}（不含标点与空格）。`,
-          },
+          { category: "规则", label: "解说词超时检测", body: "生成三份草稿后，系统会按「镜头N：」或「片段N：」格式解析解说词，并对超时风险、机械化 Day 开头、句尾「哦」、句尾标点等问题尝试调用模型重写。" },
+          { category: "规则", label: "缩写轮次限制", body: `缩写助手最多执行 ${NARRATION_LENGTH_MAX_REPAIR_ROUNDS} 轮；仅在文生配置 liveEnabled 时才会调用模型。` },
+          { category: "公式", label: "字数计算", body: buildNarrationLengthGuidanceDescription(5) },
         ],
       },
     ],
   };
 }
 
+const peopleStructureLabel: Record<string, string> = {
+  "2_adults_2_children": "2大2小",
+  "2_adults_1_child": "2大1小",
+  "1_adult_2_children": "1大2小",
+  "couple": "情侣",
+  "single": "单人",
+};
+
+const consistencyLabel: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+  none: "无",
+};
+
 function tabTaskConstraints(): SystemRulesTabPayload {
   const presetRows = (Object.keys(taskConstraintPresets) as TaskConstraintPresetKey[]).map((key) => {
     const p = taskConstraintPresets[key];
     const c = p.constraints;
     const parts = [
-      `peopleStructure=${JSON.stringify(c.peopleStructure)}`,
-      `adultGenderRule=${JSON.stringify(c.adultGenderRule)}`,
-      `characterConsistency=${c.characterConsistency}`,
-      `sceneConsistency=${c.sceneConsistency}`,
-      `forbidEmptyShots=${c.forbidEmptyShots}`,
-      `requirePeopleInEveryShot=${c.requirePeopleInEveryShot}`,
+      `人物结构=${c.peopleStructure ? (peopleStructureLabel[c.peopleStructure] ?? c.peopleStructure) : "无"}`,
+      `性别规则=${c.adultGenderRule === "one_male_one_female" ? "一男一女" : "无"}`,
+      `人物一致性=${consistencyLabel[c.characterConsistency] ?? c.characterConsistency}`,
+      `场景一致性=${consistencyLabel[c.sceneConsistency] ?? c.sceneConsistency}`,
+      `禁止空镜=${c.forbidEmptyShots ? "是" : "否"}`,
+      `每镜需有人物=${c.requirePeopleInEveryShot ? "是" : "否"}`,
     ];
+    if (c.customRules?.length) {
+      parts.push(`预设内附加约束=${c.customRules.length}条`);
+    }
     return { label: p.label, key, detail: parts.join("，") };
   });
 
@@ -167,12 +154,8 @@ function tabTaskConstraints(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/app/api/video-tasks/route.ts -> POST",
         items: [
-          {
-            body: "必须至少提供商品信息快照或用户提示词其一，否则拒绝创建。",
-          },
-          {
-            body: "constraints = 所选预设的字段副本 + customRules：用户在表单「自定义约束」中按行填写的非空行会进入 customRules 数组。",
-          },
+          { category: "校验", label: "必填信息", body: "必须至少提供商品信息快照或用户提示词其一，否则拒绝创建。" },
+          { category: "规则", label: "约束合并", body: "constraints = 所选预设的字段副本 + customRules：用户在表单「自定义约束」中按行填写的非空行会进入 customRules 数组。" },
         ],
       },
       {
@@ -182,8 +165,9 @@ function tabTaskConstraints(): SystemRulesTabPayload {
         apiEntry: "前端表单 + POST /api/video-tasks",
         codeEntry: "src/lib/video-task-schema.ts -> taskConstraintPresets",
         items: presetRows.map((r) => ({
+          category: "预设",
           label: r.label,
-          body: `${r.key}：${r.detail}`,
+          body: r.detail,
         })),
       },
       {
@@ -193,10 +177,9 @@ function tabTaskConstraints(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/lib/video-task-schema.ts -> detectConstraintPreset",
         items: [
-          {
-            body: "将商品标题、快照、用户提示词拼接后，按下列顺序用正则匹配，命中则采用对应预设；均未命中则为「通用」。",
-          },
+          { category: "规则", label: "自动识别流程", body: "将商品标题、快照、用户提示词拼接后，按下列顺序用正则匹配，命中则采用对应预设；均未命中则为「通用」。" },
           ...detection.map((d) => ({
+            category: "识别",
             label: d.presetLabel,
             body: `正则源码：/${d.patternSource}/`,
           })),
@@ -209,18 +192,14 @@ function tabTaskConstraints(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks",
         codeEntry: "src/lib/video-task-planner.ts -> buildConstraintRules",
         items: [
-          {
-            body: "在「系统提示词 → 镜头计划生成」生效文案之后，若有下列情况，会追加编号列表「本任务的专属约束（必须严格遵守）」。",
-          },
-          { body: "peopleStructure 非空：注入人物结构说明（值为原始字段，如 2_adults_2_children）。" },
-          {
-            body: "adultGenderRule === one_male_one_female：注入双成年人须为一男一女（father/mother），禁止同性双成年人。",
-          },
-          { body: "requirePeopleInEveryShot：注入每镜必须有人物、禁止纯空镜。" },
-          { body: "forbidEmptyShots：注入禁止无视觉主体的空镜。" },
-          { body: "characterConsistency 为 high / medium：注入对应等级的人物一致性说明。" },
-          { body: "sceneConsistency 为 high：注入场景高一致性说明。" },
-          { body: "customRules 每条非空行：以「自定义约束：」前缀逐条注入。" },
+          { category: "规则", label: "注入时机", body: "在「系统提示词 → 镜头计划生成」生效文案之后，若有下列情况，会追加编号列表「本任务的专属约束（必须严格遵守）」。" },
+          { category: "注入", label: "人物结构", body: "peopleStructure 非空：注入人物结构说明（值为原始字段，如 2_adults_2_children）。" },
+          { category: "注入", label: "性别规则", body: "adultGenderRule === one_male_one_female：注入双成年人须为一男一女（father/mother），禁止同性双成年人。" },
+          { category: "注入", label: "每镜有人物", body: "requirePeopleInEveryShot：注入每镜必须有人物、禁止纯空镜。" },
+          { category: "注入", label: "禁止空镜", body: "forbidEmptyShots：注入禁止无视觉主体的空镜。" },
+          { category: "注入", label: "人物一致性", body: "characterConsistency 为 high / medium：注入对应等级的人物一致性说明。" },
+          { category: "注入", label: "场景一致性", body: "sceneConsistency 为 high：注入场景高一致性说明。" },
+          { category: "注入", label: "自定义约束", body: "customRules 每条非空行：以「自定义约束：」前缀逐条注入。" },
         ],
       },
     ],
@@ -236,17 +215,15 @@ function tabDownstreamValidation(): SystemRulesTabPayload {
       {
         title: "字幕音频（validateNarrationResult）",
         plainPurpose: "检查字幕音频阶段有没有音频缺失、超时、语速异常、字幕空掉这些问题。",
-        usedAtStep: "导演模式 -> 第三步：音频字幕生成后",
+        usedAtStep: "导演模式 -> 第三步：字幕生成后",
         apiEntry: "POST /api/video-tasks/[taskId]/subtitle-audio-run",
         codeEntry: "src/lib/generation-validator.ts -> validateNarrationResult",
         items: [
-          { body: "音频 cue 数量须等于 directorPlan 中需要口播/字幕的单元数量。" },
-          { body: "每个片段须具备 audioUrl，否则为 error。" },
-          {
-            body: "单段解说时长若显著超过目标片段时长，会直接记 error；轻微超出则记 warning，优先要求在生成阶段压缩文本，而不是在合成阶段淡出截断。",
-          },
-          { body: "若检测到单位时间内文本量明显偏低，会判定语速异常偏慢并记 warning / error。" },
-          { body: "解说词与字幕若均为空，记 warning。" },
+          { category: "校验", label: "音频数量", body: "音频 cue 数量须等于 directorPlan 中需要口播/字幕的单元数量。" },
+          { category: "校验", label: "音频文件", body: "每个片段须具备 audioUrl，否则为 error。" },
+          { category: "校验", label: "时长超限", body: "单段解说时长若显著超过目标片段时长，会直接记 error；轻微超出则记 warning，优先要求在生成阶段压缩文本，而不是在合成阶段淡出截断。" },
+          { category: "校验", label: "语速异常", body: "若检测到单位时间内文本量明显偏低，会判定语速异常偏慢并记 warning / error。" },
+          { category: "校验", label: "字幕为空", body: "解说词与字幕若均为空，记 warning。" },
         ],
       },
       {
@@ -256,8 +233,8 @@ function tabDownstreamValidation(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks/[taskId]/visual-images",
         codeEntry: "src/lib/generation-validator.ts -> validateVisualImages",
         items: [
-          { body: "图片镜头数须等于 segmentCount。" },
-          { body: "已确认张数少于 segmentCount 时记 warning；一张未确认为 error。" },
+          { category: "校验", label: "图片数量", body: "图片镜头数须等于 segmentCount。" },
+          { category: "校验", label: "确认状态", body: "已确认张数少于 segmentCount 时记 warning；一张未确认为 error。" },
         ],
       },
       {
@@ -267,11 +244,11 @@ function tabDownstreamValidation(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-tasks/[taskId]/clip-runs",
         codeEntry: "src/lib/generation-validator.ts -> validateClipShots",
         items: [
-          { body: "片段条数须等于 segmentCount。" },
-          { body: "存在 FAILED 任务为 error。" },
-          { body: "COMPLETED 但无 videoUrl/remoteVideoUrl 为 error。" },
-          { body: "resolvedDurationSeconds 与目标时长偏差超过 25% 为 warning。" },
-          { body: "仍有未完成且未失败的片段为 warning。" },
+          { category: "校验", label: "片段条数", body: "片段条数须等于 segmentCount。" },
+          { category: "校验", label: "失败任务", body: "存在 FAILED 任务为 error。" },
+          { category: "校验", label: "缺少视频", body: "COMPLETED 但无 videoUrl/remoteVideoUrl 为 error。" },
+          { category: "校验", label: "时长偏差", body: "resolvedDurationSeconds 与目标时长偏差超过 25% 为 warning。" },
+          { category: "校验", label: "未完成片段", body: "仍有未完成且未失败的片段为 warning。" },
         ],
       },
       {
@@ -281,10 +258,8 @@ function tabDownstreamValidation(): SystemRulesTabPayload {
         apiEntry: "POST /api/video-materials/[materialId]",
         codeEntry: "src/lib/video-analyzer.ts -> validateAnalysisCompleteness",
         items: [
-          {
-            body: "解析为 JSON 后须包含顶层字段：视频级信息、开篇设计、镜头序列、结尾设计、商品与卖点、全局视觉规则、Prompt生成指令；缺失则会重试分析（次数由调用方决定）。",
-          },
-          { body: "JSON 无法解析时视为缺少「合法 JSON」。" },
+          { category: "校验", label: "必要字段", body: "解析为 JSON 后须包含顶层字段：视频级信息、开篇设计、镜头序列、结尾设计、商品与卖点、全局视觉规则、Prompt生成指令；缺失则会重试分析（次数由调用方决定）。" },
+          { category: "校验", label: "JSON 合法性", body: "JSON 无法解析时视为缺少「合法 JSON」。" },
         ],
       },
       {
@@ -294,6 +269,7 @@ function tabDownstreamValidation(): SystemRulesTabPayload {
         apiEntry: "多个接口共用",
         codeEntry: "src/lib/video-task-schema.ts -> videoTaskStatusFlow",
         items: videoTaskStatusFlow.map((s) => ({
+          category: "状态",
           label: s.label,
           body: s.description,
         })),

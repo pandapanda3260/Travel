@@ -15,6 +15,7 @@ export type NarrationDraftClip = {
   visualFocus: string;
   narrationText: string;
   subtitleText: string;
+  spokenText?: string | null;
   note: string;
   hasVoice?: boolean;
   hasSubtitle?: boolean;
@@ -110,6 +111,33 @@ export function sanitizeNarrationText(
   return result.trim();
 }
 
+export function normalizeNarrationSpokenText(
+  text: string | null | undefined,
+  options?: {
+    stripLeadingDayPrefix?: boolean;
+    removeTerminalOh?: boolean;
+  },
+) {
+  const normalized = String(text ?? "")
+    .replace(/\s+/g, "")
+    .replace(/([，。！？；、：,.!?;]){2,}/g, "$1")
+    .trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  let result = normalized;
+  if (options?.stripLeadingDayPrefix) {
+    result = result.replace(/^(?:第[一二三四五六七八九十两\d]+天|Day\s*\d+)[：:，、|｜-]*/i, "");
+  }
+  if (options?.removeTerminalOh !== false) {
+    result = result.replace(terminalOhPattern, "");
+  }
+
+  return result.trim();
+}
+
 export function trimNarrationToCharacterLimit(text: string, maxCharacters: number) {
   const sanitized = sanitizeNarrationText(text, { stripTerminalPunctuation: false });
   if (!sanitized) {
@@ -145,17 +173,53 @@ export function trimNarrationToCharacterLimit(text: string, maxCharacters: numbe
   return sanitizeNarrationText(result);
 }
 
+export const NARRATION_LENGTH_GUIDANCE_MIN_RATE = 1.3;
+export const NARRATION_LENGTH_GUIDANCE_SUGGESTED_RATE = 3.4;
+export const NARRATION_LENGTH_GUIDANCE_MAX_RATE = 5.6;
+export const NARRATION_LENGTH_GUIDANCE_MIN_FLOOR = 6;
+export const NARRATION_LENGTH_GUIDANCE_SUGGESTED_OFFSET = 2;
+export const NARRATION_LENGTH_GUIDANCE_MAX_OFFSET = 4;
+export const NARRATION_REPAIR_TRIGGER_EXTRA_MIN = 6;
+export const NARRATION_REPAIR_TRIGGER_EXTRA_RATIO = 0.2;
+export const NARRATION_EMERGENCY_TRIM_EXTRA_MIN = 10;
+export const NARRATION_EMERGENCY_TRIM_EXTRA_RATIO = 0.35;
+export const NARRATION_DURATION_OVERFLOW_TOLERANCE_MIN_SECONDS = 0.8;
+export const NARRATION_DURATION_OVERFLOW_TOLERANCE_RATIO = 0.18;
+
 export function getNarrationLengthGuidance(durationSeconds: number) {
-  const normalizedDuration = Math.max(1, Math.round(durationSeconds));
-  const minCharacters = Math.max(6, Math.floor(normalizedDuration * 1.8));
-  const suggestedCharacters = Math.max(minCharacters + 1, Math.floor(normalizedDuration * 2.4));
-  const maxCharacters = Math.max(suggestedCharacters + 2, Math.floor(normalizedDuration * 3.0));
+  const normalizedDuration = Math.max(1, Number(durationSeconds) || 1);
+  const minCharacters = Math.max(
+    NARRATION_LENGTH_GUIDANCE_MIN_FLOOR,
+    Math.floor(normalizedDuration * NARRATION_LENGTH_GUIDANCE_MIN_RATE),
+  );
+  const suggestedCharacters = Math.max(
+    minCharacters + NARRATION_LENGTH_GUIDANCE_SUGGESTED_OFFSET,
+    Math.floor(normalizedDuration * NARRATION_LENGTH_GUIDANCE_SUGGESTED_RATE),
+  );
+  const maxCharacters = Math.max(
+    suggestedCharacters + NARRATION_LENGTH_GUIDANCE_MAX_OFFSET,
+    Math.floor(normalizedDuration * NARRATION_LENGTH_GUIDANCE_MAX_RATE),
+  );
 
   return {
     minCharacters,
     maxCharacters,
     suggestedCharacters,
   };
+}
+
+export function buildNarrationLengthGuidanceDescription(exampleDurationSeconds: number) {
+  const duration = Math.max(1, Number(exampleDurationSeconds) || 1);
+  const guidance = getNarrationLengthGuidance(duration);
+  const repairTriggerCharacters = getNarrationRepairTriggerCharacters(duration);
+  const emergencyTrimCharacters = getNarrationEmergencyTrimCharacters(duration);
+  return [
+    `程序使用 getNarrationLengthGuidance() 预算字数：minCharacters = max(${NARRATION_LENGTH_GUIDANCE_MIN_FLOOR}, floor(D×${NARRATION_LENGTH_GUIDANCE_MIN_RATE}))`,
+    `suggestedCharacters = max(min+${NARRATION_LENGTH_GUIDANCE_SUGGESTED_OFFSET}, floor(D×${NARRATION_LENGTH_GUIDANCE_SUGGESTED_RATE}))`,
+    `maxCharacters = max(suggested+${NARRATION_LENGTH_GUIDANCE_MAX_OFFSET}, floor(D×${NARRATION_LENGTH_GUIDANCE_MAX_RATE}))。`,
+    `示例 D=${duration} 秒：min=${guidance.minCharacters}，suggested=${guidance.suggestedCharacters}，max=${guidance.maxCharacters}（不含标点与空格）。`,
+    `系统只会在文本明显超出安全区时才触发修文或硬裁：repairTrigger≈${repairTriggerCharacters}，emergencyTrim≈${emergencyTrimCharacters}。`,
+  ].join("；");
 }
 
 export function estimateNarrationReadingSeconds(text: string) {
@@ -172,13 +236,52 @@ export function estimateNarrationReadingSeconds(text: string) {
   return Number((speechUnits / 3.6 + pauseCount * 0.12).toFixed(1));
 }
 
+export function getNarrationRepairTriggerCharacters(durationSeconds: number) {
+  const guidance = getNarrationLengthGuidance(durationSeconds);
+  return (
+    guidance.maxCharacters +
+    Math.max(
+      NARRATION_REPAIR_TRIGGER_EXTRA_MIN,
+      Math.floor(guidance.maxCharacters * NARRATION_REPAIR_TRIGGER_EXTRA_RATIO),
+    )
+  );
+}
+
+export function getNarrationEmergencyTrimCharacters(durationSeconds: number) {
+  const guidance = getNarrationLengthGuidance(durationSeconds);
+  return (
+    guidance.maxCharacters +
+    Math.max(
+      NARRATION_EMERGENCY_TRIM_EXTRA_MIN,
+      Math.floor(guidance.maxCharacters * NARRATION_EMERGENCY_TRIM_EXTRA_RATIO),
+    )
+  );
+}
+
+export function getNarrationDurationOverflowTolerance(durationSeconds: number) {
+  return Math.max(
+    NARRATION_DURATION_OVERFLOW_TOLERANCE_MIN_SECONDS,
+    (Number(durationSeconds) || 0) * NARRATION_DURATION_OVERFLOW_TOLERANCE_RATIO,
+  );
+}
+
+export function isNarrationClearlyOverDuration(text: string, durationSeconds: number) {
+  if (durationSeconds <= 0) {
+    return false;
+  }
+
+  return (
+    estimateNarrationReadingSeconds(text) > durationSeconds + getNarrationDurationOverflowTolerance(durationSeconds)
+  );
+}
+
 export function isNarrationSpeechRateTooSlow(text: string, actualDurationSeconds: number) {
   const speechUnits = countNarrationSpeechUnits(text);
   if (!speechUnits || actualDurationSeconds <= 0) {
     return false;
   }
 
-  return speechUnits / actualDurationSeconds < 2.1;
+  return speechUnits / actualDurationSeconds < 1.85;
 }
 
 export function buildCompositionPromptSummary(composition: VideoCompositionRecord) {

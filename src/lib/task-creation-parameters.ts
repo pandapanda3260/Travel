@@ -1,4 +1,5 @@
 import { defaultVideoNegativePrompt } from "./prompt";
+import { normalizeMediaSourceInput } from "./media-source-input";
 import {
   computeVideoTaskStoryShotCount,
   DEFAULT_VIDEO_TASK_VIDEO_TYPE,
@@ -9,6 +10,7 @@ import {
   type TaskConstraintPresetKey,
   type VideoTaskVideoType,
 } from "./video-task-schema";
+import { getDefaultSubtitleConfig, hydrateSubtitleConfig, type SubtitleConfig } from "./subtitle-style-config";
 
 export const imageSizeOptions = [
   { label: "1:1 方图", value: "2048x2048" },
@@ -42,19 +44,29 @@ export const videoTypeOptions = (
   value: profile.key,
 }));
 
+const visibleTaskCreationVideoTypes = new Set<VideoTaskVideoType>([
+  "hotel_explore_roaming_voiceover",
+  "agency_guide_voiceover",
+  "retail_explore_presenter_narration",
+]);
+
+export const taskCreationVisibleVideoTypeOptions = videoTypeOptions.filter((option) =>
+  visibleTaskCreationVideoTypes.has(option.value),
+);
+
 export const videoShotTypeOptions = [
   { label: "自定义分镜", value: "customize" },
   { label: "智能分镜", value: "intelligence" },
 ] as const;
 
 export const videoExpectedDurationOptions = [
-  { label: "15～25 秒", value: "15_25", minSeconds: 15, maxSeconds: 25, segmentCount: 5, durationSeconds: 5 },
+  { label: "15～25 秒", value: "15_25", minSeconds: 15, maxSeconds: 25, segmentCount: 5, durationSeconds: 4 },
   { label: "25～35 秒", value: "25_35", minSeconds: 25, maxSeconds: 35, segmentCount: 6, durationSeconds: 5 },
-  { label: "35～60 秒", value: "35_60", minSeconds: 35, maxSeconds: 60, segmentCount: 9, durationSeconds: 5 },
+  { label: "35～60 秒", value: "35_60", minSeconds: 35, maxSeconds: 60, segmentCount: 9, durationSeconds: 6 },
 ] as const;
 
 export const videoSegmentCountOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
-export const videoDurationOptions = [5, 10] as const;
+export const videoDurationOptions = [4, 5, 6, 7, 10] as const;
 export const videoAspectRatioOptions = ["16:9", "9:16", "1:1"] as const;
 export const videoCfgScaleOptions = [0.3, 0.5, 0.7, 1] as const;
 
@@ -106,10 +118,34 @@ export const audioSubtitleOptions = [
   { label: "关闭时间戳", value: false, description: "仅生成音频，字幕按片段时长回推。" },
 ] as const;
 
+export const compositionBackgroundMusicVolumeOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+export const defaultCompositionBackgroundMusicVolume = 6;
+
+export type CompositionBackgroundMusicVolumeLevel = (typeof compositionBackgroundMusicVolumeOptions)[number];
+
+export function normalizeCompositionBackgroundMusicVolume(value: unknown): CompositionBackgroundMusicVolumeLevel {
+  if (value == null || value === "") {
+    return defaultCompositionBackgroundMusicVolume;
+  }
+
+  const numericValue = typeof value === "number" ? value : Number(value);
+  const roundedValue = Math.round(
+    Number.isFinite(numericValue) ? numericValue : defaultCompositionBackgroundMusicVolume,
+  );
+  const clampedValue = Math.min(10, Math.max(1, roundedValue));
+  return clampedValue as CompositionBackgroundMusicVolumeLevel;
+}
+
+export function getCompositionBackgroundMusicVolumeGain(value: unknown) {
+  const volumeLevel = normalizeCompositionBackgroundMusicVolume(value);
+  return Number((volumeLevel / 8).toFixed(2));
+}
+
 export type TaskCreationParameterState = {
   taskTitle: string;
   selectedProductId: string;
   userPrompt: string;
+  optimizedUserPrompt: string;
   /** 与参考素材预设或素材库 `materialId` 对应；空字符串表示未选 */
   videoMaterialId: string;
   imageSize: (typeof imageSizeOptions)[number]["value"];
@@ -139,10 +175,40 @@ export type TaskCreationParameterState = {
   audioSpeechRate: (typeof audioSpeechRateOptions)[number]["value"];
   audioLoudnessRate: (typeof audioLoudnessRateOptions)[number]["value"];
   audioEnableSubtitle: boolean;
+  compositionIncludeBackgroundMusic: boolean;
+  compositionBackgroundMusicUrl: string;
+  compositionBackgroundMusicVolume: CompositionBackgroundMusicVolumeLevel;
+  compositionSubtitleConfig: SubtitleConfig;
   constraintPreset: TaskConstraintPresetKey;
   constraintCustomRules: string;
   lastCreatedDraftKey: string;
 };
+
+const defaultExpectedDurationDefaults: Record<
+  VideoTaskExpectedDurationRange,
+  {
+    segmentCount: (typeof videoSegmentCountOptions)[number];
+    durationSeconds: (typeof videoDurationOptions)[number];
+  }
+> = {
+  "15_25": { segmentCount: 5, durationSeconds: 5 },
+  "25_35": { segmentCount: 6, durationSeconds: 5 },
+  "35_60": { segmentCount: 9, durationSeconds: 5 },
+};
+
+const agencyGuideVoiceoverExpectedDurationDefaults: typeof defaultExpectedDurationDefaults = {
+  "15_25": { segmentCount: 5, durationSeconds: 4 },
+  "25_35": { segmentCount: 6, durationSeconds: 5 },
+  "35_60": { segmentCount: 9, durationSeconds: 6 },
+};
+
+function getTaskCreationExpectedDurationPresetMap(videoType: VideoTaskVideoType) {
+  if (videoType === "agency_guide_voiceover" || videoType === "agency_guide_roaming_voiceover") {
+    return agencyGuideVoiceoverExpectedDurationDefaults;
+  }
+
+  return defaultExpectedDurationDefaults;
+}
 
 export function getTaskCreationVideoTypeDefaults(videoType: VideoTaskVideoType) {
   const profile = getVideoTaskTypeProfile(videoType);
@@ -159,13 +225,18 @@ export function getTaskCreationVideoTypeDefaults(videoType: VideoTaskVideoType) 
   };
 }
 
-export function getTaskCreationExpectedDurationDefaults(range: VideoTaskExpectedDurationRange) {
+export function getTaskCreationExpectedDurationDefaults(
+  range: VideoTaskExpectedDurationRange,
+  videoType: VideoTaskVideoType = DEFAULT_VIDEO_TASK_VIDEO_TYPE,
+) {
   const matched = videoExpectedDurationOptions.find((item) => item.value === range) ?? videoExpectedDurationOptions[0];
+  const presetMap = getTaskCreationExpectedDurationPresetMap(videoType);
+  const preset = presetMap[matched.value];
 
   return {
     videoExpectedDurationRange: matched.value,
-    videoSegmentCount: matched.segmentCount as (typeof videoSegmentCountOptions)[number],
-    videoDurationSeconds: matched.durationSeconds as (typeof videoDurationOptions)[number],
+    videoSegmentCount: preset.segmentCount,
+    videoDurationSeconds: preset.durationSeconds,
   };
 }
 
@@ -229,13 +300,14 @@ export function getTaskCreationStoryShotCount(
 
 export function getDefaultTaskCreationParameterState(): TaskCreationParameterState {
   const videoTypeDefaults = getTaskCreationVideoTypeDefaults(DEFAULT_VIDEO_TASK_VIDEO_TYPE);
-  const expectedDurationDefaults = getTaskCreationExpectedDurationDefaults("15_25");
+  const expectedDurationDefaults = getTaskCreationExpectedDurationDefaults("15_25", videoTypeDefaults.videoType);
   const aspectRatio = "9:16" as const;
 
   return {
     taskTitle: "",
     selectedProductId: "",
     userPrompt: "",
+    optimizedUserPrompt: "",
     videoMaterialId: "",
     imageSize: getTaskCreationImageSizeForAspectRatio(aspectRatio),
     imageGuidanceScale: 7.5,
@@ -264,6 +336,10 @@ export function getDefaultTaskCreationParameterState(): TaskCreationParameterSta
     audioSpeechRate: 0,
     audioLoudnessRate: 0,
     audioEnableSubtitle: true,
+    compositionIncludeBackgroundMusic: false,
+    compositionBackgroundMusicUrl: "",
+    compositionBackgroundMusicVolume: defaultCompositionBackgroundMusicVolume,
+    compositionSubtitleConfig: getDefaultSubtitleConfig(),
     constraintPreset: videoTypeDefaults.constraintPreset as TaskConstraintPresetKey,
     constraintCustomRules: "",
     lastCreatedDraftKey: "",
@@ -277,6 +353,12 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
     ? (draft.videoType as VideoTaskVideoType)
     : defaults.videoType;
   const videoTypeDefaults = getTaskCreationVideoTypeDefaults(videoType);
+  const requestedDurationRange = videoExpectedDurationOptions.some(
+    (item) => item.value === draft.videoExpectedDurationRange,
+  )
+    ? (draft.videoExpectedDurationRange as VideoTaskExpectedDurationRange)
+    : defaults.videoExpectedDurationRange;
+  const typeDurationDefaults = getTaskCreationExpectedDurationDefaults(requestedDurationRange, videoType);
   const videoAspectRatio = videoAspectRatioOptions.includes(
     draft.videoAspectRatio as (typeof videoAspectRatioOptions)[number],
   )
@@ -286,12 +368,12 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
     draft.videoSegmentCount as (typeof videoSegmentCountOptions)[number],
   )
     ? (draft.videoSegmentCount as (typeof videoSegmentCountOptions)[number])
-    : defaults.videoSegmentCount;
+    : typeDurationDefaults.videoSegmentCount;
   const videoDurationSeconds = videoDurationOptions.includes(
     draft.videoDurationSeconds as (typeof videoDurationOptions)[number],
   )
     ? (draft.videoDurationSeconds as (typeof videoDurationOptions)[number])
-    : defaults.videoDurationSeconds;
+    : typeDurationDefaults.videoDurationSeconds;
   const inferredDurationRange = inferTaskCreationExpectedDurationRange({
     videoType,
     videoSegmentCount,
@@ -300,7 +382,7 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
   const videoExpectedDurationRange = videoExpectedDurationOptions.some(
     (item) => item.value === draft.videoExpectedDurationRange,
   )
-    ? (draft.videoExpectedDurationRange as VideoTaskExpectedDurationRange)
+    ? requestedDurationRange
     : inferredDurationRange;
   const defaultImageSizeForAspectRatio = getTaskCreationImageSizeForAspectRatio(videoAspectRatio);
 
@@ -308,6 +390,7 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
     taskTitle: draft.taskTitle?.trim() ?? defaults.taskTitle,
     selectedProductId: draft.selectedProductId?.trim() ?? defaults.selectedProductId,
     userPrompt: draft.userPrompt ?? defaults.userPrompt,
+    optimizedUserPrompt: draft.optimizedUserPrompt ?? defaults.optimizedUserPrompt,
     videoMaterialId: (() => {
       if (typeof draft.videoMaterialId === "string" && draft.videoMaterialId.trim()) {
         return draft.videoMaterialId.trim();
@@ -373,6 +456,19 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
       : defaults.audioLoudnessRate,
     audioEnableSubtitle:
       typeof draft.audioEnableSubtitle === "boolean" ? draft.audioEnableSubtitle : defaults.audioEnableSubtitle,
+    compositionIncludeBackgroundMusic:
+      typeof draft.compositionIncludeBackgroundMusic === "boolean"
+        ? draft.compositionIncludeBackgroundMusic
+        : defaults.compositionIncludeBackgroundMusic,
+    compositionBackgroundMusicUrl:
+      typeof draft.compositionBackgroundMusicUrl === "string"
+        ? normalizeMediaSourceInput(draft.compositionBackgroundMusicUrl)
+        : defaults.compositionBackgroundMusicUrl,
+    compositionBackgroundMusicVolume: normalizeCompositionBackgroundMusicVolume(draft.compositionBackgroundMusicVolume),
+    compositionSubtitleConfig: hydrateSubtitleConfig(
+      draft.compositionSubtitleConfig,
+      defaults.compositionSubtitleConfig,
+    ),
     constraintPreset:
       draft.constraintPreset && draft.constraintPreset in taskConstraintPresets
         ? (draft.constraintPreset as TaskConstraintPresetKey)
@@ -391,6 +487,7 @@ export function buildTaskCreationDraftKey(state: TaskCreationParameterState) {
     taskTitle: state.taskTitle.trim(),
     selectedProductId: state.selectedProductId,
     userPrompt: state.userPrompt.trim(),
+    optimizedUserPrompt: state.optimizedUserPrompt.trim(),
     videoMaterialId: state.videoMaterialId.trim(),
     imageSize: state.imageSize,
     imageGuidanceScale: state.imageGuidanceScale,
@@ -421,6 +518,12 @@ export function buildTaskCreationDraftKey(state: TaskCreationParameterState) {
     audioSpeechRate: state.audioSpeechRate,
     audioLoudnessRate: state.audioLoudnessRate,
     audioEnableSubtitle: state.audioEnableSubtitle,
+    compositionIncludeBackgroundMusic: state.compositionIncludeBackgroundMusic,
+    compositionBackgroundMusicUrl: state.compositionIncludeBackgroundMusic
+      ? normalizeMediaSourceInput(state.compositionBackgroundMusicUrl)
+      : "",
+    compositionBackgroundMusicVolume: normalizeCompositionBackgroundMusicVolume(state.compositionBackgroundMusicVolume),
+    compositionSubtitleConfig: state.compositionSubtitleConfig,
     constraintPreset: state.constraintPreset,
     constraintCustomRules: state.constraintCustomRules.trim(),
   });

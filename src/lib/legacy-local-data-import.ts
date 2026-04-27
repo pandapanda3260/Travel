@@ -32,7 +32,7 @@ const LEGACY_DB_CANDIDATE_PATHS = [
   process.env.TRAVEL_LEGACY_APP_DB_PATH?.trim() ?? "",
   process.env.LEGACY_TRAVEL_APP_DB_PATH?.trim() ?? "",
   "/Users/bytedance/Documents/trae_projects/代码备份留存/AIGC/backend/data/app.db",
-  join(process.cwd(), "..", "代码备份留存", "AIGC", "backend", "data", "app.db"),
+  join(/* turbopackIgnore: true */ process.cwd(), "..", "代码备份留存", "AIGC", "backend", "data", "app.db"),
 ];
 
 type ImportState = {
@@ -508,7 +508,7 @@ function inferLegacyStatus(task: LegacyTaskRow): VideoTaskStatus {
   const stepStatuses = safeJsonParse<Record<string, string>>(task.step_statuses, {});
 
   if (status === "success" && currentStep === "done") {
-    return "VIDEO_BURN_READY";
+    return "COMPOSITION_READY";
   }
 
   if (stepStatuses.render === "success" || currentStep === "render") {
@@ -537,7 +537,6 @@ function buildStageTimestamps(status: VideoTaskStatus, createdAt: string, update
     "IMAGES_READY",
     "CLIPS_READY",
     "COMPOSITION_READY",
-    "VIDEO_BURN_READY",
   ];
   const currentIndex = order.indexOf(status);
   return order.reduce<Partial<Record<VideoTaskStatus, string>>>((result, item, index) => {
@@ -900,7 +899,7 @@ export function importLegacyVideoTasksIfNeeded() {
         task.duration_option === "25_35" || task.duration_option === "35_60" || task.duration_option === "15_25"
           ? task.duration_option
           : defaults.videoExpectedDurationRange;
-      const durationDefaults = getTaskCreationExpectedDurationDefaults(expectedDurationRange);
+      const durationDefaults = getTaskCreationExpectedDurationDefaults(expectedDurationRange, videoType);
       const bundle = buildLegacyShotPlanAndDraftBundle({
         task,
         script,
@@ -930,6 +929,7 @@ export function importLegacyVideoTasksIfNeeded() {
 
       const record: VideoTaskRecord = {
         taskId: `legacy-task-${normalizeText(task.id)}`,
+        ownerUserId: null,
         title: buildLegacyTaskTitle(task, script),
         status,
         source,
@@ -972,6 +972,12 @@ export function importLegacyVideoTasksIfNeeded() {
             speechRate: defaults.audioSpeechRate,
             loudnessRate: defaults.audioLoudnessRate,
             enableSubtitle: defaults.audioEnableSubtitle,
+          },
+          composition: {
+            includeBackgroundMusic: defaults.compositionIncludeBackgroundMusic,
+            backgroundMusicUrl: null,
+            backgroundMusicVolume: defaults.compositionBackgroundMusicVolume,
+            subtitleConfig: defaults.compositionSubtitleConfig,
           },
           constraints: {
             ...preset.constraints,

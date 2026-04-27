@@ -1,5 +1,33 @@
-import { countNarrationCharacters, getNarrationLengthGuidance, sanitizeNarrationText } from "./narration";
+import {
+  countNarrationCharacters,
+  getNarrationLengthGuidance,
+  getNarrationRepairTriggerCharacters,
+  isNarrationClearlyOverDuration,
+  sanitizeNarrationText,
+} from "./narration";
 import { videoTaskTypeProfiles, type VideoTaskVideoType } from "./video-task-schema";
+
+const SCENERY_DRIVEN_VOICE_TYPES = new Set<VideoTaskVideoType>([
+  "agency_guide_scenery_voiceover",
+  "agency_montage_scenery",
+  "hotel_explore_voiceover",
+  "hotel_montage_voiceover",
+]);
+
+const PRESENTER_NARRATION_TYPES = new Set<VideoTaskVideoType>([
+  "agency_guide_selfie_narration",
+  "agency_guide_presenter_narration",
+  "hotel_explore_selfie_narration",
+  "hotel_explore_presenter_narration",
+  "retail_explore_presenter_narration",
+]);
+
+const GUIDE_STYLE_VOICEOVER_TYPES = new Set<VideoTaskVideoType>([
+  "agency_guide_voiceover",
+  "agency_guide_roaming_voiceover",
+  "agency_montage_roaming_voiceover",
+  "hotel_explore_roaming_voiceover",
+]);
 
 export type NarrationQualityIssue = {
   shotIndex: number;
@@ -16,7 +44,9 @@ export type NarrationQualityIssue = {
     | "day_prefix"
     | "terminal_oh"
     | "terminal_punctuation"
-    | "detail_over_dense";
+    | "detail_over_dense"
+    | "hollow_recommendation_tone"
+    | "missing_concrete_value";
   message: string;
 };
 
@@ -81,6 +111,29 @@ const marketingTonePatterns: Array<{ pattern: RegExp; message: string }> = [
   { pattern: /宇宙级/u, message: "表达失真，容易让用户反感" },
 ];
 
+const hollowRecommendationPatterns: Array<{ pattern: RegExp; message: string }> = [
+  { pattern: /直接抄作业/u, message: "像攻略口号，没有真人推荐里的理由和对象感" },
+  { pattern: /这趟.+就值了/u, message: "只下结论，没有说明为什么值" },
+  { pattern: /这一段最舒服/u, message: "只说舒服，没有讲清具体体验" },
+  { pattern: /照样轻松/u, message: "轻松感没有具体服务或动线支撑" },
+  { pattern: /顺路看/u, message: "像行程压缩词，不像真人在解释安排原因" },
+  { pattern: /接得稳/u, message: "服务表达过于生硬，需要具体成接送体验" },
+  { pattern: /一落地就有人接/u, message: "像服务清单，需要讲成具体安心场景" },
+  { pattern: /快速住进.+休息/u, message: "像服务说明，不像真人推荐表达" },
+  { pattern: /看底蕴/u, message: "景点表达标签化，需要补出能被看到的具体内容" },
+  { pattern: /刚到门口就有度假感/u, message: "像广告标签，需要补出门口看到什么或为什么有度假感" },
+  { pattern: /干净利落这一路线/u, message: "表达抽象，需要讲成房间、动线或住感细节" },
+  { pattern: /吃饭和遛娃都安排上了/u, message: "像权益清单，需要讲成具体家庭场景" },
+  { pattern: /氛围也很放松/u, message: "氛围结论缺少可感知支撑" },
+  { pattern: /整套体验都挺完整/u, message: "总结空泛，需要说明完整在哪些环节" },
+  { pattern: /经典景点都逛到了/u, message: "像总结清单，不像真实推荐收束" },
+  { pattern: /^想[^，。！？；]{0,12}(省心|轻松|舒服).{0,12}这条/u, message: "开场像模板广告语，缺少痛点或反差" },
+];
+
+const shallowValueClaimPattern = /(省心|轻松|舒服|值了|值得|划算|稳|顺路|方便|安心|高级|治愈|宝藏|好逛|好住|好玩)/u;
+const concreteValueSupportPattern =
+  /(因为|适合|不用|避免|省掉|带孩子|带娃|老人|亲子|家庭|情侣|朋友|预算|排队|交通|接送|专车|入住|房间|早餐|大堂|泳池|设施|服务|位置|动线|路线|历史|夜景|博物馆|藏品|建筑|湖|风|遗址|试吃|陈列|货架|价格|口感|材质|空间|窗景|步行|分钟|\d|[一二三四五六七八九十]天|先.+再|然后|走进|看看|感受|体验|俯瞰|打卡)/u;
+
 const weakHookPatterns = [/^(这里|这一站|这个地方|这一幕|这一段)/u];
 const repeatedOpeningStripPattern =
   /^(更妙的是|更重要的是|但真正让人惊喜的|但真正|看完这一段你就知道|别急|到了这里|再往后|接着看|接下来|然后|这里|这一站|这个地方|这一幕|这一段)/u;
@@ -100,7 +153,27 @@ export const NARRATION_STANDARD_COMMON_RULES = [
   "每 3-5 句里，至少留 1 句有记忆点、能拉情绪、能提炼价值或能形成停留钩子。",
   "必须适合配音朗读和字幕展示，不要绕口，不要多重从句，不要信息过载。",
   "禁止广告腔、AI 总结腔、空泛夸赞、过度营销、过度煽情、长句堆叠、与画面脱节。",
+  "所有带台词或字幕的视频，都要像真人在推荐一个具体选择：先有对象和判断，再给画面能证明的理由。",
+  "不要只写“省心、轻松、舒服、值得、顺路、经典都逛到”这类结论词；出现结论词时，必须补出原因、场景或体验证据。",
+  "每条脚本要有整片承接意识：开场建立问题或期待，中段给具体理由，收尾把价值说实，不要变成互不相关的短句合集。",
+  "开场优先用真实判断、常见误区、适合人群或明确收益起势，不要用“想省心就看这条”这种模板句。",
+  "中段要把服务项、景点、设施或商品权益讲成可想象的场景：谁在什么情况下会用到，看到什么，感受到什么。",
+  "收尾不要只总结“都安排好了/体验完整/照着走”，要落到观众下一步能得到的具体好处。",
 ] as const;
+
+export function buildHumanRecommendationScriptPromptBlock() {
+  return [
+    "真人推荐口播范式（所有有台词/字幕的视频都生效）：",
+    "1. 台词不是景点名、空间名、商品名或服务项的罗列，而是一个真人在帮观众做选择。",
+    "2. 优先写清：谁适合、解决什么问题、为什么这样安排/选择、画面里哪个细节能证明。",
+    "3. 开场要有真实判断、痛点、反差或明确对象，不能只喊“想省心/想轻松就看这条”。",
+    "4. 中段每句至少包含“具体对象、具体动作、具体体验、具体理由”中的两个，不要只给抽象结论。",
+    "5. 收尾要把价值落到观众行动上，可以引导咨询/关注/进直播间，但要先完成可信推荐。",
+    "6. 允许口语、有停顿、有轻微情绪，但不能油腻、喊麦、像广告提词器。",
+    "7. 低质反例：想省心玩北京，这条五天四晚直接抄作业 / 刚到门口就有度假感，大堂也做得敞亮又舒服 / 经典景点都逛到了，想轻松玩北京可以按这条线路走。",
+    "8. 改写方向：先点明人群或痛点，再给具体原因和画面证据；示例只学结构，不复制地点或事实。",
+  ].join("\n");
+}
 
 function countWeakWordHits(text: string) {
   return weakWords.reduce((total, word) => total + (text.match(new RegExp(word, "gu"))?.length ?? 0), 0);
@@ -131,7 +204,7 @@ function getBaseDeliveryStrategy(
     };
   }
 
-  if (shot.requiresLipSync) {
+  if (shot.requiresLipSync || PRESENTER_NARRATION_TYPES.has(videoType)) {
     return {
       voiceRole: shot.purpose === "closing" ? "closing" : shot.purpose === "hook" ? "hook" : "guide",
       deliveryTone: "真人交流感，自然可信",
@@ -182,10 +255,9 @@ function getBaseDeliveryStrategy(
     case "detail":
       return {
         voiceRole: "guide",
-        deliveryTone:
-          videoType === "agency_montage_scenery" || videoType === "agency_guide_scenery_voiceover"
-            ? "舒展沉浸，把细节感受说出来"
-            : "具体说明，把关键细节讲清楚",
+        deliveryTone: SCENERY_DRIVEN_VOICE_TYPES.has(videoType)
+          ? "舒展沉浸，把细节感受说出来"
+          : "具体说明，把关键细节讲清楚",
         deliveryPace: videoType === "agency_montage_scenery" ? "slow" : "balanced",
         sentenceDensity: "light",
         speechRateDelta: videoType === "agency_montage_scenery" ? -5 : -1,
@@ -196,7 +268,7 @@ function getBaseDeliveryStrategy(
       return {
         voiceRole: "guide",
         deliveryTone:
-          videoType === "agency_guide_voiceover" || videoType === "agency_guide_scenery_voiceover"
+          GUIDE_STYLE_VOICEOVER_TYPES.has(videoType) || videoType === "agency_guide_scenery_voiceover"
             ? "自然可信，像真人在带看攻略"
             : videoType === "agency_montage_scenery"
               ? "舒展自然，给画面留呼吸"
@@ -212,18 +284,26 @@ function getBaseDeliveryStrategy(
 export function getNarrationContentTypeGuidance(videoType: VideoTaskVideoType): string[] {
   switch (videoType) {
     case "agency_montage_scenery":
+    case "agency_guide_scenery_voiceover":
+    case "hotel_explore_voiceover":
+    case "hotel_montage_voiceover":
       return [
         "景色类台词：重点写为什么美、为什么让人想停下来，不要只重复“好看”“很美”。",
         "景色类台词：少塞硬信息，多给观众沉浸感和呼吸感。",
       ];
     case "agency_guide_selfie_narration":
     case "agency_guide_presenter_narration":
+    case "hotel_explore_selfie_narration":
+    case "hotel_explore_presenter_narration":
+    case "retail_explore_presenter_narration":
       return [
         "人物口播类台词：要像真人边看边说，有交流感、代入感和轻微互动感。",
         "攻略类台词：优先先给结论，再补一句理由，不要绕弯子。",
       ];
     case "agency_guide_voiceover":
-    case "agency_guide_scenery_voiceover":
+    case "agency_guide_roaming_voiceover":
+    case "agency_montage_roaming_voiceover":
+    case "hotel_explore_roaming_voiceover":
       return [
         "攻略类台词：优先说观众最在意的点，突出省心、省时、值不值得、为什么这么安排。",
         "攻略类台词：不要机械播报行程顺序，不要把“第几天去哪”当成主要内容。",
@@ -324,6 +404,8 @@ export function buildNarrationStandardsDocumentation() {
     "台词生成统一标准：",
     ...NARRATION_STANDARD_COMMON_RULES.map((rule, index) => `${index + 1}. ${rule}`),
     "",
+    buildHumanRecommendationScriptPromptBlock(),
+    "",
     "不同视频类型附加规则：",
     typeGuidanceDocs,
     "",
@@ -337,7 +419,10 @@ export function buildNarrationStandardsPromptBlock(videoType: VideoTaskVideoType
   return [
     "台词生成标准（始终生效）：",
     ...NARRATION_STANDARD_COMMON_RULES.map((rule, index) => `${index + 1}. ${rule}`),
-    ...typeGuidance.map((rule, index) => `${index + 15}. ${rule}`),
+    "",
+    buildHumanRecommendationScriptPromptBlock(),
+    "",
+    ...typeGuidance.map((rule, index) => `${NARRATION_STANDARD_COMMON_RULES.length + index + 1}. ${rule}`),
   ].join("\n");
 }
 
@@ -362,13 +447,14 @@ export function inspectNarrationQuality(lines: NarrationQualityLineContext[]): N
     const purpose = line.purpose?.trim() ?? "";
     const openingSignature = extractOpeningSignature(rawText);
     const weakWordHits = countWeakWordHits(normalizedText);
+    const repairTriggerCharacters = getNarrationRepairTriggerCharacters(line.durationSeconds);
 
-    if (charCount > guidance.maxCharacters) {
+    if (charCount > repairTriggerCharacters || isNarrationClearlyOverDuration(rawText, line.durationSeconds)) {
       issues.push({
         shotIndex: line.shotIndex,
-        severity: "error",
+        severity: "warning",
         code: "over_limit",
-        message: `台词超过当前镜头字数预算（${charCount}/${guidance.maxCharacters}）`,
+        message: `台词明显超出当前时长安全区（${charCount}/${repairTriggerCharacters}）`,
       });
     }
 
@@ -450,6 +536,30 @@ export function inspectNarrationQuality(lines: NarrationQualityLineContext[]): N
       }
     }
 
+    for (const rule of hollowRecommendationPatterns) {
+      if (rule.pattern.test(rawText)) {
+        issues.push({
+          shotIndex: line.shotIndex,
+          severity: "warning",
+          code: "hollow_recommendation_tone",
+          message: rule.message,
+        });
+      }
+    }
+
+    if (
+      charCount <= Math.max(24, guidance.suggestedCharacters + 4) &&
+      shallowValueClaimPattern.test(rawText) &&
+      !concreteValueSupportPattern.test(rawText)
+    ) {
+      issues.push({
+        shotIndex: line.shotIndex,
+        severity: "warning",
+        code: "missing_concrete_value",
+        message: "有推荐结论但缺少具体理由或体验证据",
+      });
+    }
+
     if (weakWordHits >= 2) {
       issues.push({
         shotIndex: line.shotIndex,
@@ -459,7 +569,10 @@ export function inspectNarrationQuality(lines: NarrationQualityLineContext[]): N
       });
     }
 
-    if ((purpose === "detail" || purpose === "transition") && charCount > guidance.suggestedCharacters + 2) {
+    if (
+      (purpose === "detail" || purpose === "transition") &&
+      charCount > Math.max(guidance.suggestedCharacters + 8, Math.floor(guidance.maxCharacters * 0.9))
+    ) {
       issues.push({
         shotIndex: line.shotIndex,
         severity: "warning",

@@ -1,4 +1,7 @@
+import { withAdminProviderCallTracking } from "./admin-data-flow-tracking";
 import { getVoiceManagementRuntime } from "./voice-management-config";
+import { recordModelUsage } from "./model-usage-service";
+import { callSpeechOpenApi } from "./volc-speech-openapi";
 
 export const supportedCloneFormats = ["wav", "mp3", "ogg", "m4a", "aac", "pcm"] as const;
 export type SupportedCloneFormat = (typeof supportedCloneFormats)[number];
@@ -19,6 +22,26 @@ export type VoiceCloneStatusResult = {
   status: "PENDING" | "TRAINING" | "SUCCESS" | "ACTIVE" | "FAILED";
   version: string | null;
   demoAudioUrl: string | null;
+  alias?: string | null;
+  availableTrainingTimes?: number | null;
+};
+
+type BatchMegaTTSTrainStatusItem = {
+  SpeakerID?: string;
+  SpeakerId?: string;
+  speaker_id?: string;
+  Alias?: string;
+  State?: string | number;
+  Status?: string | number;
+  Version?: string;
+  DemoAudio?: string;
+  DemoAudioURL?: string;
+  DemoURL?: string;
+  AvailableTrainingTimes?: number;
+};
+
+type BatchMegaTTSTrainStatusResult = {
+  Statuses?: BatchMegaTTSTrainStatusItem[];
 };
 
 function mapCloneStatus(status: number) {
@@ -33,6 +56,132 @@ function mapCloneStatus(status: number) {
       return "FAILED";
     default:
       return "PENDING";
+  }
+}
+
+function mapCloneStatusValue(value: unknown): VoiceCloneStatusResult["status"] {
+  if (typeof value === "number") {
+    return mapCloneStatus(value);
+  }
+
+  const normalized = String(value ?? "").trim().toUpperCase();
+  if (!normalized) {
+    return "PENDING";
+  }
+  if (normalized.includes("FAIL")) {
+    return "FAILED";
+  }
+  if (normalized.includes("TRAIN")) {
+    return "TRAINING";
+  }
+  if (normalized.includes("SUCCESS")) {
+    return "SUCCESS";
+  }
+  if (normalized.includes("ACTIVE") || normalized.includes("VALID")) {
+    return "ACTIVE";
+  }
+  return "PENDING";
+}
+
+function normalizeBatchStatusItem(item: BatchMegaTTSTrainStatusItem): VoiceCloneStatusResult | null {
+  const speakerId = item.SpeakerID ?? item.SpeakerId ?? item.speaker_id;
+  if (!speakerId) {
+    return null;
+  }
+
+  return {
+    speakerId,
+    status: mapCloneStatusValue(item.State ?? item.Status),
+    version: item.Version ?? null,
+    demoAudioUrl: item.DemoAudio ?? item.DemoAudioURL ?? item.DemoURL ?? null,
+    alias: item.Alias?.trim() || null,
+    availableTrainingTimes:
+      typeof item.AvailableTrainingTimes === "number" ? item.AvailableTrainingTimes : null,
+  };
+}
+
+async function callBatchMegaTTSTrainStatus(speakerIds: string[]) {
+  const runtime = getVoiceManagementRuntime();
+  const basePayload: Record<string, unknown> = {
+    SpeakerIDs: speakerIds,
+    PageNumber: 1,
+    PageSize: Math.max(10, speakerIds.length),
+  };
+  if (runtime.openApiProjectName) {
+    basePayload.ProjectName = runtime.openApiProjectName;
+  }
+
+  const attempts: Array<{ version: string; payload: Record<string, unknown> }> = [
+    { version: "2025-05-21", payload: basePayload },
+    {
+      version: "2023-11-07",
+      payload: {
+        ...basePayload,
+        ...(runtime.appId ? { AppID: runtime.appId } : {}),
+      },
+    },
+  ];
+
+  let lastError: Error | null = null;
+  for (const attempt of attempts) {
+    try {
+      return await withAdminProviderCallTracking(
+        {
+          enabled: runtime.cloneEnabled,
+          serviceName: "voice.clone.status_batch",
+          provider: "火山引擎 · 声音复刻",
+          modelId: runtime.cloneResourceId,
+          objectType: "voice_clone_batch",
+          objectId: speakerIds.join(",").slice(0, 180),
+        },
+        () =>
+          callSpeechOpenApi<BatchMegaTTSTrainStatusResult>(
+            "BatchListMegaTTSTrainStatus",
+            attempt.version,
+            attempt.payload,
+          ),
+      );
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("声音复刻批量状态查询失败");
+      if (!lastError.message.includes("InvalidActionOrVersion")) {
+        throw lastError;
+      }
+    }
+  }
+
+  throw lastError ?? new Error("声音复刻批量状态查询失败");
+}
+
+export async function queryVoiceCloneStatuses(speakerIds: string[]) {
+  const uniqueSpeakerIds = Array.from(new Set(speakerIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueSpeakerIds.length === 0) {
+    return new Map<string, VoiceCloneStatusResult>();
+  }
+
+  const result = await callBatchMegaTTSTrainStatus(uniqueSpeakerIds);
+  const statuses = new Map<string, VoiceCloneStatusResult>();
+  for (const item of result.Statuses ?? []) {
+    const normalized = normalizeBatchStatusItem(item);
+    if (normalized) {
+      statuses.set(normalized.speakerId, normalized);
+    }
+  }
+
+  return statuses;
+}
+
+export async function queryVoiceCloneStatusesWithFallback(speakerIds: string[]) {
+  try {
+    return await queryVoiceCloneStatuses(speakerIds);
+  } catch {
+    const results = await Promise.allSettled(speakerIds.map((speakerId) => queryVoiceCloneStatus(speakerId)));
+    const statuses = new Map<string, VoiceCloneStatusResult>();
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        statuses.set(result.value.speakerId, result.value);
+      }
+    }
+    return statuses;
   }
 }
 
@@ -54,32 +203,43 @@ export async function uploadVoiceClone(input: VoiceCloneUploadInput) {
     );
   }
 
-  const response = await fetch("https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer;${runtime.accessToken}`,
-      "Content-Type": "application/json",
-      "Resource-Id": runtime.cloneResourceId,
+  const response = await withAdminProviderCallTracking(
+    {
+      enabled: runtime.cloneEnabled,
+      serviceName: "voice.clone.upload",
+      provider: "火山引擎 · 声音复刻",
+      modelId: runtime.cloneResourceId,
+      objectType: "voice_clone",
+      objectId: input.speakerId,
     },
-    body: JSON.stringify({
-      appid: runtime.appId,
-      speaker_id: input.speakerId,
-      audios: [
-        {
-          audio_bytes: input.audioBuffer.toString("base64"),
-          audio_format: input.fileFormat,
-          text: input.transcript,
+    () =>
+      fetch("https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer;${runtime.accessToken}`,
+          "Content-Type": "application/json",
+          "Resource-Id": runtime.cloneResourceId,
         },
-      ],
-      source: 2,
-      language: input.language === "en" ? 1 : 0,
-      model_type: input.modelType,
-      extra_params: JSON.stringify({
-        demo_text: input.transcript.slice(0, 80),
-        enable_audio_denoise: input.enableDenoise ?? false,
+        body: JSON.stringify({
+          appid: runtime.appId,
+          speaker_id: input.speakerId,
+          audios: [
+            {
+              audio_bytes: input.audioBuffer.toString("base64"),
+              audio_format: input.fileFormat,
+              text: input.transcript,
+            },
+          ],
+          source: 2,
+          language: input.language === "en" ? 1 : 0,
+          model_type: input.modelType,
+          extra_params: JSON.stringify({
+            demo_text: input.transcript.slice(0, 80),
+            enable_audio_denoise: input.enableDenoise ?? false,
+          }),
+        }),
       }),
-    }),
-  });
+  );
 
   const payload = (await response.json().catch(() => ({}))) as {
     BaseResp?: {
@@ -105,6 +265,21 @@ export async function uploadVoiceClone(input: VoiceCloneUploadInput) {
     throw new Error(apiMsg || "声音复刻提交失败");
   }
 
+  recordModelUsage({
+    pricingKey: "doubao.voice.clone.2.0",
+    serviceName: "voice.clone",
+    provider: "火山引擎 · 声音复刻",
+    modelId: runtime.cloneResourceId,
+    metrics: {
+      characterCount: Array.from(input.transcript).length,
+      requestCount: 1,
+    },
+    requestId: payload.speaker_id ?? input.speakerId,
+    objectType: "voice_clone",
+    objectId: input.speakerId,
+    remark: "声音复刻训练提交",
+  });
+
   return {
     speakerId: payload.speaker_id ?? input.speakerId,
   };
@@ -116,18 +291,29 @@ export async function queryVoiceCloneStatus(speakerId: string): Promise<VoiceClo
     throw new Error("当前未配置豆包语音克隆所需 AppId / AccessToken。");
   }
 
-  const response = await fetch("https://openspeech.bytedance.com/api/v1/mega_tts/status", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer;${runtime.accessToken}`,
-      "Content-Type": "application/json",
-      "Resource-Id": runtime.cloneResourceId,
+  const response = await withAdminProviderCallTracking(
+    {
+      enabled: runtime.cloneEnabled,
+      serviceName: "voice.clone.status",
+      provider: "火山引擎 · 声音复刻",
+      modelId: runtime.cloneResourceId,
+      objectType: "voice_clone",
+      objectId: speakerId,
     },
-    body: JSON.stringify({
-      appid: runtime.appId,
-      speaker_id: speakerId,
-    }),
-  });
+    () =>
+      fetch("https://openspeech.bytedance.com/api/v1/mega_tts/status", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer;${runtime.accessToken}`,
+          "Content-Type": "application/json",
+          "Resource-Id": runtime.cloneResourceId,
+        },
+        body: JSON.stringify({
+          appid: runtime.appId,
+          speaker_id: speakerId,
+        }),
+      }),
+  );
 
   const payload = (await response.json().catch(() => ({}))) as {
     BaseResp?: {

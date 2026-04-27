@@ -1,3 +1,5 @@
+import { isSeedanceProvider } from "./video-provider-config";
+import { getTaskCreationExpectedDurationDefaults } from "./task-creation-parameters";
 import {
   computeVideoTaskStoryShotCount,
   getVideoTaskTypeProfile,
@@ -143,7 +145,12 @@ export function inferTravelItineraryMeta(
 }
 
 export function isTravelGuideVideoType(videoType: VideoTaskVideoType) {
-  return videoType.startsWith("agency_guide_");
+  return (
+    videoType === "agency_guide_voiceover" ||
+    videoType === "agency_guide_selfie_narration" ||
+    videoType === "agency_guide_presenter_narration" ||
+    videoType === "agency_guide_roaming_voiceover"
+  );
 }
 
 function getTravelGuideSegmentBudget(range: VideoTaskExpectedDurationRange) {
@@ -156,6 +163,25 @@ function getTravelGuideSegmentBudget(range: VideoTaskExpectedDurationRange) {
     default:
       return 5;
   }
+}
+
+function getTravelGuideSegmentDurationSeconds(input: {
+  videoType: VideoTaskVideoType;
+  expectedDurationRange: VideoTaskExpectedDurationRange;
+  requestedDurationSeconds: number;
+}) {
+  const presetDurationSeconds = getTaskCreationExpectedDurationDefaults(input.expectedDurationRange, input.videoType)
+    .videoDurationSeconds;
+
+  if (input.requestedDurationSeconds >= 4 && input.requestedDurationSeconds <= 7) {
+    return Math.round(input.requestedDurationSeconds);
+  }
+
+  return presetDurationSeconds;
+}
+
+function getTravelGuideIntroSegmentDurationSeconds(durationSeconds: number) {
+  return Math.max(4, Math.min(5, Math.round(durationSeconds)));
 }
 
 function buildTravelGuideSegmentBlueprint(dayCount: number, daySegmentCount: number) {
@@ -242,14 +268,34 @@ export function deriveVideoTaskStructure(input: {
   const segmentBlueprint = buildTravelGuideSegmentBlueprint(dayCount, daySegmentCount);
   const storyShotsPerSegment = Math.max(1, requestedStoryShotsPerSegment);
   const storyShotCount = segmentCount <= 1 ? 1 : 1 + Math.max(0, segmentCount - 1) * Math.max(1, storyShotsPerSegment);
+  const resolvedSegmentDurationSeconds = getTravelGuideSegmentDurationSeconds({
+    videoType: input.videoType,
+    expectedDurationRange: input.expectedDurationRange,
+    requestedDurationSeconds,
+  });
+  const introSegmentDurationSeconds = getTravelGuideIntroSegmentDurationSeconds(resolvedSegmentDurationSeconds);
+
+  if (isSeedanceProvider()) {
+    return {
+      segmentMode: "multi_shot_montage" as VideoTaskSegmentMode,
+      segmentCount,
+      durationSeconds: resolvedSegmentDurationSeconds,
+      storyShotsPerSegment,
+      storyShotCount,
+      introSegmentDurationSeconds,
+      itinerary,
+      segmentBlueprint,
+      usedTravelGuideAutoStructure: true,
+    } satisfies DerivedVideoTaskStructure;
+  }
 
   return {
     segmentMode: "hybrid_intro_plus_montage",
     segmentCount,
-    durationSeconds: requestedDurationSeconds,
+    durationSeconds: resolvedSegmentDurationSeconds,
     storyShotsPerSegment,
     storyShotCount,
-    introSegmentDurationSeconds: 3,
+    introSegmentDurationSeconds,
     itinerary,
     segmentBlueprint,
     usedTravelGuideAutoStructure: true,

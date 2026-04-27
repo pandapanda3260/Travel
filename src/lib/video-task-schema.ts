@@ -1,10 +1,22 @@
-export type VideoTaskStatus =
-  | "CREATED"
-  | "SUBTITLE_AUDIO_READY"
-  | "IMAGES_READY"
-  | "CLIPS_READY"
-  | "COMPOSITION_READY"
-  | "VIDEO_BURN_READY";
+import type { SubtitleConfig } from "./subtitle-style-config";
+
+export type VideoTaskStatus = "CREATED" | "SUBTITLE_AUDIO_READY" | "IMAGES_READY" | "CLIPS_READY" | "COMPOSITION_READY";
+
+export type ShotGenerationMode = "photo_direct_i2v" | "photo_enhanced_i2v" | "ai_generated_broll";
+export type ShotSourceTrace = "user_photo" | "enhanced_from_user_photo" | "reference_video_keyframe" | "ai_generated";
+
+export type HotelAssetSceneType =
+  | "exterior"
+  | "lobby"
+  | "room"
+  | "bathroom"
+  | "dining"
+  | "food"
+  | "facility"
+  | "neighborhood"
+  | "service_detail"
+  | "atmosphere"
+  | "other";
 
 export type TimedWord = {
   word: string;
@@ -16,9 +28,18 @@ export type VideoTaskVideoType =
   | "agency_guide_voiceover"
   | "agency_guide_selfie_narration"
   | "agency_guide_presenter_narration"
+  | "agency_guide_roaming_voiceover"
   | "agency_guide_scenery_voiceover"
   | "agency_montage_scenery"
+  | "agency_montage_roaming_voiceover"
   | "agency_montage_presenter_checkin"
+  | "hotel_explore_voiceover"
+  | "hotel_explore_selfie_narration"
+  | "hotel_explore_presenter_narration"
+  | "hotel_explore_roaming_voiceover"
+  | "hotel_explore_roaming_silent"
+  | "hotel_montage_voiceover"
+  | "retail_explore_presenter_narration"
   | "agency_creative_beat_mix";
 
 export type VideoTaskSegmentMode =
@@ -31,6 +52,8 @@ export type VideoTaskExpectedDurationRange = "15_25" | "25_35" | "35_60";
 
 export type VideoTaskTalentCaptureMode = "none" | "selfie" | "presented" | "intro_host";
 export type VideoTaskSubtitleMode = "none" | "voice_aligned" | "caption_only";
+export type VideoTaskWorkflowKind = "visual_reference_first" | "captured_material_first";
+export type VideoTaskAssetSourceType = "user_upload" | "enhanced" | "ai_generated" | "video_material";
 
 export type VideoTaskTypeProfile = {
   key: VideoTaskVideoType;
@@ -48,6 +71,7 @@ export type VideoTaskTypeProfile = {
   recommendedShotsPerSegment: number;
   introSegmentDurationSeconds?: number | null;
   preferredConstraintPreset: TaskConstraintPresetKey;
+  workflowKind?: VideoTaskWorkflowKind;
 };
 
 export type VideoTaskDraftBundle = {
@@ -56,11 +80,52 @@ export type VideoTaskDraftBundle = {
   narrationScript: string;
 };
 
+export type ShotVisual = {
+  sceneSetting?: string;
+  shotScale?: string;
+  wideContent?: string;
+  midContent?: string;
+  closeContent?: string;
+  composition?: string;
+  colorTone?: string;
+  keyDetails?: string;
+};
+
+export type ShotSubject = {
+  mainCharacterCount?: number;
+  mainCharacterGender?: string;
+  relationship?: string;
+  clothing?: string;
+  ageRange?: string;
+  features?: string;
+  appearance?: string;
+  style?: string;
+  position?: string;
+  extraCount?: number;
+  extraDistribution?: string;
+  extraScale?: string;
+};
+
+export type ShotCinematography = {
+  shotType?: string;
+  rhythm?: string;
+  infoDensity?: string;
+  lighting?: string;
+};
+
+export type ShotStructure = {
+  phase?: string;
+  prevTransition?: string;
+  nextTransition?: string;
+  transitionType?: string;
+};
+
 export type ShotPlanItem = {
   shotId?: string;
   shotIndex: number;
   segmentId?: string | null;
   segmentIndex?: number | null;
+  sceneType?: HotelAssetSceneType;
   purpose: string;
   location: string;
   hasCharacters: boolean;
@@ -75,7 +140,75 @@ export type ShotPlanItem = {
   cameraMovement: string;
   durationSeconds: number;
   sceneDescription: string;
+  contentDescription?: string;
   narrationHint: string;
+  startAtSeconds?: number;
+  endAtSeconds?: number;
+  functionTag?: string;
+  sellingPointType?: string;
+  shotScale?: string;
+  compositionHint?: string;
+  rhythmTag?: string;
+  mood?: string;
+  sellingPointTags?: string[];
+  assetId?: string | null;
+  assetSourceType?: VideoTaskAssetSourceType | null;
+  assetSubjectSummary?: string | null;
+  sourceMaterialId?: string | null;
+  sourceStartAtSeconds?: number | null;
+  sourceEndAtSeconds?: number | null;
+  sourceTimeRangeLabel?: string | null;
+  referenceImageUrl?: string | null;
+  generationMode?: ShotGenerationMode;
+  sourceTrace?: ShotSourceTrace | null;
+  needImageEnhancement?: boolean;
+  needImageToVideo?: boolean;
+  isAtmosphereInsert?: boolean;
+  img2imgPrompt?: string | null;
+  i2vPrompt?: string | null;
+  visual?: ShotVisual;
+  subject?: ShotSubject;
+  cinematography?: ShotCinematography;
+  structure?: ShotStructure;
+};
+
+export type ShotPlanStyleConstraints = {
+  style?: string;
+  videoType?: string;
+  forbidden?: string;
+  realismLevel?: string;
+  styleConsistency?: string;
+  characterConsistency?: string;
+};
+
+export type ShotPlanReusableModules = {
+  characterSetting?: string;
+  sceneSetting?: string;
+  actionTemplates?: string;
+  shotTemplates?: string;
+};
+
+export type ShotPlanNarrativeCurves = {
+  openingStrategy?: string;
+  midStructure?: string;
+  closingStrategy?: string;
+  rhythmCurve?: string;
+  emotionCurve?: string;
+  infoOrder?: string;
+};
+
+export type SubtitlePlanEntry = {
+  text: string;
+  startAtSeconds: number;
+  durationSeconds: number;
+  charCount: number;
+  coveredShotIndexes: number[];
+};
+
+export type SegmentSubtitlePlan = {
+  segmentIndex: number;
+  segmentId: string;
+  subtitles: SubtitlePlanEntry[];
 };
 
 export type ShotPlan = {
@@ -83,6 +216,10 @@ export type ShotPlan = {
   globalStyle: string;
   totalDurationSeconds: number;
   validationErrors: string[];
+  styleConstraints?: ShotPlanStyleConstraints;
+  reusableModules?: ShotPlanReusableModules;
+  narrativeCurves?: ShotPlanNarrativeCurves;
+  subtitlePlan?: SegmentSubtitlePlan[];
 };
 
 export type DirectorStoryShot = {
@@ -91,6 +228,7 @@ export type DirectorStoryShot = {
   segmentId: string;
   segmentIndex: number;
   title: string;
+  sceneType?: HotelAssetSceneType;
   purpose: string;
   location: string;
   hasCharacters: boolean;
@@ -105,11 +243,40 @@ export type DirectorStoryShot = {
   cameraMovement: string;
   durationSeconds: number;
   sceneDescription: string;
+  contentDescription?: string;
   narrationHint: string;
   imagePrompt: string;
   videoPrompt: string;
   narrationText: string;
   subtitleText: string;
+  startAtSeconds?: number;
+  endAtSeconds?: number;
+  functionTag?: string;
+  sellingPointType?: string;
+  shotScale?: string;
+  compositionHint?: string;
+  rhythmTag?: string;
+  mood?: string;
+  sellingPointTags?: string[];
+  assetId?: string | null;
+  assetSourceType?: VideoTaskAssetSourceType | null;
+  assetSubjectSummary?: string | null;
+  sourceMaterialId?: string | null;
+  sourceStartAtSeconds?: number | null;
+  sourceEndAtSeconds?: number | null;
+  sourceTimeRangeLabel?: string | null;
+  referenceImageUrl?: string | null;
+  generationMode?: ShotGenerationMode;
+  sourceTrace?: ShotSourceTrace | null;
+  needImageEnhancement?: boolean;
+  needImageToVideo?: boolean;
+  isAtmosphereInsert?: boolean;
+  img2imgPrompt?: string | null;
+  i2vPrompt?: string | null;
+  visual?: ShotVisual;
+  subject?: ShotSubject;
+  cinematography?: ShotCinematography;
+  structure?: ShotStructure;
 };
 
 export type DirectorRenderSegment = {
@@ -166,6 +333,7 @@ export type VideoTaskDirectorPlan = {
   storyShots: DirectorStoryShot[];
   renderSegments: DirectorRenderSegment[];
   audioCues: DirectorAudioCue[];
+  subtitlePlan?: SegmentSubtitlePlan[];
   legacyMirrored: boolean;
 };
 
@@ -193,13 +361,15 @@ export const taskConstraintPresets: Record<TaskConstraintPresetKey, { label: str
   family_travel: {
     label: "亲子/家庭旅行",
     constraints: {
-      peopleStructure: "2_adults_2_children",
-      adultGenderRule: "one_male_one_female",
+      peopleStructure: null,
+      adultGenderRule: null,
       characterConsistency: "high",
       sceneConsistency: "medium",
       forbidEmptyShots: false,
       requirePeopleInEveryShot: false,
-      customRules: [],
+      customRules: [
+        "家庭/亲子类：出镜家庭成员的人数、关系与儿童性别年龄等特征须与用户商品信息及主动提示词一致；若用户未写清，由你在规划中一次性合理推断并在全片各镜头中保持不变，不得中途增减人物或替换儿童样貌。",
+      ],
     },
   },
   travel_guide: {
@@ -269,8 +439,8 @@ export const DEFAULT_VIDEO_TASK_VIDEO_TYPE: VideoTaskVideoType = "agency_guide_v
 export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProfile> = {
   agency_guide_voiceover: {
     key: "agency_guide_voiceover",
-    label: "旅行社-攻略-无主角有旁白",
-    description: "无主角出镜，有口播和字幕，不需要对口型，适合玩法攻略和产品信息讲解。",
+    label: "旅行社-攻略-空镜旁白",
+    description: "以空镜、景点和环境为主，配旁白和字幕，不需要对口型，适合玩法攻略和产品信息讲解。",
     hasTalent: false,
     talentCaptureMode: "none",
     hasVoice: true,
@@ -286,7 +456,7 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
   },
   agency_guide_selfie_narration: {
     key: "agency_guide_selfie_narration",
-    label: "旅行社-攻略-主角自拍口播",
+    label: "旅行社-攻略-自拍口播",
     description: "主角自拍口播，要求口型同步，有字幕和 BGM，默认 1 个说话镜头对应 1 个输出片段。",
     hasTalent: true,
     talentCaptureMode: "selfie",
@@ -303,7 +473,7 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
   },
   agency_guide_presenter_narration: {
     key: "agency_guide_presenter_narration",
-    label: "旅行社-攻略-主角出镜口播",
+    label: "旅行社-攻略-他拍口播",
     description: "主角他拍口播，要求口型同步，有字幕和 BGM，适合更稳定的他拍讲解场景。",
     hasTalent: true,
     talentCaptureMode: "presented",
@@ -318,10 +488,27 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
     introSegmentDurationSeconds: null,
     preferredConstraintPreset: "travel_guide",
   },
+  agency_guide_roaming_voiceover: {
+    key: "agency_guide_roaming_voiceover",
+    label: "旅行社-攻略-漫游旁白",
+    description: "人物漫游体验为主，配旁白和字幕，不需要对口型，适合边逛边讲的攻略内容。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "multi_shot_montage",
+    allowManualMultiShot: true,
+    recommendedShotsPerSegment: 2,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "travel_guide",
+  },
   agency_guide_scenery_voiceover: {
     key: "agency_guide_scenery_voiceover",
-    label: "旅行社-攻略-纯景色空镜",
-    description: "纯景色/景观混剪，有口播和字幕，无需对口型，适合景点玩法讲解。",
+    label: "旅行社-混剪-空镜旁白",
+    description: "纯景色/景观混剪，配旁白和字幕，无需对口型，适合景点玩法讲解和氛围带看。",
     hasTalent: false,
     talentCaptureMode: "none",
     hasVoice: true,
@@ -337,7 +524,7 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
   },
   agency_montage_scenery: {
     key: "agency_montage_scenery",
-    label: "旅行社-混剪-纯景色空镜",
+    label: "旅行社-混剪-空镜无声",
     description: "景色视频混剪，无口播，仅文案字幕和 BGM，适合卡点和氛围展示。",
     hasTalent: false,
     talentCaptureMode: "none",
@@ -352,10 +539,27 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
     introSegmentDurationSeconds: null,
     preferredConstraintPreset: "scenery_showcase",
   },
+  agency_montage_roaming_voiceover: {
+    key: "agency_montage_roaming_voiceover",
+    label: "旅行社-混剪-漫游旁白",
+    description: "人物漫游混剪，配旁白和字幕，无需对口型，适合体验带看和氛围推进。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "multi_shot_montage",
+    allowManualMultiShot: true,
+    recommendedShotsPerSegment: 2,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "travel_guide",
+  },
   agency_montage_presenter_checkin: {
     key: "agency_montage_presenter_checkin",
-    label: "旅行社-混剪-主角打卡出镜",
-    description: "主角打卡出镜，无口播、无字幕，仅 BGM 和动作节奏，适合他拍打卡混剪。",
+    label: "旅行社-混剪-漫游无声",
+    description: "人物漫游混剪，无口播、无字幕，仅 BGM 和动作节奏，适合他拍漫游打卡内容。",
     hasTalent: true,
     talentCaptureMode: "presented",
     hasVoice: false,
@@ -369,10 +573,132 @@ export const videoTaskTypeProfiles: Record<VideoTaskVideoType, VideoTaskTypeProf
     introSegmentDurationSeconds: null,
     preferredConstraintPreset: "travel_guide",
   },
+  hotel_explore_voiceover: {
+    key: "hotel_explore_voiceover",
+    label: "酒店-探店-空镜旁白",
+    description: "以酒店空镜、空间和设施展示为主，配旁白和字幕，无需对口型。",
+    hasTalent: false,
+    talentCaptureMode: "none",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "multi_shot_montage",
+    allowManualMultiShot: true,
+    recommendedShotsPerSegment: 2,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+  },
+  hotel_explore_selfie_narration: {
+    key: "hotel_explore_selfie_narration",
+    label: "酒店-探店-自拍口播",
+    description: "主角自拍讲酒店体验，要求口型同步，有字幕和 BGM。",
+    hasTalent: true,
+    talentCaptureMode: "selfie",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: true,
+    hasBgm: true,
+    defaultSegmentMode: "single_speaking",
+    allowManualMultiShot: false,
+    recommendedShotsPerSegment: 1,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+  },
+  hotel_explore_presenter_narration: {
+    key: "hotel_explore_presenter_narration",
+    label: "酒店-探店-他拍口播",
+    description: "主角他拍讲酒店体验，要求口型同步，有字幕和 BGM。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: true,
+    hasBgm: true,
+    defaultSegmentMode: "single_speaking",
+    allowManualMultiShot: false,
+    recommendedShotsPerSegment: 1,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+  },
+  hotel_explore_roaming_voiceover: {
+    key: "hotel_explore_roaming_voiceover",
+    label: "酒店-探店-漫游旁白",
+    description: "人物漫游探店酒店，配旁白和字幕，无需对口型，适合带看空间和体验流程。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "multi_shot_montage",
+    allowManualMultiShot: true,
+    recommendedShotsPerSegment: 2,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+    workflowKind: "captured_material_first",
+  },
+  hotel_explore_roaming_silent: {
+    key: "hotel_explore_roaming_silent",
+    label: "酒店-探店-漫游无声",
+    description: "人物漫游探店酒店，无口播、无字幕，仅 BGM 和动作节奏推进。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: false,
+    hasSubtitle: false,
+    subtitleMode: "none",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "single_action",
+    allowManualMultiShot: false,
+    recommendedShotsPerSegment: 1,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+    workflowKind: "captured_material_first",
+  },
+  hotel_montage_voiceover: {
+    key: "hotel_montage_voiceover",
+    label: "酒店-混剪-空镜旁白",
+    description: "酒店空镜混剪，配旁白和字幕，无需对口型，适合氛围种草和卖点带看。",
+    hasTalent: false,
+    talentCaptureMode: "none",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: false,
+    hasBgm: true,
+    defaultSegmentMode: "multi_shot_montage",
+    allowManualMultiShot: true,
+    recommendedShotsPerSegment: 2,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "hotel_promo",
+  },
+  retail_explore_presenter_narration: {
+    key: "retail_explore_presenter_narration",
+    label: "超市卖场-探店-他拍口播",
+    description: "主角他拍讲解超市卖场动线、货盘和体验点，要求口型同步，有字幕和 BGM。",
+    hasTalent: true,
+    talentCaptureMode: "presented",
+    hasVoice: true,
+    hasSubtitle: true,
+    subtitleMode: "voice_aligned",
+    requiresLipSync: true,
+    hasBgm: true,
+    defaultSegmentMode: "single_speaking",
+    allowManualMultiShot: false,
+    recommendedShotsPerSegment: 1,
+    introSegmentDurationSeconds: null,
+    preferredConstraintPreset: "general",
+  },
   agency_creative_beat_mix: {
     key: "agency_creative_beat_mix",
     label: "旅行社-创意-卡点混剪",
-    description: "前 3 秒有人物读稿并对口型，后续转入创意卡点混剪，主体以旁白、字幕和 BGM 推进。",
+    description:
+      "前 4 秒左右可有人物开场读稿，后续转入创意卡点混剪，主体以旁白、字幕和 BGM 推进，不默认做单独口型同步。",
     hasTalent: true,
     talentCaptureMode: "intro_host",
     hasVoice: true,
@@ -425,6 +751,18 @@ export function getVideoTaskTypeProfile(videoType?: VideoTaskVideoType | null) {
   );
 }
 
+export function getVideoTaskWorkflowKind(videoType?: VideoTaskVideoType | null): VideoTaskWorkflowKind {
+  return getVideoTaskTypeProfile(videoType).workflowKind ?? "visual_reference_first";
+}
+
+export function usesCapturedMaterialFirstWorkflow(videoType?: VideoTaskVideoType | null) {
+  return getVideoTaskWorkflowKind(videoType) === "captured_material_first";
+}
+
+export function isHotelVideoType(videoType?: VideoTaskVideoType | null) {
+  return Boolean(videoType?.startsWith("hotel_"));
+}
+
 export function computeVideoTaskStoryShotCount(input: {
   videoType?: VideoTaskVideoType | null;
   segmentCount: number;
@@ -453,6 +791,8 @@ export type VideoTaskSource = {
   productInfoTitle: string | null;
   productInfoSnapshot: string;
   userPrompt: string;
+  /** 系统基于用户原始提示词整理出的创作提示词；不覆盖 userPrompt */
+  optimizedUserPrompt?: string;
   /** 可选参考视频素材 id（与视频拆解素材库 `materialId` 同语义） */
   videoMaterialId: string | null;
   /** 对应视频素材名称（与素材库 `name` 同语义，仅展示） */
@@ -478,10 +818,25 @@ export function normalizeVideoTaskSource(
     productInfoTitle: raw?.productInfoTitle ?? null,
     productInfoSnapshot: raw?.productInfoSnapshot ?? "",
     userPrompt: raw?.userPrompt ?? "",
+    optimizedUserPrompt: raw?.optimizedUserPrompt ?? "",
     videoMaterialId: raw?.videoMaterialId ?? raw?.videoTemplateId ?? null,
     videoMaterialName: raw?.videoMaterialName ?? raw?.videoTemplateName ?? null,
     videoTemplatePrompt: raw?.videoTemplatePrompt ?? "",
   };
+}
+
+export function hasVideoTaskSourceContent(
+  source?: Pick<
+    VideoTaskSource,
+    "productInfoSnapshot" | "userPrompt" | "optimizedUserPrompt" | "videoTemplatePrompt"
+  > | null,
+) {
+  return Boolean(
+    source?.productInfoSnapshot?.trim() ||
+    source?.userPrompt?.trim() ||
+    source?.optimizedUserPrompt?.trim() ||
+    source?.videoTemplatePrompt?.trim(),
+  );
 }
 
 export type VideoTaskImageParameters = {
@@ -523,15 +878,24 @@ export type VideoTaskAudioParameters = {
   enableSubtitle: boolean;
 };
 
+export type VideoTaskCompositionParameters = {
+  includeBackgroundMusic: boolean;
+  backgroundMusicUrl: string | null;
+  backgroundMusicVolume: number;
+  subtitleConfig: SubtitleConfig;
+};
+
 export type VideoTaskParameterBundle = {
   image: VideoTaskImageParameters;
   video: VideoTaskVideoParameters;
   audio: VideoTaskAudioParameters;
+  composition: VideoTaskCompositionParameters;
   constraints: TaskConstraints;
 };
 
 export type VideoTaskRecord = {
   taskId: string;
+  ownerUserId: string | null;
   title: string;
   status: VideoTaskStatus;
   source: VideoTaskSource;
@@ -546,6 +910,21 @@ export type VideoTaskRecord = {
 
 export type VideoTaskGeneratedVideoType = "DIRECTOR" | "AUTO";
 export type VideoTaskStageTone = "idle" | "editing" | "created";
+
+export function normalizeVideoTaskStatus(status?: string | null): VideoTaskStatus {
+  switch (status) {
+    case "SUBTITLE_AUDIO_READY":
+    case "IMAGES_READY":
+    case "CLIPS_READY":
+    case "COMPOSITION_READY":
+    case "CREATED":
+      return status;
+    case "VIDEO_BURN_READY":
+      return "COMPOSITION_READY";
+    default:
+      return "CREATED";
+  }
+}
 
 export type VideoTaskGeneratedVideoRecord = {
   taskId: string;
@@ -595,15 +974,22 @@ export const videoTaskStatusFlow: Array<{ key: VideoTaskStatus; label: string; d
     label: "视频合成完成",
     description: "时间线合成输出已完成",
   },
-  {
-    key: "VIDEO_BURN_READY",
-    label: "最终成片完成",
-    description: "最终交付视频已完成输出",
-  },
 ];
 
 export function getVideoTaskStatusIndex(status: VideoTaskStatus) {
   return videoTaskStatusFlow.findIndex((item) => item.key === status);
+}
+
+export function isVideoTaskStatus(value: string | null | undefined): value is VideoTaskStatus {
+  return videoTaskStatusFlow.some((item) => item.key === value);
+}
+
+export function promoteVideoTaskStatus(currentStatus: VideoTaskStatus, targetStatus: VideoTaskStatus) {
+  return getVideoTaskStatusIndex(currentStatus) >= getVideoTaskStatusIndex(targetStatus) ? currentStatus : targetStatus;
+}
+
+export function capVideoTaskStatus(currentStatus: VideoTaskStatus, maxStatus: VideoTaskStatus) {
+  return getVideoTaskStatusIndex(currentStatus) <= getVideoTaskStatusIndex(maxStatus) ? currentStatus : maxStatus;
 }
 
 export function getVideoTaskStatusMeta(status: VideoTaskStatus) {
@@ -643,9 +1029,14 @@ export function getVideoTaskModuleStatusMeta(
 export function deriveVideoTaskTitle(source: VideoTaskSource) {
   const explicitSource =
     source.userPrompt.trim() ||
+    source.optimizedUserPrompt?.trim() ||
     source.videoMaterialName?.trim() ||
     source.videoTemplatePrompt.trim() ||
     source.productInfoTitle?.trim() ||
     source.productInfoSnapshot.trim();
-  return explicitSource.replace(/\s+/g, " ").slice(0, 18) || "未命名视频任务";
+  if (explicitSource.trim()) {
+    return explicitSource.replace(/\s+/g, " ").slice(0, 18);
+  }
+
+  return "未命名视频任务";
 }

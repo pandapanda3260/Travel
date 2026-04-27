@@ -14,7 +14,12 @@ export function getTextGenerationRuntime(): TextGenerationRuntime {
   const localConfigFileName = "text.env.local";
   const configFileName = getEnvConfigDisplayName(localConfigFileName);
   const localConfig = loadOptionalEnvFile(localConfigFileName);
-  const apiKey = process.env.VOLCENGINE_TEXT_API_KEY ?? localConfig.VOLCENGINE_TEXT_API_KEY ?? "";
+  const apiKey =
+    process.env.VOLCENGINE_TEXT_API_KEY ??
+    localConfig.VOLCENGINE_TEXT_API_KEY ??
+    process.env.ARK_API_KEY ??
+    localConfig.ARK_API_KEY ??
+    "";
   const apiBase =
     process.env.VOLCENGINE_TEXT_API_BASE ?? localConfig.VOLCENGINE_TEXT_API_BASE ?? "https://ark.cn-beijing.volces.com";
   const modelId = process.env.VOLCENGINE_TEXT_MODEL ?? localConfig.VOLCENGINE_TEXT_MODEL ?? "doubao-seed-2.0-pro";

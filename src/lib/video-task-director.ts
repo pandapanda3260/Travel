@@ -1,9 +1,20 @@
 import {
+  buildNarrationScriptFromSubtitlePlan,
+  getSegmentSubtitleEntry,
+  normalizeSubtitlePlanSource,
+  usesSegmentLevelSubtitleSource,
+} from "./subtitle-plan-source";
+import {
   countNarrationCharacters,
+  getNarrationEmergencyTrimCharacters,
   getNarrationLengthGuidance,
+  getNarrationRepairTriggerCharacters,
+  isNarrationClearlyOverDuration,
   sanitizeNarrationText,
   trimNarrationToCharacterLimit,
 } from "./narration";
+import { buildIndexedBlockText, parseIndexedTextBlocks, type IndexedTextBlock } from "./indexed-text-blocks";
+import { isSeedanceProvider } from "./video-provider-config";
 import {
   computeVideoTaskStoryShotCount,
   getVideoTaskTypeProfile,
@@ -17,14 +28,6 @@ import {
   type VideoTaskParameterBundle,
   type VideoTaskRecord,
 } from "./video-task-schema";
-
-type IndexedBlock = {
-  label: string;
-  index: number;
-  text: string;
-};
-
-const indexedBlockPattern = /(片段|镜头|音频|字幕|旁白)\s*(\d+)\s*[.．、:：]?\s*/g;
 
 function normalizeInlineText(text: string | null | undefined) {
   return String(text ?? "")
@@ -45,45 +48,15 @@ function trimNarrationToDuration(text: string, durationSeconds: number, fallback
   }
 
   const guidance = getNarrationLengthGuidance(durationSeconds);
-  if (countNarrationCharacters(normalized) <= guidance.maxCharacters) {
+  const repairTriggerCharacters = getNarrationRepairTriggerCharacters(durationSeconds);
+  const emergencyTrimCharacters = getNarrationEmergencyTrimCharacters(durationSeconds);
+  const charCount = countNarrationCharacters(normalized);
+
+  if (charCount <= emergencyTrimCharacters && !isNarrationClearlyOverDuration(normalized, durationSeconds)) {
     return sanitizeNarrationText(normalized);
   }
 
-  return trimNarrationToCharacterLimit(normalized, guidance.maxCharacters);
-}
-
-function parseIndexedBlocks(text: string, fallbackCount: number, defaultLabel = "镜头"): IndexedBlock[] {
-  const normalized = String(text ?? "").trim();
-  if (!normalized) {
-    return [];
-  }
-
-  const matches = Array.from(normalized.matchAll(indexedBlockPattern));
-  if (matches.length === 0) {
-    const lines = normalized
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    return Array.from({ length: Math.max(1, fallbackCount) }, (_, index) => ({
-      label: defaultLabel,
-      index: index + 1,
-      text: lines[index] ?? lines[0] ?? normalized,
-    }));
-  }
-
-  return matches.map((match, matchIndex) => {
-    const start = (match.index ?? 0) + match[0].length;
-    const end = matches[matchIndex + 1]?.index ?? normalized.length;
-    return {
-      label: match[1] || defaultLabel,
-      index: Number(match[2]) || matchIndex + 1,
-      text: normalized.slice(start, end).trim(),
-    };
-  });
-}
-
-function buildIndexedBlockText(label: string, blocks: Array<{ index: number; text: string }>) {
-  return blocks.map((block) => `${label}${block.index}：${block.text.trim()}`).join("\n");
+  return trimNarrationToCharacterLimit(normalized, Math.max(guidance.maxCharacters, repairTriggerCharacters));
 }
 
 function mergeTexts(texts: Array<string | null | undefined>, fallback = "") {
@@ -99,11 +72,117 @@ function mergeTexts(texts: Array<string | null | undefined>, fallback = "") {
     .trim();
 }
 
-function getPromptBlockForIndex(blocks: IndexedBlock[], index: number) {
-  return blocks.find((block) => block.index === index)?.text ?? blocks[index - 1]?.text ?? blocks[0]?.text ?? "";
+function getClauseDedupKey(text: string) {
+  return normalizeInlineText(text).replace(/[，。！？；、\s]+/g, "");
 }
 
-function resolveSegmentText(blocks: IndexedBlock[], segmentIndex: number, shotIndexes: number[], segmentCount: number) {
+function joinUniqueTextClauses(clauses: Array<string | null | undefined>, fallback = "") {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const clause of clauses) {
+    const normalizedClause = normalizeInlineText(clause);
+    const key = getClauseDedupKey(normalizedClause);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(normalizedClause);
+  }
+
+  return mergeTexts(result, fallback);
+}
+
+function cleanupPromptClause(text: string) {
+  return normalizeInlineText(text)
+    .replace(/^[，。！？；、]+|[，。！？；、]+$/g, "")
+    .replace(/[，。！？；、]{2,}/g, "，")
+    .replace(/(?:与|和|及|、)+(?:$|(?=[，。！？；、]))/g, "")
+    .replace(/^[与和及、]+|[与和及、]+$/g, "")
+    .trim();
+}
+
+function splitPromptClauses(prompt: string) {
+  return normalizeInlineText(prompt)
+    .split(/[，；\n]+/)
+    .map((clause) => cleanupPromptClause(clause))
+    .filter(Boolean);
+}
+
+type CompoundSceneCategory = {
+  key: string;
+  label: string;
+  summary: string;
+  pattern: RegExp;
+};
+
+type FocusedScenePrompt = {
+  sceneDescription: string;
+  imagePrompt: string;
+  videoPrompt: string;
+};
+
+const SINGLE_SCENE_RULE = "单一连续画面，只展示一个主要场景或空间，不要多区域拼接或上下分区";
+
+const GENERIC_PROMPT_CLAUSE_PATTERN =
+  /(竖构图|横构图|方构图|9:16|16:9|1:1|远景|中景|近景|特写|大全景|构图|三分法|对称|居中|引导线|暖色|冷色|色调|自然光|日光|晨光|夕阳|光线|光影|写实|摄影|电影级|纪实|高级感|质感|细节|通透|比例|透视|no text|no letters|no words|no watermark|no collage|no split screen|single continuous image|realistic perspective and proportions|无主角人物出镜|若有.*点缀|不要.*(拼接|分屏|文字|水印|摆拍|写真)|主体.*(景点|建筑|环境|设施)|人物.*(小比例|不居中|不抢主体|自然合理))/iu;
+
+const COMPOUND_SCENE_CATEGORIES: CompoundSceneCategory[] = [
+  {
+    key: "hotel_room",
+    label: "酒店客房空间",
+    summary: "酒店客房空间，床品与休息区细节",
+    pattern: /(客房|房间|卧室|大床|双床|套房|床铺|床品|床头|窗景|窗边|写字台|桌面|洗漱台|卫浴|沙发区)/u,
+  },
+  {
+    key: "hotel_dining",
+    label: "酒店早餐或夜宵餐区",
+    summary: "酒店早餐或夜宵餐区，取餐台与餐食细节",
+    pattern: /(早餐|夜宵|餐区|餐台|取餐台|餐盘|咖啡机|热食|粥品|自助餐|下午茶|茶点|用餐区)/u,
+  },
+  {
+    key: "hotel_public",
+    label: "酒店大堂或公共区域",
+    summary: "酒店大堂或公共区域，前台与休息区氛围",
+    pattern: /(大堂|前台|公区|公共区域|书吧|休息区|走廊|电梯厅|前厅|外立面|门头|入口)/u,
+  },
+  {
+    key: "transport",
+    label: "接送站与交通动线",
+    summary: "接送站与交通动线，车辆与上客区场景",
+    pattern: /(接机|接站|送机|送站|上车点|下车点|车辆|出租车|专车|机场|高铁站|车站|站台|候车|车门|行李|上客区)/u,
+  },
+  {
+    key: "landmark",
+    label: "单一景点或地标外景",
+    summary: "单一景点或地标外景，环境与建筑主体清楚",
+    pattern: /(故宫|长城|天安门|圆明园|颐和园|天坛|鸟巢|水立方|什刹海|地标|园林|广场|寺庙|博物馆|宫殿|古建筑|风光|湖景|山景|海景)/u,
+  },
+];
+
+function getSceneCategoriesForText(text: string) {
+  return COMPOUND_SCENE_CATEGORIES.filter((category) => category.pattern.test(text));
+}
+
+function isGenericPromptClause(clause: string) {
+  const matchedCategories = getSceneCategoriesForText(clause);
+  if (matchedCategories.length > 0) {
+    return false;
+  }
+
+  return GENERIC_PROMPT_CLAUSE_PATTERN.test(clause) || matchedCategories.length === 0;
+}
+
+function collectGenericPromptClauses(prompt: string) {
+  return splitPromptClauses(prompt).filter((clause) => isGenericPromptClause(clause));
+}
+
+function resolveShotText(
+  blocks: IndexedTextBlock[],
+  shotIndex: number,
+  segmentIndex: number,
+  segmentCount: number,
+) {
   if (!blocks.length) {
     return "";
   }
@@ -112,20 +191,263 @@ function resolveSegmentText(blocks: IndexedBlock[], segmentIndex: number, shotIn
     return getPromptBlockForIndex(blocks, segmentIndex);
   }
 
+  return getPromptBlockForIndex(blocks, shotIndex);
+}
+
+function buildShotImagePromptFromScope(input: {
+  sceneDescription?: string | null;
+  segmentPrompt?: string | null;
+  shotScopedPrompt?: string | null;
+  hasShotScopedPrompt: boolean;
+}) {
+  const sceneDescription = normalizeInlineText(input.sceneDescription);
+  const shotScopedPrompt = normalizeInlineText(input.shotScopedPrompt);
+  const segmentPrompt = normalizeInlineText(input.segmentPrompt);
+
+  if (input.hasShotScopedPrompt && shotScopedPrompt) {
+    return joinUniqueTextClauses([shotScopedPrompt, SINGLE_SCENE_RULE], shotScopedPrompt);
+  }
+
+  return joinUniqueTextClauses(
+    [sceneDescription, ...collectGenericPromptClauses(segmentPrompt), SINGLE_SCENE_RULE],
+    sceneDescription || segmentPrompt,
+  );
+}
+
+function buildShotVideoPromptFromScope(input: {
+  sceneDescription?: string | null;
+  action?: string | null;
+  emotion?: string | null;
+  cameraMovement?: string | null;
+  segmentPrompt?: string | null;
+  shotScopedPrompt?: string | null;
+  hasShotScopedPrompt: boolean;
+}) {
+  const shotScopedPrompt = normalizeInlineText(input.shotScopedPrompt);
+  if (input.hasShotScopedPrompt && shotScopedPrompt) {
+    return shotScopedPrompt;
+  }
+
+  const movement =
+    normalizeInlineText(input.cameraMovement) && normalizeInlineText(input.cameraMovement) !== "auto"
+      ? normalizeInlineText(input.cameraMovement)
+      : "自然运镜";
+
+  return joinUniqueTextClauses(
+    [
+      input.sceneDescription,
+      input.action,
+      movement,
+      input.emotion,
+      ...collectGenericPromptClauses(input.segmentPrompt ?? ""),
+    ],
+    shotScopedPrompt || normalizeInlineText(input.segmentPrompt),
+  );
+}
+
+function getDetectedCompoundSceneCategories(prompt: string, sceneDescription: string) {
+  const sourceText = mergeTexts([sceneDescription, prompt]);
+  return COMPOUND_SCENE_CATEGORIES.map((category) => ({
+    category,
+    position: sourceText.search(category.pattern),
+  }))
+    .filter((entry) => entry.position >= 0)
+    .sort((left, right) => left.position - right.position)
+    .map((entry) => entry.category)
+    .slice(0, 3);
+}
+
+function filterClauseForSceneCategory(
+  clause: string,
+  focusCategory: CompoundSceneCategory,
+  detectedCategories: CompoundSceneCategory[],
+) {
+  if (isGenericPromptClause(clause)) {
+    return clause;
+  }
+
+  const matchedCategories = detectedCategories.filter((category) => category.pattern.test(clause));
+  if (!matchedCategories.some((category) => category.key === focusCategory.key)) {
+    return "";
+  }
+
+  if (matchedCategories.length === 1) {
+    return clause;
+  }
+
+  let filtered = clause;
+  for (const category of matchedCategories) {
+    if (category.key === focusCategory.key) {
+      continue;
+    }
+    filtered = filtered.replace(category.pattern, "");
+  }
+
+  return cleanupPromptClause(filtered);
+}
+
+function buildFocusedScenePrompt(
+  basePrompt: string,
+  baseVideoPrompt: string,
+  focusCategory: CompoundSceneCategory,
+  detectedCategories: CompoundSceneCategory[],
+): FocusedScenePrompt {
+  const excludedLabels = detectedCategories
+    .filter((category) => category.key !== focusCategory.key)
+    .map((category) => category.label);
+  const focusRule =
+    excludedLabels.length > 0
+      ? `当前子镜头只聚焦${focusCategory.label}，保持单一连续画面，不要与${excludedLabels.join("、")}同框拼接`
+      : `当前子镜头只聚焦${focusCategory.label}，保持单一连续画面`;
+
+  const focusedImageClauses = splitPromptClauses(basePrompt)
+    .map((clause) => filterClauseForSceneCategory(clause, focusCategory, detectedCategories))
+    .filter(Boolean);
+  const focusedVideoClauses = splitPromptClauses(baseVideoPrompt)
+    .map((clause) => filterClauseForSceneCategory(clause, focusCategory, detectedCategories))
+    .filter(Boolean);
+
+  return {
+    sceneDescription: focusCategory.summary,
+    imagePrompt: joinUniqueTextClauses([focusCategory.summary, ...focusedImageClauses, focusRule], basePrompt),
+    videoPrompt: joinUniqueTextClauses([focusCategory.summary, ...focusedVideoClauses, focusRule], baseVideoPrompt),
+  };
+}
+
+function distributeExpandedShotDurations(totalDurationSeconds: number, parts: number) {
+  if (parts <= 1) {
+    return [Number(totalDurationSeconds.toFixed(2))];
+  }
+
+  if (totalDurationSeconds < parts * 0.8) {
+    return null;
+  }
+
+  const durations: number[] = [];
+  let remaining = totalDurationSeconds;
+
+  for (let index = 0; index < parts; index += 1) {
+    const remainingParts = parts - index;
+    if (remainingParts === 1) {
+      durations.push(Number(remaining.toFixed(2)));
+      break;
+    }
+
+    const rawDuration = Math.max(0.8, remaining / remainingParts);
+    const duration = Number(rawDuration.toFixed(2));
+    durations.push(duration);
+    remaining -= duration;
+  }
+
+  return durations;
+}
+
+function expandCompoundSceneStoryShots(
+  shots: DirectorStoryShot[],
+  segmentMode: VideoTaskParameterBundle["video"]["segmentMode"],
+) {
+  if (segmentMode !== "multi_shot_montage") {
+    return shots;
+  }
+
+  return shots.flatMap((shot) => {
+    if (shot.requiresLipSync) {
+      return [shot];
+    }
+
+    const detectedCategories = getDetectedCompoundSceneCategories(shot.imagePrompt, shot.sceneDescription);
+    if (detectedCategories.length < 2) {
+      return [shot];
+    }
+
+    const expandedPrompts = detectedCategories.map((category) =>
+      buildFocusedScenePrompt(shot.imagePrompt, shot.videoPrompt, category, detectedCategories),
+    );
+    const durations = distributeExpandedShotDurations(shot.durationSeconds, expandedPrompts.length);
+
+    if (!durations || durations.length !== expandedPrompts.length) {
+      return [shot];
+    }
+
+    return expandedPrompts.map((focusedPrompt, index) => ({
+      ...shot,
+      shotId: index === 0 ? shot.shotId : `${shot.shotId}-${index + 1}`,
+      shotIndex: index === 0 ? shot.shotIndex : Number((shot.shotIndex + index / 10).toFixed(2)),
+      title: index === 0 ? shot.title : `${shot.title}-${index + 1}`,
+      durationSeconds: durations[index] ?? shot.durationSeconds,
+      sceneDescription: focusedPrompt.sceneDescription,
+      imagePrompt: focusedPrompt.imagePrompt,
+      videoPrompt: focusedPrompt.videoPrompt,
+      hasVoice: index === 0 ? shot.hasVoice : false,
+      hasSubtitle: index === 0 ? shot.hasSubtitle : false,
+      requiresLipSync: index === 0 ? shot.requiresLipSync : false,
+      narrationText: index === 0 ? shot.narrationText : "",
+      subtitleText: index === 0 ? shot.subtitleText : "",
+    }));
+  });
+}
+
+function getPromptBlockForIndex(blocks: IndexedTextBlock[], index: number) {
+  return blocks.find((block) => block.index === index)?.text ?? blocks[index - 1]?.text ?? blocks[0]?.text ?? "";
+}
+
+function resolveSegmentText(blocks: IndexedTextBlock[], segmentIndex: number, shotIndexes: number[], segmentCount: number) {
+  if (!blocks.length) {
+    return "";
+  }
+
+  if (blocks.length === segmentCount) {
+    return getPromptBlockForIndex(blocks, segmentIndex);
+  }
   return mergeTexts(
     shotIndexes.map((shotIndex) => getPromptBlockForIndex(blocks, shotIndex)),
     getPromptBlockForIndex(blocks, segmentIndex),
   );
 }
 
-function getSegmentDurationSeconds(parameters: VideoTaskParameterBundle["video"], segmentIndex: number) {
-  if (parameters.segmentMode === "hybrid_intro_plus_montage" && segmentIndex === 1) {
-    return Math.max(1, parameters.introSegmentDurationSeconds ?? Math.min(3, parameters.durationSeconds));
+function getSegmentDurationSeconds(parameters: VideoTaskParameterBundle["video"], segmentIndex: number, shotPlanItems?: ShotPlanItem[]) {
+  if (shotPlanItems && shotPlanItems.length > 0) {
+    const segmentShots = shotPlanItems.filter((item) => (item.segmentIndex ?? 0) === segmentIndex);
+    if (segmentShots.length > 0) {
+      const sumDuration = segmentShots.reduce((sum, s) => sum + (s.durationSeconds || 0), 0);
+      if (sumDuration > 0) {
+        return isSeedanceProvider() ? Math.max(4, Math.min(10, Math.round(sumDuration))) : sumDuration;
+      }
+    }
   }
-  return Math.max(1, parameters.durationSeconds);
+
+  if (parameters.segmentMode === "hybrid_intro_plus_montage" && segmentIndex === 1) {
+    const raw = Math.max(1, parameters.introSegmentDurationSeconds ?? Math.min(3, parameters.durationSeconds));
+    return isSeedanceProvider() ? Math.max(4, Math.min(10, raw)) : raw;
+  }
+
+  const raw = Math.max(1, parameters.durationSeconds);
+  return isSeedanceProvider() ? Math.max(4, Math.min(10, raw)) : raw;
 }
 
-function buildSegmentShotGroups(parameters: VideoTaskParameterBundle["video"]) {
+function buildSegmentShotGroupsFromShotPlan(shotPlanItems: ShotPlanItem[]): Array<{ segmentIndex: number; shotIndexes: number[] }> | null {
+  const hasSegmentInfo = shotPlanItems.some((item) => item.segmentId || item.segmentIndex);
+  if (!hasSegmentInfo || shotPlanItems.length === 0) return null;
+
+  const groupMap = new Map<number, number[]>();
+  for (const item of shotPlanItems) {
+    const segIdx = item.segmentIndex ?? 1;
+    const existing = groupMap.get(segIdx) ?? [];
+    existing.push(item.shotIndex);
+    groupMap.set(segIdx, existing);
+  }
+
+  return Array.from(groupMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([segmentIndex, shotIndexes]) => ({ segmentIndex, shotIndexes: shotIndexes.sort((a, b) => a - b) }));
+}
+
+function buildSegmentShotGroups(parameters: VideoTaskParameterBundle["video"], shotPlanItems?: ShotPlanItem[]) {
+  if (shotPlanItems) {
+    const fromPlan = buildSegmentShotGroupsFromShotPlan(shotPlanItems);
+    if (fromPlan && fromPlan.length > 0) return fromPlan;
+  }
+
   const segmentCount = Math.max(1, parameters.segmentCount);
   const shotsPerSegment = Math.max(1, parameters.storyShotsPerSegment || 1);
 
@@ -161,18 +483,8 @@ function getSegmentModeForIndex(parameters: VideoTaskParameterBundle["video"], s
   return parameters.segmentMode;
 }
 
-function getSegmentFlags(parameters: VideoTaskParameterBundle["video"], segmentIndex: number) {
+function getSegmentFlags(parameters: VideoTaskParameterBundle["video"]) {
   const profile = getVideoTaskTypeProfile(parameters.videoType);
-  if (profile.key === "agency_creative_beat_mix" && segmentIndex === 1) {
-    return {
-      hasTalent: true,
-      talentCaptureMode: "intro_host" as const,
-      hasVoice: true,
-      hasSubtitle: true,
-      requiresLipSync: true,
-    };
-  }
-
   return {
     hasTalent: profile.hasTalent,
     talentCaptureMode: profile.talentCaptureMode,
@@ -194,7 +506,7 @@ function buildFallbackStoryShot(input: {
   narrationText: string;
 }) {
   const profile = getVideoTaskTypeProfile(input.parameters.videoType);
-  const flags = getSegmentFlags(input.parameters, input.segmentIndex);
+  const flags = getSegmentFlags(input.parameters);
   const sceneDescription =
     normalizeInlineText(input.planItem?.sceneDescription) ||
     normalizeInlineText(input.imagePrompt) ||
@@ -210,6 +522,7 @@ function buildFallbackStoryShot(input: {
     segmentId: input.segmentId,
     segmentIndex: input.segmentIndex,
     title: `镜头 ${input.shotIndex}`,
+    sceneType: input.planItem?.sceneType,
     purpose: input.planItem?.purpose ?? (input.shotIndex === 1 ? "hook" : "experience"),
     location: input.planItem?.location ?? "",
     hasCharacters: input.planItem?.hasCharacters ?? flags.hasTalent,
@@ -224,11 +537,40 @@ function buildFallbackStoryShot(input: {
     cameraMovement: input.planItem?.cameraMovement ?? input.parameters.cameraControl,
     durationSeconds: Math.max(0.8, input.durationSeconds),
     sceneDescription,
+    contentDescription: input.planItem?.contentDescription,
     narrationHint,
-    imagePrompt: normalizeInlineText(input.imagePrompt) || sceneDescription,
-    videoPrompt: normalizeInlineText(input.videoPrompt) || sceneDescription,
+    imagePrompt: normalizeInlineText(input.planItem?.img2imgPrompt) || normalizeInlineText(input.imagePrompt) || sceneDescription,
+    videoPrompt: normalizeInlineText(input.planItem?.i2vPrompt) || normalizeInlineText(input.videoPrompt) || sceneDescription,
     narrationText: normalizeNarrationText(input.narrationText),
     subtitleText: normalizeNarrationText(input.narrationText),
+    startAtSeconds: input.planItem?.startAtSeconds,
+    endAtSeconds: input.planItem?.endAtSeconds,
+    functionTag: input.planItem?.functionTag,
+    sellingPointType: input.planItem?.sellingPointType,
+    shotScale: input.planItem?.shotScale,
+    compositionHint: input.planItem?.compositionHint,
+    rhythmTag: input.planItem?.rhythmTag,
+    mood: input.planItem?.mood,
+    sellingPointTags: input.planItem?.sellingPointTags,
+    assetId: input.planItem?.assetId ?? null,
+    assetSourceType: input.planItem?.assetSourceType ?? null,
+    assetSubjectSummary: input.planItem?.assetSubjectSummary ?? null,
+    sourceMaterialId: input.planItem?.sourceMaterialId ?? null,
+    sourceStartAtSeconds: input.planItem?.sourceStartAtSeconds ?? null,
+    sourceEndAtSeconds: input.planItem?.sourceEndAtSeconds ?? null,
+    sourceTimeRangeLabel: input.planItem?.sourceTimeRangeLabel ?? null,
+    referenceImageUrl: input.planItem?.referenceImageUrl ?? null,
+    generationMode: input.planItem?.generationMode,
+    sourceTrace: input.planItem?.sourceTrace ?? null,
+    needImageEnhancement: input.planItem?.needImageEnhancement ?? false,
+    needImageToVideo: input.planItem?.needImageToVideo ?? true,
+    isAtmosphereInsert: input.planItem?.isAtmosphereInsert ?? false,
+    img2imgPrompt: input.planItem?.img2imgPrompt ?? null,
+    i2vPrompt: input.planItem?.i2vPrompt ?? null,
+    visual: input.planItem?.visual,
+    subject: input.planItem?.subject,
+    cinematography: input.planItem?.cinematography,
+    structure: input.planItem?.structure,
   } satisfies DirectorStoryShot;
 }
 
@@ -255,22 +597,25 @@ export function buildDirectorPlanFromTaskData(input: {
       }),
   );
   const shotPlanItems = [...(input.shotPlan?.shots ?? [])].sort((left, right) => left.shotIndex - right.shotIndex);
-  const segmentGroups = buildSegmentShotGroups({
-    ...input.parameters.video,
-    storyShotCount,
-  });
+  const segmentGroups = buildSegmentShotGroups(
+    { ...input.parameters.video, storyShotCount },
+    shotPlanItems.length > 0 ? shotPlanItems : undefined,
+  );
 
-  const imageBlocks = parseIndexedBlocks(
+  const imageBlocks = parseIndexedTextBlocks(
     input.draftBundle.textToImagePrompt,
     Math.max(segmentCount, storyShotCount),
     "片段",
   );
-  const videoBlocks = parseIndexedBlocks(
+  const videoBlocks = parseIndexedTextBlocks(
     input.draftBundle.imageToVideoPrompt,
     Math.max(segmentCount, storyShotCount),
     "片段",
   );
-  const narrationBlocks = parseIndexedBlocks(input.draftBundle.narrationScript, storyShotCount, "镜头");
+  const narrationBlocks = parseIndexedTextBlocks(input.draftBundle.narrationScript, storyShotCount, "镜头");
+  const normalizedShotPlan = input.shotPlan
+    ? normalizeSubtitlePlanSource(input.shotPlan, input.parameters.video.videoType)
+    : input.shotPlan;
 
   const storyShots: DirectorStoryShot[] = [];
   const renderSegments: DirectorRenderSegment[] = [];
@@ -280,23 +625,55 @@ export function buildDirectorPlanFromTaskData(input: {
   for (const group of segmentGroups) {
     const segmentIndex = group.segmentIndex;
     const segmentId = `segment-${segmentIndex}`;
-    const segmentDurationSeconds = getSegmentDurationSeconds(input.parameters.video, segmentIndex);
+    const segmentDurationSeconds = getSegmentDurationSeconds(input.parameters.video, segmentIndex, shotPlanItems);
     const segmentMode = getSegmentModeForIndex(input.parameters.video, segmentIndex);
-    const segmentFlags = getSegmentFlags(input.parameters.video, segmentIndex);
+    const segmentFlags = getSegmentFlags(input.parameters.video);
     const segmentImagePrompt = resolveSegmentText(imageBlocks, segmentIndex, group.shotIndexes, segmentCount);
     const segmentVideoPrompt = resolveSegmentText(videoBlocks, segmentIndex, group.shotIndexes, segmentCount);
+    const hasShotScopedImagePrompt = imageBlocks.length > segmentCount;
+    const hasShotScopedVideoPrompt = videoBlocks.length > segmentCount;
 
     const shotDurationSeconds = Math.max(
       0.8,
       Number((segmentDurationSeconds / Math.max(1, group.shotIndexes.length)).toFixed(2)),
     );
 
-    const segmentShots = group.shotIndexes.map((shotIndex) => {
+    const segmentNarrationBlock = resolveSegmentText(narrationBlocks, segmentIndex, group.shotIndexes, segmentCount);
+    const voicedShotCount = group.shotIndexes.filter((shotIndex) => {
+      const planItem = shotPlanItems.find((item) => item.shotIndex === shotIndex) ?? null;
+      const shotHasVoice = planItem?.hasVoice ?? segmentFlags.hasVoice;
+      const shotHasSubtitle = planItem?.hasSubtitle ?? (segmentFlags.hasSubtitle && shotHasVoice);
+      return shotHasVoice || shotHasSubtitle;
+    }).length;
+    let segmentNarrationAssigned = false;
+
+    const rawSegmentShots = group.shotIndexes.map((shotIndex) => {
       const planItem = shotPlanItems.find((item) => item.shotIndex === shotIndex) ?? null;
       const shotHasVoice = planItem?.hasVoice ?? segmentFlags.hasVoice;
       const shotHasSubtitle = planItem?.hasSubtitle ?? (segmentFlags.hasSubtitle && shotHasVoice);
       const shotRequiresLipSync = planItem?.requiresLipSync ?? (shotHasVoice ? segmentFlags.requiresLipSync : false);
-      const rawShotNarrationText = getPromptBlockForIndex(narrationBlocks, shotIndex);
+      const shotImagePrompt = buildShotImagePromptFromScope({
+        sceneDescription: planItem?.sceneDescription,
+        segmentPrompt: segmentImagePrompt,
+        shotScopedPrompt: resolveShotText(imageBlocks, shotIndex, segmentIndex, segmentCount),
+        hasShotScopedPrompt: hasShotScopedImagePrompt,
+      });
+      const shotVideoPrompt = buildShotVideoPromptFromScope({
+        sceneDescription: planItem?.sceneDescription,
+        action: planItem?.action,
+        emotion: planItem?.emotion,
+        cameraMovement: planItem?.cameraMovement,
+        segmentPrompt: segmentVideoPrompt,
+        shotScopedPrompt: resolveShotText(videoBlocks, shotIndex, segmentIndex, segmentCount),
+        hasShotScopedPrompt: hasShotScopedVideoPrompt,
+      });
+      let rawShotNarrationText = "";
+      if (shotHasVoice || shotHasSubtitle) {
+        if (!segmentNarrationAssigned && voicedShotCount <= 1) {
+          rawShotNarrationText = segmentNarrationBlock;
+          segmentNarrationAssigned = true;
+        }
+      }
       const fallbackNarration = normalizeInlineText(planItem?.narrationHint) || `镜头${shotIndex}亮点`;
       const shotNarrationText =
         shotHasVoice || shotHasSubtitle
@@ -308,7 +685,8 @@ export function buildDirectorPlanFromTaskData(input: {
               fallbackNarration,
             )
           : "";
-      const storyShot = buildFallbackStoryShot({
+
+      return buildFallbackStoryShot({
         shotIndex,
         segmentId,
         segmentIndex,
@@ -340,13 +718,13 @@ export function buildDirectorPlanFromTaskData(input: {
               sceneDescription: "",
               narrationHint: fallbackNarration,
             },
-        imagePrompt: getPromptBlockForIndex(imageBlocks, shotIndex) || segmentImagePrompt,
-        videoPrompt: getPromptBlockForIndex(videoBlocks, shotIndex) || segmentVideoPrompt,
+        imagePrompt: shotImagePrompt,
+        videoPrompt: shotVideoPrompt,
         narrationText: shotNarrationText,
       });
-      storyShots.push(storyShot);
-      return storyShot;
     });
+    const segmentShots = expandCompoundSceneStoryShots(rawSegmentShots, segmentMode);
+    storyShots.push(...segmentShots);
 
     const segmentNarrationParts = segmentShots
       .filter((shot) => shot.hasVoice || shot.hasSubtitle)
@@ -357,11 +735,27 @@ export function buildDirectorPlanFromTaskData(input: {
       .map((item) => item.narrationHint)
       .filter(Boolean)
       .join("，");
+    const actualSegmentDuration = segmentShots.reduce((sum, shot) => sum + shot.durationSeconds, 0);
+    const effectiveSegmentDuration = actualSegmentDuration > 0 ? actualSegmentDuration : segmentDurationSeconds;
+    const subtitlePlanEntry = getSegmentSubtitleEntry(normalizedShotPlan?.subtitlePlan, {
+      segmentId,
+      segmentIndex,
+    });
+    const useSegmentSubtitleSource = usesSegmentLevelSubtitleSource(input.parameters.video.videoType) && Boolean(subtitlePlanEntry);
+    const normalizedSegmentNarrationBlock = useSegmentSubtitleSource
+      ? normalizeNarrationText(subtitlePlanEntry?.text)
+      : normalizeNarrationText(segmentNarrationBlock);
     const segmentNarrationText =
-      segmentNarrationParts.length > 0
+      normalizedSegmentNarrationBlock
+        ? trimNarrationToDuration(
+            normalizedSegmentNarrationBlock,
+            effectiveSegmentDuration || segmentDurationSeconds,
+            segmentFallbackNarration || `片段${segmentIndex}亮点`,
+          )
+        : segmentNarrationParts.length > 0
         ? trimNarrationToDuration(
             mergeTexts(segmentNarrationParts),
-            segmentDurationSeconds,
+            effectiveSegmentDuration || segmentDurationSeconds,
             segmentFallbackNarration || `片段${segmentIndex}亮点`,
           )
         : "";
@@ -369,13 +763,14 @@ export function buildDirectorPlanFromTaskData(input: {
     const segmentHasSubtitle = segmentShots.some((shot) => shot.hasSubtitle);
     const segmentRequiresLipSync = segmentShots.some((shot) => shot.requiresLipSync);
     const cueAnchorShot = segmentShots.find((shot) => shot.hasVoice || shot.hasSubtitle) ?? segmentShots[0] ?? null;
+    const useSegmentLevelNarration = voicedShotCount > 1 || Boolean(normalizedSegmentNarrationBlock);
 
     const multiPrompt =
       segmentMode === "multi_shot_montage"
         ? segmentShots.map((shot, shotOffset) => ({
             index: shotOffset + 1,
             prompt: normalizeInlineText(shot.videoPrompt) || `${shot.sceneDescription}，自然运镜`,
-            duration: Number((segmentDurationSeconds / Math.max(1, segmentShots.length)).toFixed(2)),
+            duration: shot.durationSeconds,
           }))
         : [];
 
@@ -386,7 +781,7 @@ export function buildDirectorPlanFromTaskData(input: {
       segmentMode,
       shotIds: segmentShots.map((shot) => shot.shotId),
       shotIndexes: segmentShots.map((shot) => shot.shotIndex),
-      durationSeconds: segmentDurationSeconds,
+      durationSeconds: effectiveSegmentDuration,
       hasTalent: segmentFlags.hasTalent,
       talentCaptureMode: segmentFlags.talentCaptureMode,
       hasVoice: segmentHasVoice,
@@ -401,37 +796,72 @@ export function buildDirectorPlanFromTaskData(input: {
       subtitleText: segmentNarrationText,
       note:
         profile.key === "agency_creative_beat_mix" && segmentIndex === 1
-          ? "前 3 秒读稿开场"
+          ? "前 4 秒左右读稿开场"
           : segmentMode === "multi_shot_montage"
             ? `${segmentShots.length} 个镜头合成一个生成片段`
             : "单片段表达",
     };
     renderSegments.push(renderSegment);
 
-    if (renderSegment.hasVoice || renderSegment.hasSubtitle) {
+    let shotAccumulatedSeconds = accumulatedSeconds;
+    if (useSegmentSubtitleSource && (segmentHasVoice || segmentHasSubtitle)) {
       audioCues.push({
-        cueId: `cue-${segmentIndex}`,
+        cueId: `cue-segment-${segmentIndex}`,
         cueIndex: audioCues.length + 1,
-        shotId: cueAnchorShot?.shotId ?? renderSegment.shotIds[0] ?? null,
-        shotIndex: cueAnchorShot?.shotIndex ?? renderSegment.shotIndexes[0] ?? null,
+        shotId: cueAnchorShot?.shotId ?? null,
+        shotIndex: cueAnchorShot?.shotIndex ?? segmentIndex,
         targetSegmentId: renderSegment.segmentId,
         targetSegmentIndex: renderSegment.segmentIndex,
-        startAtSeconds: accumulatedSeconds,
-        plannedDurationSeconds: renderSegment.durationSeconds,
+        startAtSeconds: subtitlePlanEntry?.startAtSeconds ?? accumulatedSeconds,
+        plannedDurationSeconds: subtitlePlanEntry?.durationSeconds ?? effectiveSegmentDuration,
         audioDurationSeconds: null,
-        hasVoice: renderSegment.hasVoice,
-        hasSubtitle: renderSegment.hasSubtitle,
-        requiresLipSync: renderSegment.requiresLipSync,
+        hasVoice: segmentHasVoice,
+        hasSubtitle: segmentHasSubtitle,
+        requiresLipSync: segmentRequiresLipSync,
         voiceId: null,
-        narrationText: renderSegment.narrationText,
-        subtitleText: renderSegment.subtitleText,
+        narrationText: segmentNarrationText,
+        subtitleText: segmentNarrationText,
         audioUrl: null,
         words: [],
       });
+    } else {
+      for (const shot of segmentShots) {
+        if (shot.hasVoice || shot.hasSubtitle) {
+          const isCueAnchor = cueAnchorShot?.shotId === shot.shotId;
+          const cueNarrationText =
+            isCueAnchor && useSegmentLevelNarration
+              ? segmentNarrationText
+              : useSegmentLevelNarration
+                ? ""
+                : shot.narrationText || "";
+          audioCues.push({
+            cueId: `cue-shot-${shot.shotIndex}`,
+            cueIndex: audioCues.length + 1,
+            shotId: shot.shotId,
+            shotIndex: shot.shotIndex,
+            targetSegmentId: renderSegment.segmentId,
+            targetSegmentIndex: renderSegment.segmentIndex,
+            startAtSeconds: shotAccumulatedSeconds,
+            plannedDurationSeconds: shot.durationSeconds,
+            audioDurationSeconds: null,
+            hasVoice: shot.hasVoice,
+            hasSubtitle: shot.hasSubtitle,
+            requiresLipSync: shot.requiresLipSync,
+            voiceId: null,
+            narrationText: cueNarrationText,
+            subtitleText: cueNarrationText,
+            audioUrl: null,
+            words: [],
+          });
+        }
+        shotAccumulatedSeconds += shot.durationSeconds;
+      }
     }
 
-    accumulatedSeconds += segmentDurationSeconds;
+    accumulatedSeconds += effectiveSegmentDuration;
   }
+
+  const subtitlePlan = normalizedShotPlan?.subtitlePlan ?? undefined;
 
   return {
     videoType: input.parameters.video.videoType,
@@ -440,6 +870,7 @@ export function buildDirectorPlanFromTaskData(input: {
     storyShots,
     renderSegments,
     audioCues,
+    subtitlePlan,
     legacyMirrored: true,
   } satisfies VideoTaskDirectorPlan;
 }
@@ -462,13 +893,59 @@ export function buildDraftBundleFromDirectorPlan(plan: VideoTaskDirectorPlan): V
           : segment.videoPrompt || segment.note || `围绕片段 ${segment.segmentIndex} 的动作表达`,
     })),
   );
-  const narrationScript = buildIndexedBlockText(
-    "镜头",
-    plan.storyShots.map((shot) => ({
-      index: shot.shotIndex,
-      text: shot.hasVoice || shot.hasSubtitle ? normalizeNarrationText(shot.narrationText || shot.subtitleText) : "",
-    })),
-  );
+
+  const useSegmentNarration = usesSegmentLevelSubtitleSource(plan.videoType) || isSeedanceProvider();
+  const subtitleDrivenNarrationScript = useSegmentNarration
+    ? buildNarrationScriptFromSubtitlePlan(
+        {
+          shots: plan.storyShots.map((shot) => ({
+            shotId: shot.shotId,
+            shotIndex: shot.shotIndex,
+            segmentId: shot.segmentId,
+            segmentIndex: shot.segmentIndex,
+            purpose: shot.purpose,
+            location: shot.location,
+            hasCharacters: shot.hasCharacters,
+            characters: shot.characters,
+            hasTalent: shot.hasTalent,
+            talentCaptureMode: shot.talentCaptureMode,
+            hasVoice: shot.hasVoice,
+            hasSubtitle: shot.hasSubtitle,
+            requiresLipSync: shot.requiresLipSync,
+            action: shot.action,
+            emotion: shot.emotion,
+            cameraMovement: shot.cameraMovement,
+            durationSeconds: shot.durationSeconds,
+            sceneDescription: shot.sceneDescription,
+            narrationHint: shot.narrationHint,
+            narrationText: shot.narrationText,
+            subtitleText: shot.subtitleText,
+          })),
+          globalStyle: "",
+          totalDurationSeconds: plan.totalDurationSeconds,
+          validationErrors: [],
+          subtitlePlan: plan.subtitlePlan,
+        },
+        plan.videoType,
+      )
+    : "";
+  const narrationScript = subtitleDrivenNarrationScript || (useSegmentNarration
+    ? buildIndexedBlockText(
+        "片段",
+        plan.renderSegments.map((segment) => ({
+          index: segment.segmentIndex,
+          text: segment.hasVoice || segment.hasSubtitle
+            ? normalizeNarrationText(segment.narrationText || segment.subtitleText)
+            : "",
+        })),
+      )
+    : buildIndexedBlockText(
+        "镜头",
+        plan.storyShots.map((shot) => ({
+          index: shot.shotIndex,
+          text: shot.hasVoice || shot.hasSubtitle ? normalizeNarrationText(shot.narrationText || shot.subtitleText) : "",
+        })),
+      ));
 
   return {
     textToImagePrompt,
@@ -484,6 +961,7 @@ export function buildShotPlanFromDirectorPlan(plan: VideoTaskDirectorPlan, base?
       shotIndex: shot.shotIndex,
       segmentId: shot.segmentId,
       segmentIndex: shot.segmentIndex,
+      sceneType: shot.sceneType,
       purpose: shot.purpose,
       location: shot.location,
       hasCharacters: shot.hasCharacters,
@@ -498,11 +976,40 @@ export function buildShotPlanFromDirectorPlan(plan: VideoTaskDirectorPlan, base?
       cameraMovement: shot.cameraMovement,
       durationSeconds: shot.durationSeconds,
       sceneDescription: shot.sceneDescription,
+      contentDescription: shot.contentDescription,
       narrationHint: shot.narrationHint,
+      shotScale: shot.shotScale,
+      compositionHint: shot.compositionHint,
+      rhythmTag: shot.rhythmTag,
+      mood: shot.mood,
+      sellingPointTags: shot.sellingPointTags,
+      assetId: shot.assetId ?? null,
+      assetSourceType: shot.assetSourceType ?? null,
+      assetSubjectSummary: shot.assetSubjectSummary ?? null,
+      sourceMaterialId: shot.sourceMaterialId ?? null,
+      sourceStartAtSeconds: shot.sourceStartAtSeconds ?? null,
+      sourceEndAtSeconds: shot.sourceEndAtSeconds ?? null,
+      sourceTimeRangeLabel: shot.sourceTimeRangeLabel ?? null,
+      referenceImageUrl: shot.referenceImageUrl ?? null,
+      generationMode: shot.generationMode,
+      sourceTrace: shot.sourceTrace ?? null,
+      needImageEnhancement: shot.needImageEnhancement ?? false,
+      needImageToVideo: shot.needImageToVideo ?? true,
+      isAtmosphereInsert: shot.isAtmosphereInsert ?? false,
+      img2imgPrompt: shot.img2imgPrompt ?? null,
+      i2vPrompt: shot.i2vPrompt ?? null,
+      visual: shot.visual,
+      subject: shot.subject,
+      cinematography: shot.cinematography,
+      structure: shot.structure,
     })),
     globalStyle: base?.globalStyle ?? "真实旅行记录感，贴近平台原生短视频节奏",
     totalDurationSeconds: plan.totalDurationSeconds,
     validationErrors: base?.validationErrors ?? [],
+    styleConstraints: base?.styleConstraints,
+    reusableModules: base?.reusableModules,
+    narrativeCurves: base?.narrativeCurves,
+    subtitlePlan: plan.subtitlePlan ?? base?.subtitlePlan,
   } satisfies ShotPlan;
 }
 
@@ -514,5 +1021,6 @@ export function getTaskDirectorPlan(
     shotPlan: task.shotPlan,
     directorPlan: task.directorPlan,
     parameters: task.parameters,
+    forceRebuild: true,
   });
 }

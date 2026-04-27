@@ -1,5 +1,6 @@
 import { getTextGenerationRuntime } from "./text-provider-config";
 import { getGenerationRuntime as getOpenAiGenerationRuntime } from "./vision-provider-config";
+import { recordModelUsage } from "./model-usage-service";
 
 export type TaskGenerationRuntime = {
   provider: "openai" | "ark";
@@ -80,11 +81,41 @@ export async function callTaskGenerationLlm(input: {
   const payload = (await response.json().catch(() => ({}))) as {
     error?: { message?: string };
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: {
+        cached_tokens?: number;
+      };
+    };
   };
 
   if (!response.ok) {
     throw new Error(payload.error?.message ?? `${runtime.providerLabel} 调用失败`);
   }
+
+  recordModelUsage({
+    pricingKey:
+      runtime.provider === "openai"
+        ? runtime.modelId.startsWith("gpt-5.4")
+          ? "openai.gpt-5.4"
+          : runtime.modelId.startsWith("gpt-4o")
+            ? "openai.gpt-4o"
+            : null
+        : runtime.modelId.includes("doubao-seed-2.0-pro")
+          ? "doubao.seed.2.0.pro"
+          : null,
+    serviceName: "llm.chat",
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    metrics: {
+      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
+      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
+      cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+    },
+    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+    remark: "任务生成文本调用",
+  });
 
   return payload.choices?.[0]?.message?.content ?? null;
 }

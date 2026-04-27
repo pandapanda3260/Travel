@@ -9,7 +9,7 @@ function getConfiguredValue(key: string) {
 }
 
 function getDefaultProjectRoot() {
-  return process.cwd();
+  return /* turbopackIgnore: true */ process.cwd();
 }
 
 export function getRuntimeStorageRoot() {

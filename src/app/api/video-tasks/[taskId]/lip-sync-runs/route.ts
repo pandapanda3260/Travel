@@ -8,8 +8,10 @@ import {
 } from "../../../../../lib/task-clip-store";
 import { getVideoJob } from "../../../../../lib/video-job-store";
 import { ensurePendingVideoJobPolling } from "../../../../../lib/video-job-runner";
+import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
 import { triggerShotLipSync } from "../../../../../lib/lip-sync-trigger";
 import { getVideoTask } from "../../../../../lib/video-task-store";
+import { getVideoTaskTypeProfile } from "../../../../../lib/video-task-schema";
 
 type RouteContext = {
   params: Promise<{
@@ -21,14 +23,15 @@ type LipSyncRunRequest =
   | { action: "sync_all" }
   | { action: "sync_shot"; shotIndex: number };
 
-export async function GET(_: NextRequest, context: RouteContext) {
+export async function GET(request: NextRequest, context: RouteContext) {
   const { taskId } = await context.params;
-  const task = getVideoTask(taskId);
-  if (!task) {
-    return NextResponse.json({ error: "视频任务不存在" }, { status: 404 });
+  const access = requireOwnedVideoTask(request, taskId);
+  if ("response" in access) {
+    return access.response;
   }
+  const { task } = access;
 
-  ensurePendingVideoJobPolling();
+  ensurePendingVideoJobPolling(taskId);
 
   return NextResponse.json({
     task,
@@ -39,12 +42,16 @@ export async function GET(_: NextRequest, context: RouteContext) {
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
     const { taskId } = await context.params;
-    const task = getVideoTask(taskId);
-    if (!task) {
-      return NextResponse.json({ error: "视频任务不存在" }, { status: 404 });
+    const access = requireOwnedVideoTask(request, taskId, {
+      forbiddenMessage: "无权修改该视频任务",
+    });
+    if ("response" in access) {
+      return access.response;
     }
+    const task = getVideoTask(taskId) ?? access.task;
 
     const body = (await request.json().catch(() => ({}))) as Partial<LipSyncRunRequest>;
+    const typeProfile = getVideoTaskTypeProfile(task.parameters.video.videoType);
 
     if (body.action === "sync_all") {
       const narrationResult = getTaskClipNarrationResult(taskId);
@@ -67,7 +74,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
         try {
           const jobId = await triggerShotLipSync(taskId, shot.shotIndex);
-          results.push({ shotIndex: shot.shotIndex, jobId, error: null });
+          results.push({
+            shotIndex: shot.shotIndex,
+            jobId,
+            error: jobId
+              ? null
+              : typeProfile.requiresLipSync
+                ? "当前镜头暂不满足口型同步条件，请先确认片段视频和配音音频已就绪"
+                : "当前视频类型默认不做口型同步",
+          });
         } catch (error) {
           results.push({
             shotIndex: shot.shotIndex,
@@ -92,7 +107,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       const jobId = await triggerShotLipSync(taskId, shotIndex);
       if (!jobId) {
-        return NextResponse.json({ error: `镜头 ${shotIndex} 无法提交口型同步，请检查视频和音频是否就绪` }, { status: 400 });
+        return NextResponse.json(
+          {
+            error: typeProfile.requiresLipSync
+              ? `镜头 ${shotIndex} 无法提交口型同步，请先确认片段视频和配音音频是否已就绪`
+              : `当前视频类型“${typeProfile.label}”默认不做口型同步`,
+          },
+          { status: 400 },
+        );
       }
 
       return NextResponse.json({

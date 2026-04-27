@@ -1,32 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../lib/auth-session";
 import { getUnifiedTimbreCatalog } from "../../../../lib/doubao-timbre-service";
 import {
   addFavoriteSpeaker,
+  listClonedVoices,
   listFavoriteSpeakerIds,
   removeFavoriteSpeaker,
-  listClonedVoices,
 } from "../../../../lib/voice-management-store";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const session = requireUserApiSession(request);
+  if (!session) {
+    return userApiUnauthorizedResponse();
+  }
+
   try {
-    const favoriteIds = listFavoriteSpeakerIds();
+    const favoriteIds = listFavoriteSpeakerIds(session.userId);
     const catalog = await getUnifiedTimbreCatalog();
     const catalogMap = new Map(catalog.map((item) => [item.speakerId, item]));
 
-    const clonedVoices = listClonedVoices();
+    const clonedVoices = listClonedVoices(session.userId);
     const cloneMap = new Map(
       clonedVoices
-        .filter((v) => v.status === "SUCCESS" || v.status === "ACTIVE")
-        .map((v) => [v.speakerId, v]),
+        .filter((voice) => voice.status === "SUCCESS" || voice.status === "ACTIVE")
+        .map((voice) => [voice.speakerId, voice]),
     );
 
     const favorites = favoriteIds
-      .map((id) => {
-        const timbre = catalogMap.get(id);
-        if (timbre) return { type: "timbre" as const, data: timbre };
-        const clone = cloneMap.get(id);
-        if (clone) return { type: "clone" as const, data: clone };
+      .map((speakerId) => {
+        const timbre = catalogMap.get(speakerId);
+        if (timbre) {
+          return { type: "timbre" as const, data: timbre };
+        }
+        const clone = cloneMap.get(speakerId);
+        if (clone) {
+          return { type: "clone" as const, data: clone };
+        }
         return null;
       })
       .filter(Boolean);
@@ -41,6 +51,11 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const session = requireUserApiSession(request);
+  if (!session) {
+    return userApiUnauthorizedResponse();
+  }
+
   try {
     const body = (await request.json()) as { speakerId?: string; action?: "add" | "remove" };
     const speakerId = body.speakerId?.trim();
@@ -51,12 +66,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === "remove") {
-      const ids = removeFavoriteSpeaker(speakerId);
-      return NextResponse.json({ ok: true, favoriteIds: ids });
+      const favoriteIds = removeFavoriteSpeaker(speakerId, session.userId);
+      return NextResponse.json({ ok: true, favoriteIds });
     }
 
-    const ids = addFavoriteSpeaker(speakerId);
-    return NextResponse.json({ ok: true, favoriteIds: ids });
+    const favoriteIds = addFavoriteSpeaker(speakerId, session.userId);
+    return NextResponse.json({ ok: true, favoriteIds });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "操作收藏失败" },

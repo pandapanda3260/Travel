@@ -4,18 +4,22 @@ import {
   buildNarrationRepairSystemPrompt,
   buildSubtitleAudioRepairSystemPrompt,
 } from "./narration-prompt-library";
-import { PROMPT_GENERATION_RUNTIME_HARD_RULES, SHOT_PLAN_RUNTIME_HARD_RULES } from "./prompt-runtime-library";
 import { DEFAULT_VIDEO_TASK_VIDEO_TYPE, videoTaskTypeProfiles } from "./video-task-schema";
 
 export type ConstraintPromptStageKey =
   | "product_vision"
   | "shot_plan"
+  | "shot_plan_visual"
+  | "shot_plan_subject"
+  | "shot_plan_subtitle"
   | "prompt_generation"
   | "image_enhancement"
   | "clip_generation"
   | "negative_prompt"
   | "video_analysis"
-  | "video_script_generation";
+  | "video_script_generation"
+  | "video_image_cleaning"
+  | "video_image_cleaning_negative";
 
 export type ConstraintPromptStageDefinition = {
   key: ConstraintPromptStageKey;
@@ -52,6 +56,33 @@ export const constraintPromptStages: ConstraintPromptStageDefinition[] = [
     pipelinePhase: "任务创建",
     description:
       "导演模式的核心环节。根据商品信息和用户提示词，指挥 LLM 输出结构化镜头计划表（shot plan），包括每个镜头的场景、动作、运镜和旁白要点。此提示词直接决定了整个视频的叙事结构。",
+    fieldType: "system_prompt",
+    defaultPrompt: "",
+  },
+  {
+    key: "shot_plan_visual",
+    order: 2.1,
+    label: "镜头计划-视觉设计",
+    pipelinePhase: "任务创建",
+    description: "镜头计划第2步：基于骨架规划补充每个镜头的视觉内容、镜头语言和结构控制细节。",
+    fieldType: "system_prompt",
+    defaultPrompt: "",
+  },
+  {
+    key: "shot_plan_subject",
+    order: 2.2,
+    label: "镜头计划-人物与风格",
+    pipelinePhase: "任务创建",
+    description: "镜头计划第3步：基于骨架和视觉设计补充人物/主体信息、全局风格约束和可复用模块。",
+    fieldType: "system_prompt",
+    defaultPrompt: "",
+  },
+  {
+    key: "shot_plan_subtitle",
+    order: 2.3,
+    label: "镜头计划-字幕与叙事",
+    pipelinePhase: "任务创建",
+    description: "镜头计划第4步：基于完整的镜头信息规划字幕时间轴和叙事曲线。",
     fieldType: "system_prompt",
     defaultPrompt: "",
   },
@@ -114,6 +145,26 @@ export const constraintPromptStages: ConstraintPromptStageDefinition[] = [
     fieldType: "system_prompt",
     defaultPrompt: "",
   },
+  {
+    key: "video_image_cleaning",
+    order: 8.1,
+    label: "图片清洗提示词",
+    pipelinePhase: "视频拆解",
+    description:
+      "图片清洗时发给图像模型的主提示词，用于去掉短视频平台 UI 元素、补全被遮挡画面，并尽量还原真实场景照片。",
+    fieldType: "system_prompt",
+    defaultPrompt: "",
+  },
+  {
+    key: "video_image_cleaning_negative",
+    order: 8.2,
+    label: "图片清洗负向提示词",
+    pipelinePhase: "视频拆解",
+    description:
+      "图片清洗时发给图像模型的负向约束，用于禁止再次生成手机外框、状态栏、UI 残留和设备模型等不希望出现的元素。",
+    fieldType: "negative_prompt",
+    defaultPrompt: "",
+  },
 ];
 
 // The actual default prompts are stored here to keep the array above clean
@@ -133,38 +184,144 @@ const BUILTIN_DEFAULTS: Record<ConstraintPromptStageKey, string[]> = {
     "5. sellingPoints 输出关键卖点数组。",
   ],
   shot_plan: [
-    "你是一名短视频导演，请根据商品信息、用户提示词和参数，输出一份结构化的镜头计划表（shot plan）。",
+    "你是一名短视频导演，请根据商品信息、用户提示词和参数，输出一份结构化的镜头计划骨架。",
     "输出必须是 JSON，不要输出 markdown，不要输出额外解释。",
-    "JSON 结构：{ globalStyle, totalDurationSeconds, shots: [{ shotIndex, purpose, location, hasCharacters, characters, hasTalent, talentCaptureMode, hasVoice, hasSubtitle, requiresLipSync, action, emotion, cameraMovement, durationSeconds, sceneDescription, narrationHint }] }",
+    "注意：本步骤只输出镜头骨架（基础信息+时间轴+片段结构），视觉细节、人物设定、字幕规划会在后续步骤单独补充。",
+    "",
+    "JSON 结构：",
+    "{ globalStyle, totalDurationSeconds, shots: [{ shotIndex, segmentIndex, segmentId, startAtSeconds, endAtSeconds, durationSeconds, purpose, functionTag, sellingPointType, location, hasCharacters, characters, hasTalent, talentCaptureMode, hasVoice, hasSubtitle, requiresLipSync, action, emotion, cameraMovement, sceneDescription, narrationHint }] }",
     "",
     "字段说明：",
-    "- globalStyle：整体视觉风格，一句话概括",
-    "- shots.shotIndex：从 1 开始的镜头编号",
-    "- shots.purpose：镜头目的，如 hook / experience / detail / transition / climax / closing",
-    "- shots.location：拍摄地点或场景描述",
-    "- shots.hasCharacters：该镜头是否有人物出镜（布尔值）",
-    '- shots.characters：出镜人物列表，如 ["father", "mother", "child_1"]，无人物时为空数组',
-    "- shots.hasVoice：该镜头是否需要承担口播信息；混剪类视频不要默认每镜都为 true",
-    "- shots.hasSubtitle：该镜头是否需要承载字幕；无台词留白镜头可与 hasVoice 一起为 false",
-    "- shots.action：人物或画面的具体动作描述，要具体不要笼统",
-    "- shots.emotion：该镜头的情绪氛围",
-    "- shots.cameraMovement：运镜方式",
-    "- shots.durationSeconds：该镜头时长（秒），必须为正整数",
-    "- shots.sceneDescription：画面内容的完整描述，用于后续生成图片和视频提示词",
-    "- shots.narrationHint：仅对 hasVoice/hasSubtitle=true 的镜头填写要点；无台词镜头留空",
+    "- globalStyle：整体视觉风格",
+    "- totalDurationSeconds：视频总时长，必须精确等于所有 shots.durationSeconds 之和",
+    "- shotIndex：从 1 开始的全局镜头编号",
+    "- segmentIndex：归属片段编号（从 1 开始），同一片段内的镜头共享相同值",
+    "- segmentId：片段 ID，格式 segment-N",
+    "- startAtSeconds：起始时间（最多精确到 0.01 秒，第一个镜头从 0 开始）",
+    "- endAtSeconds：结束时间 = startAtSeconds + durationSeconds",
+    "- durationSeconds：镜头时长，根据内容差异化设计，禁止均分",
+    "- purpose：镜头目的（hook / experience / detail / transition / closing）",
+    "- functionTag：功能标签（吸引 / 信息 / 情绪 / 信任 / 转化）",
+    "- sellingPointType：卖点类型",
+    "- location：拍摄地点或场景描述",
+    "- hasCharacters / characters / hasTalent / talentCaptureMode：人物出镜控制",
+    "- hasVoice / hasSubtitle / requiresLipSync：口播/字幕/口型同步",
+    "- action：人物或画面的具体动作描述",
+    "- emotion：情绪氛围",
+    "- cameraMovement：运镜方式",
+    "- sceneDescription：画面内容的完整描述",
+    "- narrationHint：仅对 hasVoice/hasSubtitle=true 填写要点，15 字以内",
     "",
-    "通用规则：",
+    "【时间轴与结构规则（最高优先级）】",
+    "所有时间轴精确到 0.01 秒。",
+    "1. 台词字数与时长匹配：优先参考运行时预算（如 segmentNarrationBudgets / referenceMaxCharacters），但预算只是参考，不是死卡字数；常见自然口语大致约 2.5~5.5 字/秒。",
+    "",
+    "【通用规则】",
     "1. shots 数量必须严格等于参数中的 plannedStoryShotCount。",
-    "2. 所有镜头的 durationSeconds 总和必须与参数 totalDurationSeconds 保持一致或近似一致，允许不同镜头时长不同。",
-    "3. 每个镜头是否需要人物、出镜几个人，根据该镜头的具体场景和叙事需要逐个判断。",
-    "4. 人物动作描述要具体生动，避免静态呆板。",
-    "5. narrationHint 只写要点，不要写完整的解说词句子，字数控制在 15 字以内。",
-    "6. 第一个镜头（hook）应该在 3 秒内建立吸引力。",
-    "7. 若结构化上下文里带有 itineraryDayCount / segmentBlueprint，旅行攻略类视频要优先按“钩子—按天展开—收尾”来组织，不要机械平均分配段落。",
-    "8. 混剪类视频必须先判断哪些镜头需要口播，哪些镜头应该留白；至少保留部分纯画面镜头，不要每个镜头都硬塞台词。",
-    "9. 开场和收尾通常需要承担口播，detail / transition 镜头通常更适合留白或只服务画面节奏。",
-    "10. narrationHint 要指向“该句该抓什么重点、用什么情绪讲、是否要承接上一镜头”，不能只写一个空泛形容词。",
-    "11. 攻略类 narrationHint 优先写结论、理由、价值点；景色类优先写为什么美、为什么让人想停下来；人物口播类优先写交流感。",
+    "2. 每个镜头是否需要人物根据具体场景和叙事逐个判断。人物动作要具体生动。",
+    "3. narrationHint 只写要点，15 字以内，指向具体重点、情绪和承接关系。",
+    "4. 第一个镜头（hook）要尽快建立吸引力，通常不宜拖长；时长按信息量设计，不要机械固定成 5 秒。",
+    "5. 若上下文带有 itineraryDayCount / segmentBlueprint，优先按其组织段落结构。",
+    "6. 混剪类视频至少保留部分纯画面镜头。detail / transition 镜头适合留白。",
+  ],
+  shot_plan_visual: [
+    "你是一名短视频视觉设计师。以下是已确定的镜头计划骨架，请为每个镜头补充视觉内容、镜头语言和结构控制细节。",
+    "不允许修改任何基础信息（shotIndex、时间轴、purpose 等），只补充新字段。",
+    "输出必须是 JSON，不要输出 markdown，不要输出额外解释。",
+    "",
+    "JSON 结构：",
+    "{ shots: [{ shotIndex, visual: { sceneSetting, shotScale, wideContent, midContent, closeContent, composition, colorTone, keyDetails }, cinematography: { shotType, rhythm, infoDensity, lighting }, structure: { phase, prevTransition, nextTransition, transitionType } }] }",
+    "",
+    "字段说明：",
+    "- shotIndex：必须与骨架中的 shotIndex 一一对应，数量完全一致",
+    "- visual.sceneSetting：场景设定（时间+地点+环境）",
+    "- visual.shotScale：景别（远景/中景/近景，可组合）",
+    "- visual.wideContent：远景画面内容（环境+规模感）",
+    "- visual.midContent：中景画面内容（人+场景互动）",
+    "- visual.closeContent：近景画面内容（细节+情绪）",
+    "- visual.composition：构图方式（居中/三分法/对称/其他）",
+    "- visual.colorTone：色调（暖色/冷色/清新/其他）",
+    "- visual.keyDetails：必须出现的关键细节",
+    "- cinematography.shotType：拍摄方式（航拍/手持/跟拍/固定/其他）",
+    "- cinematography.rhythm：切换速度",
+    "- cinematography.infoDensity：一秒信息量",
+    "- cinematography.lighting：光照情况",
+    "- structure.phase：所属阶段（开头/中段/结尾）",
+    "- structure.prevTransition：与前一镜头的衔接方式",
+    "- structure.nextTransition：与下一镜头的承接方式",
+    "- structure.transitionType：镜头切换方式",
+    "",
+    "【景别约束】",
+    "1. 每个卖点至少包含 1 远景 + 1 中景 + 1 近景。不允许连续 3 个相同景别。",
+    "2. 开头优先远景或强视觉中景。转化镜头优先近景（增强信任）。",
+    "3. 远景 = 环境+规模感，中景 = 人+场景互动，近景 = 细节+情绪。",
+    "4. 视觉设计必须基于骨架中的 sceneDescription 和 location 展开，不能脱离原始画面描述。",
+  ],
+  shot_plan_subject: [
+    "你是一名短视频人物与风格设计师。以下是已确定的镜头计划（含骨架+视觉设计），请补充人物/主体信息和全局风格约束。",
+    "不允许修改任何已有信息，只补充新字段。",
+    "输出必须是 JSON，不要输出 markdown，不要输出额外解释。",
+    "",
+    "JSON 结构：",
+    "{ styleConstraints: { style, videoType, forbidden, realismLevel, styleConsistency, characterConsistency }, reusableModules: { characterSetting, sceneSetting, actionTemplates, shotTemplates }, shots: [{ shotIndex, subject: { mainCharacterCount, mainCharacterGender, relationship, clothing, ageRange, features, appearance, style, position, extraCount, extraDistribution, extraScale } }] }",
+    "",
+    "字段说明：",
+    "- styleConstraints.style：视频整体风格",
+    "- styleConstraints.videoType：7种类型中的哪一种",
+    "- styleConstraints.forbidden：禁止项",
+    "- styleConstraints.realismLevel：真实度要求",
+    "- styleConstraints.styleConsistency：风格一致性要求",
+    "- styleConstraints.characterConsistency：人物一致性要求",
+    "- reusableModules.characterSetting：主要人物统一外观设定（所有镜头的 subject 必须与此一致）",
+    "- reusableModules.sceneSetting：可复用的场景设定",
+    "- reusableModules.actionTemplates：可复用的动作模板",
+    "- reusableModules.shotTemplates：可复用的镜头模板",
+    "- shots[].shotIndex：必须与骨架一一对应",
+    "- subject.mainCharacterCount / mainCharacterGender：主要人物数量和性别",
+    "- subject.relationship：人物关系（如夫妻、亲子、闺蜜）",
+    "- subject.clothing / ageRange / features / appearance / style：服装、年龄、特征、外貌、人设风格",
+    "- subject.position：在画面中的位置和大小（根据景别调整：远景中人物小、近景中人物大）",
+    "- subject.extraCount / extraDistribution / extraScale：路人数量、分布、大小（避免抢镜）",
+    "",
+    "【一致性规则】",
+    "1. reusableModules.characterSetting 是全局人物锚点，每个镜头的 subject 必须基于它展开。",
+    "2. 主要人物在所有镜头中保持一致的外貌、服装和特征。",
+    "3. 没有人物出镜的镜头（hasCharacters=false），subject 中只需填写路人信息或留空。",
+    "4. 如果 userContent.characterPresencePolicy.mode = sparse_characters，则绝大多数镜头的 subject.mainCharacterCount 应为 0，且不要建立统一主角锚点。",
+    "5. 如果 userContent.characterAppearancePolicy.allowForeignMainCharacter !== true，则主要人物默认自然东方面孔，不要外国人形象、明显西方面孔或欧美脸描述。",
+    "6. 如果涉及老人、长辈或年长人物，最多只表现为45-60岁中老年状态；不要60岁以上高龄老人形象，不要头发全白、拄拐、驼背、老态龙钟。",
+    "7. 如果是接机/接站的出租车司机、专车司机或接送司机，服装只用普通西装，不要礼宾制服、司机制服、帽子、白手套等职业制服特征。",
+  ],
+  shot_plan_subtitle: [
+    "你是一名短视频字幕导演。以下是完整的镜头计划（含骨架+视觉+人物），请规划字幕时间轴和叙事曲线。",
+    "不允许修改任何已有信息，只补充 subtitlePlan 和 narrativeCurves。",
+    "输出必须是 JSON，不要输出 markdown，不要输出额外解释。",
+    "",
+    "JSON 结构：",
+    "{ narrativeCurves: { openingStrategy, midStructure, closingStrategy, rhythmCurve, emotionCurve, infoOrder }, subtitlePlan: [{ segmentIndex, segmentId, subtitles: [{ text, startAtSeconds, durationSeconds, charCount, coveredShotIndexes }] }] }",
+    "",
+    "字段说明：",
+    "- narrativeCurves.openingStrategy：前3秒怎么抓人",
+    "- narrativeCurves.midStructure：内容怎么展开",
+    "- narrativeCurves.closingStrategy：结尾怎么转化",
+    "- narrativeCurves.rhythmCurve：节奏变化描述",
+    "- narrativeCurves.emotionCurve：情绪变化描述",
+    "- narrativeCurves.infoOrder：卖点顺序",
+    "- subtitlePlan[].segmentIndex / segmentId：必须与骨架中的片段对应",
+    "- subtitles[].text：字幕文本，必须口语自然、可直接朗读",
+    "- subtitles[].startAtSeconds：起始时间，必须 = 覆盖的第一个镜头的 startAtSeconds",
+    "- subtitles[].durationSeconds：持续时长",
+    "- subtitles[].charCount：中文字数（不含标点）",
+    "- subtitles[].coveredShotIndexes：该条字幕覆盖的镜头编号数组",
+    "",
+    "【字幕规划规则】",
+    "1. 字幕以片段为单位规划，按时间排列，不允许重叠。一条字幕可覆盖 1~N 个镜头。",
+    "2. 纯画面镜头（detail / transition）允许无字幕。",
+    "3. 字幕时间必须与镜头边界对齐。",
+    "4. 硬约束只有一条：预计朗读不能超过该条字幕的 durationSeconds；不要为了卡死低字数把内容压成口号。",
+    "5. 推荐语速大致约 2.5~5.5 字/秒，仅作参考；更重要的是自然顺口、信息完整、听感舒服。",
+    "6. 字幕内容必须与 sceneDescription、coveredShotIndexes 对应镜头和 narrationHint 呼应，画面播什么就说什么。",
+    "7. 字幕内容要考虑后续 TTS 配音的流畅度和时间匹配。",
   ],
   prompt_generation: [
     "你是一名短视频生产链路的提示词专家，请根据镜头计划表（shot plan）生成三份内容。",
@@ -172,25 +329,30 @@ const BUILTIN_DEFAULTS: Record<ConstraintPromptStageKey, string[]> = {
     "JSON 结构：{ textToImagePrompt, imageToVideoPrompt, narrationScript }",
     "",
     "要求：",
-    '1. textToImagePrompt：按规划镜头输出，每个镜头一段。格式为 "镜头1：...\\n镜头2：..."。每段必须基于对应镜头的 sceneDescription 展开，补充画幅方向、构图、光影、质感等文生图细节。',
-    "2. imageToVideoPrompt：按规划镜头输出，格式同上。每段基于对应镜头的 action、cameraMovement、emotion 展开，描述运镜和动态效果。",
-    '3. narrationScript：按规划镜头输出，格式严格为 "镜头1：...\\n镜头2：..."。若该镜头的 hasVoice=false 且 hasSubtitle=false，则仍保留 "镜头N：" 前缀，但冒号后留空，不要硬写台词。',
-    "4. 三份内容的镜头数量必须和 shot plan 中的 shots 数量完全一致；系统会在后续把多个规划镜头组合为最终输出片段。",
-    "5. narrationScript 字数控制（最重要的硬约束）：只有需要口播/字幕的镜头才写台词。每段中文字符数（不含标点和空格）必须不超过 narrationCharacterBudget.maxCharacters，建议靠近 narrationCharacterBudget.suggestedCharacters。宁可更凝练，也不要超字数。",
-    "6. narrationScript 写作规范：每段解说词就是最终的配音文本和字幕文本，必须是可以直接朗读的完整中文句子。禁止出现括号注释、角色标签、舞台指示、英文夹杂。",
-    "7. 文风必须口语自然、像真人在带用户看行程，优先写“感受、体验、决策理由”，不要机械地反复写“第一天、第二天、第三天……”。",
-    "8. 禁止句尾出现“哦”；禁止用任何标点结尾；禁止为了凑字数重复同义词。",
-    "9. 旅行攻略类视频要优先从“用户为什么想去、当天最值的一点、收尾怎么促成行动”去写，不要像播报行程单。",
-    "10. 每句尽量只表达一个核心意思，优先让观众一遍听懂，不要一句塞太多信息。",
-    "11. 先服务镜头，再追求文字好看；快镜头更短更利落，慢镜头更舒展，强画面镜头允许少说一点。",
-    "12. 镜头之间要有承接意识，相邻句开头不要高度重复，避免机器拼接感。",
-    "13. 少说“非常不错、氛围很好、值得体验、真的很好看”这类空泛套话，要把具体亮点说出来。",
-    "14. 禁止广告腔、AI 总结腔、过度营销词和过度煽情表达。",
+    '1. textToImagePrompt：按规划镜头输出，每个镜头一段。默认格式为 "镜头1：...\\n镜头2：..."；若当前视频类型已指定片段内子镜头格式，则按 "片段1-镜头1：...\\n片段1-镜头2：..." 输出。每段必须基于对应镜头的 sceneDescription 展开，补充画幅方向、构图、光影、质感等文生图细节。每段末尾必须追加"no text, no letters, no words, no watermark, no collage, no split screen, single continuous image, realistic perspective and proportions"。',
+    '2. imageToVideoPrompt：按规划镜头输出。默认格式为 "镜头1：...\\n镜头2：..."；若当前视频类型已指定片段内子镜头格式，则按 "片段1-镜头1：...\\n片段1-镜头2：..." 输出。每段基于对应镜头的 action、cameraMovement、emotion 展开，描述运镜和动态效果。',
+    '3. narrationScript：若镜头计划已按片段组织口播，则按 "片段1：...\\n片段2：..." 覆盖全部片段输出；否则按 "镜头1：...\\n镜头2：..." 覆盖全部镜头输出。没有口播/字幕的片段或镜头允许留空，不要硬写台词。',
+    "4. textToImagePrompt 和 imageToVideoPrompt 必须与 shot plan 中的 shots 一一对应；narrationScript 若按片段输出，则条目数量必须与 shot plan 中的 segment 数量一致；若按镜头输出，则条目数量必须与 shots 数量一致。",
+    "5. narrationScript 时长控制（最重要的硬约束）：对应条目的朗读时长不要超过其 durationSeconds 或 segmentDurationSeconds。只要不超时即可，不要为了过短牺牲内容质量。",
+    "6. narrationScript 写作规范：必须是可以直接朗读的完整中文句子。禁止括号注释、角色标签、舞台指示、英文夹杂。禁止句尾出现\u201c哦\u201d，禁止用标点结尾。",
+    "7. 时间轴继承（关键）：shot plan 中每个镜头的 durationSeconds 必须严格继承。imageToVideoPrompt 必须遵守对应镜头/片段的节奏与时长约束，不要另起一套时长设定；narrationScript 则以不超时为准，不要求机械卡同一字数。",
+    "8. textToImagePrompt 画面禁止项：绝对不能生成任何文字、字母、水印、拼图、分屏。每张图必须是单一连续画面。",
+    "9. textToImagePrompt 场景真实性：建筑和地标关系必须符合真实地理位置。景区设施必须是真实存在的。",
+    "10. textToImagePrompt 人物约束：人物组合必须与 shot plan 一致，性别、年龄、角色关系明确，大小比例符合透视。当 hasCharacters=false 或 subject.mainCharacterCount=0 时，必须明确写无主角人物出镜或无人主体。",
+    "11. 若 characterAppearancePolicy.allowForeignMainCharacter !== true，则所有有人物的提示词都要明确主要人物为自然东方面孔，不要外国人面孔；只有需求明确指定时才允许外国人形象。",
+    "12. 若出现老人、长辈或年长人物，提示词必须明确控制在45-60岁中老年状态，不要60岁以上高龄老人，不要白发苍苍、头发全白、拄拐、驼背或满脸深皱纹。",
+    "13. 若出现接机/接站的出租车司机、专车司机或接送司机，提示词必须明确写普通深色西装，不要司机制服、礼宾制服、帽子、白手套或职业制服感。",
+    "14. 只要画面里出现人物，每个可见人物的手臂、手、腿、脚数量都必须自然合理，不要多手、多臂、多腿、多脚、第三只手、第三只脚、肢体融合或缺失肢体。",
+    "15. 若出现出租车，车辆外观必须明确为中国大陆常见城市出租车或网约车样式，例如大众朗逸/桑塔纳、丰田卡罗拉、比亚迪秦PLUS、红旗E-QM5等常见三厢轿车或新能源出租车；不要日本 Crown Comfort、JPN Taxi、纽约黄的士、伦敦黑出租等海外风格。",
+    "16. 若出现出租车或专车接送场景，提示词必须明确遵循中国大陆道路规则：车辆靠道路右侧通行，驾驶员位于车辆左侧驾驶位（左舵），不要右舵，不要把司机画在车内右侧。",
+    "17. 若出现出租车或专车接人的场景，车辆必须沿道路右侧路边规整停靠或在合法上客区整齐停放，不要斜停、横停、逆向停靠或乱停在马路边。",
+    "18. 若场景主体是长城城墙、敌楼或墙顶步道等古迹空间，不要生成出租车、观光车、固定座椅、停车位白线、停车格或现代停车场设施。",
+    "19. 若出租车或专车只是停靠在普通道路路边，且场景未明确为停车场、停车位、上客区或下客区，不要生成停车位白线、停车格或停车场线框。",
   ],
   image_enhancement: [
-    "强化主体细节、材质质感、光影层次和高级美感，避免模糊、塌陷和低质纹理。",
-    "保持构图稳定、细节完整和画面自然，兼顾真实度与美观度。",
-    "整体风格自然写实，避免过度锐化、过度饱和和夸张变形。",
+    "必须是真实摄影照片风格，强化主体细节、材质质感、光影层次和高级美感，避免模糊、塌陷和低质纹理。严禁卡通、动漫、插画、CG渲染、3D建模等非写实风格。严禁在画面中出现任何文字、字母、数字、标牌文字、水印文字。严禁生成拼图、拼贴、网格、并排对比、多画面合成的图片，每张图片必须是单一连续画面，只有一个视角。场景构图必须符合真实物理空间关系，远近景的建筑和地标必须在现实中确实相邻可见，不能凭空拼接不同地点的景观。人物数量必须严格遵守提示词中的要求，不能多出额外人物。凡是出现人物，肢体结构和四肢数量都必须自然合理。如有出租车，必须符合中国大陆城市道路规则：右侧通行、左舵驾驶位、司机位于车内左侧；车辆外观使用大众朗逸/桑塔纳、丰田卡罗拉、比亚迪秦PLUS、红旗E-QM5等中国常见城市出租车/网约车，不要日本 Crown Comfort、JPN Taxi 或其他海外出租车；如有接人车辆，停放必须规整。若场景主体是长城城墙、敌楼或墙顶步道，不要出现出租车、观光车、固定座椅、停车位白线、停车格或现代停车场设施。",
+    "必须是真实摄影照片风格，保持构图稳定、细节完整和画面自然，兼顾真实度与美观度。严禁卡通或插画风格。严禁在画面中出现任何文字、字母、标牌内容。严禁多图拼接、分屏布局和网格排列。画面中的公共设施必须符合该地点的真实情况，不能在景区中添加不存在的座椅、栏杆等设施。人物数量必须与提示词描述一致，人物手脚和四肢数量必须合理。涉及出租车或专车接人时，车辆外观和停车姿态都要符合中国大陆真实道路场景，司机位于车内左侧驾驶位，不要右舵。若不是停车场、停车位或合法上客区，不要在路边地面生成停车位白线、停车格或停车场线框。",
+    "必须是真实摄影照片风格，整体风格自然写实，避免过度锐化、过度饱和和夸张变形。严禁卡通风格。严禁在画面中出现任何文字。严禁拼图拼接。所有场景必须符合常识。人物数量不能超出提示词要求，出现人物时不能有多手多脚或肢体融合。出现出租车时不能是日本或其他海外出租车风格，必须是中国大陆常见出租车/网约车外观；道路规则按右侧通行处理，接人车辆不能斜停、横停、逆向停靠。长城城墙、敌楼或墙顶步道等古迹场景中，不要添加观光车、固定座椅或现代停车设施。",
   ],
   clip_generation: [
     "画面中人物的动作和表情应与解说词的情绪节奏自然配合，表情变化和肢体语言跟随内容情绪起伏。",
@@ -198,7 +360,7 @@ const BUILTIN_DEFAULTS: Record<ConstraintPromptStageKey, string[]> = {
     "输出必须遵守当前片段的 segmentMode：single_speaking / single_action 时保持单镜头连续，multi_shot_montage 时按给定多镜头提示完成镜头切换；不要额外加入无关人物或无字幕对应的说话动作。",
   ],
   negative_prompt: [
-    "watermark, text overlay, deformed face, distorted hands, extra fingers, low resolution, blurry, overacted expression, static pose, empty scene, single adult, two adults one child, strong AI motion",
+    "watermark, text overlay, text in image, letters, numbers, words, signage text, collage, split screen, multi-panel, grid layout, side by side, montage, cartoon, anime, illustration, CG render, 3D render, painting, sketch, deformed face, distorted hands, extra fingers, extra limbs, extra people, wrong number of people, low resolution, blurry, overacted expression, static pose, empty scene, single adult, two adults one child, strong AI motion, unrealistic proportions, physically impossible scene",
   ],
   video_analysis: [
     '你是一个"视频结构解析引擎"，目标不是描述视频，而是**输出可直接用于生成同等质量视频的结构化数据**。',
@@ -386,6 +548,13 @@ const BUILTIN_DEFAULTS: Record<ConstraintPromptStageKey, string[]> = {
     "",
     "只返回 JSON，不要返回其他内容。",
   ],
+  video_image_cleaning: [
+    "去除这批抖音截图内所有UI界面元素，包括头像、昵称、评论、点赞按钮、各类图标、文字、水印，修复上下被界面遮挡的画面内容，将图片还原为真实场景照片本身，保持原始景别、构图和拍摄视角，画面完整连贯，修复痕迹自然无痕，画质高清细腻。",
+    "不要生成手机外框、手机壳、屏幕边框、刘海、灵动岛、状态栏、手持手机或任何设备模型。",
+  ],
+  video_image_cleaning_negative: [
+    "ui, interface, app overlay, avatar, nickname, comments, like button, icons, text, watermark, logo, collage, split screen, phone frame, smartphone mockup, mobile phone, device bezel, screen border, notch, dynamic island, status bar, hand holding phone",
+  ],
 };
 
 // Patch default prompts at module load
@@ -395,10 +564,6 @@ for (const stage of constraintPromptStages) {
 
 function findStageLabel(stageKey: ConstraintPromptStageKey) {
   return constraintPromptStages.find((stage) => stage.key === stageKey)?.label ?? stageKey;
-}
-
-function formatNumberedRules(rules: readonly string[]) {
-  return rules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
 }
 
 const STAGE_USAGE_META: Record<ConstraintPromptStageKey, PromptUsageMeta> = {
@@ -413,6 +578,24 @@ const STAGE_USAGE_META: Record<ConstraintPromptStageKey, PromptUsageMeta> = {
     usedAtStep: "导演模式 -> 第二步：镜头计划生成",
     apiEntry: "POST /api/video-tasks",
     codeEntry: "src/lib/video-task-planner.ts -> buildShotPlanSystemPrompt",
+  },
+  shot_plan_visual: {
+    plainPurpose: "在镜头骨架出来后，补充每个镜头具体画面、景别、构图、光线和视觉细节。",
+    usedAtStep: "导演模式 -> 第二步：镜头计划生成",
+    apiEntry: "POST /api/video-tasks",
+    codeEntry: "src/lib/video-task-planner.ts -> buildVisualEnrichmentPrompt",
+  },
+  shot_plan_subject: {
+    plainPurpose: "在视觉设计之后，统一人物/主体形象、风格约束和可复用的场景或动作模块。",
+    usedAtStep: "导演模式 -> 第二步：镜头计划生成",
+    apiEntry: "POST /api/video-tasks",
+    codeEntry: "src/lib/video-task-planner.ts -> buildSubjectEnrichmentPrompt",
+  },
+  shot_plan_subtitle: {
+    plainPurpose: "在完整镜头计划上继续规划字幕节奏、叙事曲线和哪些信息适合说出来。",
+    usedAtStep: "导演模式 -> 第二步：镜头计划生成",
+    apiEntry: "POST /api/video-tasks",
+    codeEntry: "src/lib/video-task-planner.ts -> buildSubtitleEnrichmentPrompt",
   },
   prompt_generation: {
     plainPurpose: "把镜头计划继续翻译成文生图提示词、图生视频提示词和字幕台词初稿。",
@@ -450,21 +633,21 @@ const STAGE_USAGE_META: Record<ConstraintPromptStageKey, PromptUsageMeta> = {
     apiEntry: "POST /api/video-materials/[materialId]",
     codeEntry: "src/app/api/video-materials/[materialId]/route.ts -> generateContentFromAnalysis",
   },
+  video_image_cleaning: {
+    plainPurpose: "指导图像模型把抽帧图里的平台 UI、遮挡元素清掉，并把缺失画面补成完整场景。",
+    usedAtStep: "素材管理 -> 视频拆解 -> 图片列表页执行图片清洗时",
+    apiEntry: "POST /api/video-materials/[materialId]/images",
+    codeEntry: "src/lib/video-material-image-cleaner.ts -> cleanVideoMaterialImage",
+  },
+  video_image_cleaning_negative: {
+    plainPurpose: "明确告诉图像模型不要生成手机边框、状态栏、设备 mockup 和残留 UI 等错误元素。",
+    usedAtStep: "素材管理 -> 视频拆解 -> 图片列表页执行图片清洗时",
+    apiEntry: "POST /api/video-materials/[materialId]/images",
+    codeEntry: "src/lib/video-material-image-cleaner.ts -> cleanVideoMaterialImage",
+  },
 };
 
 const RUNTIME_DOC_USAGE_META: Record<string, PromptUsageMeta> = {
-  shot_plan_runtime_hard_rules: {
-    plainPurpose: "给镜头计划再加一层兜底要求，避免模型把 narrationHint 写空、把口播塞太满，或者留白判断跑偏。",
-    usedAtStep: "导演模式 -> 第二步：镜头计划生成",
-    apiEntry: "POST /api/video-tasks",
-    codeEntry: "src/lib/video-task-planner.ts -> buildShotPlanSystemPrompt",
-  },
-  prompt_generation_runtime_hard_rules: {
-    plainPurpose: "给台词和提示词初稿再加一层兜底要求，拦住机械口播、空泛套话和重复句式。",
-    usedAtStep: "导演模式 -> 第二步：镜头计划生成",
-    apiEntry: "POST /api/video-tasks",
-    codeEntry: "src/lib/video-task-planner.ts -> buildPromptGenerationSystemPrompt",
-  },
   narration_standards_documentation: {
     plainPurpose: "这是一整套台词质量标准，告诉系统什么叫自然、顺口、有吸引力，也决定不同视频类型该怎么说。",
     usedAtStep: "导演模式 -> 第二步镜头计划生成后的台词润色，以及第三步音频超时重写时",
@@ -473,7 +656,7 @@ const RUNTIME_DOC_USAGE_META: Record<string, PromptUsageMeta> = {
   },
   narration_delivery_strategy_reference: {
     plainPurpose: "按镜头用途决定哪里该留白、哪里该当重点句、以及 TTS 该更快还是更稳。",
-    usedAtStep: "导演模式 -> 第三步：音频字幕生成",
+    usedAtStep: "导演模式 -> 第三步：字幕音频生成",
     apiEntry: "POST /api/video-tasks/[taskId]/subtitle-audio-run",
     codeEntry: "src/lib/narration-standards.ts -> buildNarrationDeliveryStrategies",
   },
@@ -491,7 +674,7 @@ const RUNTIME_DOC_USAGE_META: Record<string, PromptUsageMeta> = {
   },
   subtitle_audio_repair_system_prompt: {
     plainPurpose: "如果 TTS 生成出来还是超时或语速异常，就再把台词压一遍，确保真正适合配音。",
-    usedAtStep: "导演模式 -> 第三步：音频字幕生成",
+    usedAtStep: "导演模式 -> 第三步：字幕音频生成",
     apiEntry: "POST /api/video-tasks/[taskId]/subtitle-audio-run",
     codeEntry: "src/app/api/video-tasks/[taskId]/subtitle-audio-run/route.ts -> rewriteNarrationClipToFit",
   },
@@ -539,30 +722,6 @@ export function listConstraintPromptRuntimeDocs(): ConstraintPromptRuntimeDoc[] 
   const defaultVideoTypeLabel = videoTaskTypeProfiles[DEFAULT_VIDEO_TASK_VIDEO_TYPE].label;
 
   return [
-    {
-      key: "shot_plan_runtime_hard_rules",
-      order: 101,
-      label: "镜头计划运行时硬规则",
-      description: "在镜头计划主提示词之后，后端固定追加的硬规则，用来收紧 narrationHint、留白和口播分布。",
-      pipelinePhase: "任务创建",
-      kind: "runtime_rule",
-      promptText: ["镜头计划运行时硬规则：", formatNumberedRules(SHOT_PLAN_RUNTIME_HARD_RULES)].join("\n"),
-      sourceFile: "src/lib/prompt-runtime-library.ts",
-      stageKeys: ["shot_plan"],
-      ...RUNTIME_DOC_USAGE_META.shot_plan_runtime_hard_rules,
-    },
-    {
-      key: "prompt_generation_runtime_hard_rules",
-      order: 102,
-      label: "提示词生成运行时硬规则",
-      description: "在提示词生成主提示词之后，后端固定追加的硬规则，用来限制台词质量、留白和重复表达。",
-      pipelinePhase: "任务创建",
-      kind: "runtime_rule",
-      promptText: ["提示词生成运行时硬规则：", formatNumberedRules(PROMPT_GENERATION_RUNTIME_HARD_RULES)].join("\n"),
-      sourceFile: "src/lib/prompt-runtime-library.ts",
-      stageKeys: ["prompt_generation"],
-      ...RUNTIME_DOC_USAGE_META.prompt_generation_runtime_hard_rules,
-    },
     {
       key: "narration_standards_documentation",
       order: 103,

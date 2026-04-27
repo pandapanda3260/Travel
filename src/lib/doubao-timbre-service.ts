@@ -29,7 +29,16 @@ export type TimbreItem = {
   avatarText: string;
 };
 
+const TIMBRE_RESOURCE_ID_OVERRIDES: Record<string, string> = {
+  ICL_zh_female_wenrounvshen_239eff5e8ffa_tob: "seed-tts-1.0",
+};
+
 export function resolveTimbreResourceId(speakerId: string): string | undefined {
+  const normalizedSpeakerId = speakerId.trim();
+  if (TIMBRE_RESOURCE_ID_OVERRIDES[normalizedSpeakerId]) {
+    return TIMBRE_RESOURCE_ID_OVERRIDES[normalizedSpeakerId];
+  }
+
   if (speakerId.includes("_mars_bigtts") || speakerId.includes("_moon_bigtts")) {
     return "seed-tts-1.0";
   }
@@ -42,15 +51,22 @@ export function resolveTimbreResourceId(speakerId: string): string | undefined {
     return "seed-tts-2.0";
   }
 
-  if (speakerId.startsWith("ICL_") || speakerId.includes("_tob")) {
-    return "seed-icl-1.0";
-  }
-
   if (speakerId.startsWith("S_")) {
     return "seed-icl-2.0";
   }
 
-  return undefined;
+  if (speakerId.startsWith("ICL_") || speakerId.includes("_tob")) {
+    return "seed-icl-2.0";
+  }
+
+  return "seed-tts-2.0";
+}
+
+/** ICL/复刻类音色在 resource 不匹配时可尝试的备选列表 */
+export function getTimbreResourceFallbacks(speakerId: string): string[] {
+  const primary = resolveTimbreResourceId(speakerId);
+  const all = ["seed-tts-2.0", "seed-icl-2.0", "seed-icl-1.0", "seed-tts-1.0"];
+  return [primary, ...all.filter((r) => r !== primary)].filter((r): r is string => Boolean(r));
 }
 
 type OpenApiTimbreResult = {

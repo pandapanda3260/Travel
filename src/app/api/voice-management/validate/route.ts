@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../lib/auth-session";
 import { getUnifiedTimbreCatalog, resolveTimbreResourceId } from "../../../../lib/doubao-timbre-service";
 import { listClonedVoices } from "../../../../lib/voice-management-store";
 
 export async function POST(request: NextRequest) {
+  const session = requireUserApiSession(request);
+  if (!session) {
+    return userApiUnauthorizedResponse();
+  }
+
   try {
     const body = (await request.json()) as { speakerId?: string };
     const speakerId = body.speakerId?.trim();
@@ -23,7 +29,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ valid: true, speakerId, resourceId });
     }
 
-    const cloned = listClonedVoices().find(
+    const cloned = listClonedVoices(session.userId).find(
       (v) => v.speakerId === speakerId && (v.status === "SUCCESS" || v.status === "ACTIVE"),
     );
     if (cloned) {

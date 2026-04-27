@@ -1,7 +1,6 @@
-import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { dbGetAll, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { dbGetAll, dbReplaceAll, dbUpsert, migrateJsonArrayIfNeeded } from "./db";
 import { ensureRuntimeDataDir, joinRuntimeDataPath } from "./runtime-storage";
 
 export type MaterialAssetType = "image" | "video";
@@ -49,7 +48,10 @@ function readStore() {
 
 function writeStore(items: MaterialLibraryItem[]) {
   ensureStore();
-  dbReplaceAll(COLLECTION, items.map((item) => ({ key: item.materialId, data: item })));
+  dbReplaceAll(
+    COLLECTION,
+    items.map((item) => ({ key: item.materialId, data: item })),
+  );
 }
 
 function getSourceLabel(source: MaterialSourceType) {
@@ -83,6 +85,28 @@ export function listMaterialLibraryItems() {
 
 export function getMaterialLibraryItemBySource(source: MaterialSourceType, sourceEntityId: string) {
   return readStore().find((item) => item.source === source && item.sourceSessionId === sourceEntityId) ?? null;
+}
+
+export function upsertMaterialLibraryItem(item: MaterialLibraryItem) {
+  ensureStore();
+  const normalizedItem = normalizeMaterialItem(item);
+  dbUpsert(COLLECTION, normalizedItem.materialId, normalizedItem);
+  return normalizedItem;
+}
+
+export function upsertMaterialLibraryItemBySource(
+  input: Omit<MaterialLibraryItem, "materialId" | "addedAt" | "sourceLabel">,
+) {
+  const existing = getMaterialLibraryItemBySource(input.source, input.sourceSessionId);
+  const sourceLabel = getSourceLabel(input.source);
+  const nextItem: MaterialLibraryItem = normalizeMaterialItem({
+    ...input,
+    materialId: existing?.materialId ?? `${input.source}:${input.sourceSessionId}`,
+    sourceLabel,
+    addedAt: existing?.addedAt ?? new Date().toISOString(),
+  });
+
+  return upsertMaterialLibraryItem(nextItem);
 }
 
 export function removeMaterialLibraryItemsBySource(source: MaterialSourceType, sourceEntityId: string) {

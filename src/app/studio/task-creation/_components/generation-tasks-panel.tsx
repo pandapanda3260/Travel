@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { formatDurationMmSs } from "../../../../lib/duration-format";
+import { formatDurationSecondsLabel } from "../../../../lib/duration-format";
 import { defaultVideoNegativePrompt } from "../../../../lib/prompt";
+import { useVideoTimecode } from "../../../_components/use-video-timecode";
 import {
   getVideoTaskStatusMeta,
   type VideoTaskGeneratedVideoRecord,
@@ -30,6 +31,18 @@ function getGenerationSettings(settings?: GenerationSettings | null): Generation
   return settings ?? defaultGenerationSettings;
 }
 
+function toCssAspectRatio(aspectRatio: GenerationSettings["aspectRatio"]) {
+  switch (aspectRatio) {
+    case "16:9":
+      return "16 / 9";
+    case "1:1":
+      return "1 / 1";
+    case "9:16":
+    default:
+      return "9 / 16";
+  }
+}
+
 type TaskListRow = {
   taskId: string;
   taskTitle: string;
@@ -42,15 +55,29 @@ type TaskListRow = {
 };
 
 function formatSecondsLabel(seconds: number | null) {
-  return formatDurationMmSs(seconds);
+  return formatDurationSecondsLabel(seconds);
+}
+
+function getTaskDurationLabel(task: VideoTaskRecord | null) {
+  if (!task) {
+    return null;
+  }
+
+  const totalDurationSeconds =
+    task.directorPlan?.totalDurationSeconds ??
+    task.shotPlan?.totalDurationSeconds ??
+    task.directorPlan?.storyShots?.reduce((total, shot) => total + Math.max(0, shot.durationSeconds || 0), 0) ??
+    null;
+
+  return formatSecondsLabel(totalDurationSeconds);
 }
 
 function getStatusLabel(status: VideoTaskGeneratedVideoRecord["status"]) {
   return status === "FAILED" ? "生成失败" : "生成完成";
 }
 
-function getTypeLabel(type: VideoTaskGeneratedVideoRecord["type"]) {
-  return type === "DIRECTOR" ? "导演模式" : "自动生成";
+function getTypeLabel(type: VideoTaskGeneratedVideoRecord["type"], generatedTypeLabel: string) {
+  return type === "DIRECTOR" ? generatedTypeLabel : "自动生成";
 }
 
 function getDisplayTaskTitle(title: string) {
@@ -68,6 +95,12 @@ export function GenerationTasksPanel({
   highlightedTaskId,
   draftMode,
   selectedTaskId,
+  taskListTitle = "任务列表",
+  taskListEyebrow = "任务创建",
+  generatedTypeLabel = "工作流生成",
+  previewTitle = "预览与参数",
+  previewEyebrow = "结果预览",
+  emptyPreviewLabel = "视频预览",
   onSelectTask,
   onDeleteTask,
 }: {
@@ -76,6 +109,12 @@ export function GenerationTasksPanel({
   highlightedTaskId: string;
   draftMode?: boolean;
   selectedTaskId: string;
+  taskListTitle?: string;
+  taskListEyebrow?: string;
+  generatedTypeLabel?: string;
+  previewTitle?: string;
+  previewEyebrow?: string;
+  emptyPreviewLabel?: string;
   onSelectTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
 }) {
@@ -118,17 +157,19 @@ export function GenerationTasksPanel({
           taskId: task.taskId,
           taskTitle: task.title,
           createdAt: task.createdAt,
-          typeLabel: getTypeLabel(generatedVideo.type),
+          typeLabel: getTypeLabel(generatedVideo.type, generatedTypeLabel),
           typeTone: generatedVideo.type === "DIRECTOR" ? "composition" : "live",
           statusLabel: getStatusLabel(generatedVideo.status),
           statusTone: generatedVideo.status === "FAILED" ? "warning" : "default",
           videoJobId: generatedVideo.videoJobId,
         };
       }),
-    [generatedVideoMap, tasks],
+    [generatedTypeLabel, generatedVideoMap, tasks],
   );
 
   const activeRow = useMemo(() => generatedVideoMap.get(activeTaskId) ?? null, [activeTaskId, generatedVideoMap]);
+  const activePreviewTimecode = useVideoTimecode(activeRow?.videoUrl ?? null);
+  const activeTask = useMemo(() => tasks.find((task) => task.taskId === activeTaskId) ?? null, [activeTaskId, tasks]);
   const effectiveSettings = useMemo(
     () => getGenerationSettings(activeRow?.generationSettings ?? undefined),
     [activeRow?.generationSettings],
@@ -137,11 +178,16 @@ export function GenerationTasksPanel({
     () => formatSecondsLabel(activeRow?.resolvedDurationSeconds ?? null),
     [activeRow?.resolvedDurationSeconds],
   );
+  const taskDurationLabel = useMemo(() => getTaskDurationLabel(activeTask), [activeTask]);
   const videoParameters = useMemo(
     () => [
       {
         label: "时长",
-        value: resolvedVideoDurationLabel ?? formatDurationMmSs(effectiveSettings.durationSeconds) ?? "00:00",
+        value:
+          taskDurationLabel ??
+          resolvedVideoDurationLabel ??
+          formatDurationSecondsLabel(effectiveSettings.durationSeconds) ??
+          "0 秒",
       },
       {
         label: "存储",
@@ -152,19 +198,11 @@ export function GenerationTasksPanel({
             : "待生成",
       },
       {
-        label: "模型",
-        value: activeRow?.modelId ?? "未配置",
-      },
-      {
         label: "比例",
         value: `${effectiveSettings.aspectRatio} ${effectiveSettings.aspectRatio === "9:16" ? "竖版" : effectiveSettings.aspectRatio === "16:9" ? "横版" : "方版"}`,
       },
       {
-        label: "镜头模式",
-        value: effectiveSettings.shotType,
-      },
-      {
-        label: "音频",
+        label: "原生音频",
         value: effectiveSettings.generateAudio ? "开启" : "关闭",
       },
       {
@@ -172,7 +210,7 @@ export function GenerationTasksPanel({
         value: `${(activeRow?.originalPrompt ?? "").trim().length} 字`,
       },
     ],
-    [activeRow?.modelId, activeRow?.originalPrompt, activeRow?.videoUrl, effectiveSettings, resolvedVideoDurationLabel],
+    [activeRow?.originalPrompt, activeRow?.videoUrl, effectiveSettings, resolvedVideoDurationLabel, taskDurationLabel],
   );
 
   async function handleDeleteRow(row: TaskListRow) {
@@ -192,8 +230,8 @@ export function GenerationTasksPanel({
     <div className="dashboard-grid generation-tasks-grid">
       <div className="panel dashboard-list">
         <ModuleTitle
-          title="任务列表"
-          eyebrow="导演模式"
+          title={taskListTitle}
+          eyebrow={taskListEyebrow}
           level="primary"
           action={<span className="table-meta">{rows.length} 条记录</span>}
         />
@@ -289,8 +327,8 @@ export function GenerationTasksPanel({
 
       <div className="panel preview-panel dashboard-preview">
         <ModuleTitle
-          title="预览与参数"
-          eyebrow="结果预览"
+          title={previewTitle}
+          eyebrow={previewEyebrow}
           level="primary"
           action={
             <div className="action-row">
@@ -304,14 +342,21 @@ export function GenerationTasksPanel({
         />
 
         <div className="result-layout equal-height-columns">
-          <div className="video-frame">
+          <div className="video-frame" style={{ aspectRatio: toCssAspectRatio(effectiveSettings.aspectRatio) }}>
             {activeRow?.videoUrl ? (
-              <video src={activeRow.videoUrl} controls playsInline className="video-player" />
+              <>
+                <video
+                  src={activeRow.videoUrl}
+                  controls
+                  playsInline
+                  className="video-player"
+                  {...activePreviewTimecode.videoTimecodeProps}
+                />
+                <div className="video-timecode-badge">{activePreviewTimecode.timecodeLabel}</div>
+              </>
             ) : (
               <div className="video-placeholder">
-                <span>
-                  {activeRow ? (activeRow.error ?? "该任务当前没有可播放视频") : "在左侧列表中点击「查看」预览结果"}
-                </span>
+                <span>{activeRow ? (activeRow.error ?? "该任务当前没有可播放视频") : emptyPreviewLabel}</span>
               </div>
             )}
           </div>

@@ -1,34 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getUnifiedTimbreCatalog } from "../../../../lib/doubao-timbre-service";
+import { getUnifiedTimbreCatalog, searchTimbres } from "../../../../lib/doubao-timbre-service";
 
 const PAGE_SIZE = 9;
 
 export async function GET(request: NextRequest) {
   const keyword = request.nextUrl.searchParams.get("q") ?? "";
-  const page = Math.max(1, Number(request.nextUrl.searchParams.get("page")) || 1);
-  const normalizedKeyword = keyword.trim().toLowerCase();
-  const matched = (await getUnifiedTimbreCatalog()).filter((item) => {
-    if (!normalizedKeyword) {
-      return true;
-    }
-
-    const searchText = [
-      item.speakerId,
-      item.speakerName,
-      item.description,
-      ...item.tags,
-      ...item.categories.flatMap((category) => [category.category, category.nextCategory ?? ""]),
-      ...item.emotions.map((emotion) => emotion.emotion),
-    ]
-      .join(" ")
-      .toLowerCase();
-
-    return searchText.includes(normalizedKeyword);
-  });
+  const requestedPage = Math.max(1, Number(request.nextUrl.searchParams.get("page")) || 1);
+  const normalizedKeyword = keyword.trim();
+  const matched = normalizedKeyword ? await searchTimbres(normalizedKeyword) : await getUnifiedTimbreCatalog();
   const totalPages = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
 
   return NextResponse.json({
+    keyword: normalizedKeyword,
     items: matched.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
     pagination: {
       page,

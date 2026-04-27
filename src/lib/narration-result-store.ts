@@ -1,10 +1,14 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { buildMergedNarrationAudio, deleteMergedNarrationAudio, deleteNarrationAudioTempArtifacts } from "./narration-audio-bundle";
+import {
+  buildMergedNarrationAudio,
+  deleteMergedNarrationAudio,
+  deleteNarrationAudioTempArtifacts,
+} from "./narration-audio-bundle";
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import type { NarrationDraft, NarrationDraftClip } from "./narration";
-import { sanitizeNarrationText } from "./narration";
+import { normalizeNarrationSpokenText, sanitizeNarrationText } from "./narration";
 import { joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { buildSrtFromSubtitleCues, buildSubtitleCuesFromNarrationClips, writeSrtSubtitleFile } from "./subtitle-export";
 
@@ -37,12 +41,21 @@ function ensureStore() {
 }
 
 function normalizeNarrationClip(clip: NarrationDraftClip): NarrationDraftClip {
-  const unifiedText = sanitizeNarrationText(clip.narrationText?.trim() || clip.subtitleText?.trim() || "");
+  const narrationText = sanitizeNarrationText(
+    clip.narrationText?.trim() || clip.spokenText?.trim() || clip.subtitleText?.trim() || "",
+  );
+  const subtitleText = sanitizeNarrationText(
+    clip.subtitleText?.trim() || clip.narrationText?.trim() || clip.spokenText?.trim() || "",
+  );
+  const spokenText = normalizeNarrationSpokenText(clip.spokenText?.trim() || narrationText, {
+    stripLeadingDayPrefix: true,
+  });
 
   return {
     ...clip,
-    narrationText: clip.hasVoice === false ? "" : unifiedText,
-    subtitleText: clip.hasSubtitle === false ? "" : unifiedText,
+    narrationText: clip.hasVoice === false ? "" : narrationText,
+    subtitleText: clip.hasSubtitle === false ? "" : subtitleText,
+    spokenText: clip.hasVoice === false ? "" : spokenText || narrationText,
   };
 }
 

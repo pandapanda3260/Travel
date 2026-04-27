@@ -1,24 +1,34 @@
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import type { NarrationDraftClip } from "./narration";
 import { joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 
-const execFileAsync = promisify(execFile);
-const packageRequire = createRequire(process.cwd() + "/package.json");
+const rawExecFileAsync = promisify(execFile);
 const dataDir = joinRuntimeDataPath("narration-audio-temp");
+const ffmpegExecutionTimeoutMs = 5 * 60 * 1000;
+const ffmpegMaxBuffer = 8 * 1024 * 1024;
+
+async function execFileAsync(file: string, args: string[]) {
+  try {
+    return await rawExecFileAsync(file, args, {
+      timeout: ffmpegExecutionTimeoutMs,
+      maxBuffer: ffmpegMaxBuffer,
+    });
+  } catch (error) {
+    const maybeError = error as { killed?: boolean; signal?: string };
+    if (maybeError.killed || maybeError.signal === "SIGTERM") {
+      throw new Error(`音频合并超时（${Math.round(ffmpegExecutionTimeoutMs / 1000)} 秒），请重试或减少单次生成内容`);
+    }
+    throw error;
+  }
+}
 
 function resolveFfmpegPath() {
-  const runtimePath = packageRequire("ffmpeg-static") as string | null;
-
-  if (!runtimePath || !existsSync(runtimePath)) {
-    throw new Error("当前环境缺少可用的 FFmpeg 可执行文件");
-  }
-
-  return runtimePath;
+  return getFfmpegBinaryPath();
 }
 
 function toAbsoluteLocalPath(publicUrl: string) {
@@ -58,21 +68,92 @@ function getMergedNarrationOutputDir(taskId?: string | null) {
   return joinRuntimePublicStoragePath("generated-audio", taskId?.trim() || "_unassigned", "narration-merged");
 }
 
-async function trimAudioToDuration(ffmpegPath: string, inputPath: string, outputPath: string, maxDurationSeconds: number) {
-  const fadeOutSeconds = Math.min(0.5, Math.max(0.15, maxDurationSeconds));
-  await execFileAsync(ffmpegPath, [
-    "-y",
-    "-i", inputPath,
-    "-t", String(maxDurationSeconds),
-    "-af", `afade=t=out:st=${Math.max(0, maxDurationSeconds - fadeOutSeconds)}:d=${fadeOutSeconds}`,
-    "-q:a", "2",
-    outputPath,
-  ]);
+function getSafeSeconds(value: number | null | undefined, fallback = 0) {
+  if (value == null || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(0, value);
+}
+
+function getClipSegmentKey(clip: NarrationDraftClip, index: number) {
+  const segmentIndex = clip.segmentIndex ?? clip.shotIndex ?? index + 1;
+  const sortIndex = Math.round(segmentIndex * 1000);
+  const segmentId = clip.segmentId?.trim() || clip.bindToSegmentId?.trim() || `segment-${segmentIndex}`;
+  return `${String(sortIndex).padStart(8, "0")}-${segmentId}`;
+}
+
+function getClipWindowSeconds(clip: NarrationDraftClip) {
+  return Math.max(
+    0.2,
+    getSafeSeconds(clip.durationSeconds),
+    getSafeSeconds(clip.audioDurationSeconds),
+    clip.words?.length ? Math.max(...clip.words.map((word) => getSafeSeconds(word.endTime))) : 0,
+  );
+}
+
+function buildEffectiveClipStartMap(clips: NarrationDraftClip[]) {
+  const segmentMap = new Map<
+    string,
+    {
+      firstStartAtSeconds: number;
+      endAtSeconds: number;
+      clipIndexes: number[];
+    }
+  >();
+
+  clips.forEach((clip, index) => {
+    const key = getClipSegmentKey(clip, index);
+    const startAtSeconds = getSafeSeconds(clip.startAtSeconds);
+    const windowEndAtSeconds = startAtSeconds + getClipWindowSeconds(clip);
+    const current = segmentMap.get(key);
+
+    if (current) {
+      current.firstStartAtSeconds = Math.min(current.firstStartAtSeconds, startAtSeconds);
+      current.endAtSeconds = Math.max(current.endAtSeconds, windowEndAtSeconds);
+      current.clipIndexes.push(index);
+      return;
+    }
+
+    segmentMap.set(key, {
+      firstStartAtSeconds: startAtSeconds,
+      endAtSeconds: windowEndAtSeconds,
+      clipIndexes: [index],
+    });
+  });
+
+  const segments = Array.from(segmentMap.entries()).sort(([left], [right]) => left.localeCompare(right));
+  let previousEndAtSeconds = segments[0] ? segments[0][1].endAtSeconds : 0;
+  const startsOverlapAcrossSegments = segments.slice(1).some(([, segment]) => {
+    const overlaps = segment.firstStartAtSeconds < previousEndAtSeconds - 0.05;
+    previousEndAtSeconds = Math.max(previousEndAtSeconds, segment.endAtSeconds);
+    return overlaps;
+  });
+
+  if (!startsOverlapAcrossSegments) {
+    return new Map(clips.map((clip, index) => [index, getSafeSeconds(clip.startAtSeconds)]));
+  }
+
+  const startMap = new Map<number, number>();
+  let cursor = 0;
+
+  for (const [, segment] of segments) {
+    for (const clipIndex of segment.clipIndexes) {
+      const localStartAtSeconds = getSafeSeconds(clips[clipIndex]?.startAtSeconds);
+      startMap.set(clipIndex, Number((cursor + localStartAtSeconds - segment.firstStartAtSeconds).toFixed(3)));
+    }
+    cursor = Number((cursor + segment.endAtSeconds - segment.firstStartAtSeconds).toFixed(3));
+  }
+
+  return startMap;
 }
 
 export async function buildMergedNarrationAudio(resultId: string, clips: NarrationDraftClip[], taskId?: string | null) {
-  const sourceUrls = clips.map((clip) => clip.audioUrl).filter((item): item is string => Boolean(item));
-  if (sourceUrls.length === 0 || sourceUrls.length !== clips.length) {
+  const audioClips = clips.map((clip, index) => ({ clip, index })).filter(({ clip }) => Boolean(clip.audioUrl));
+  const requiredAudioMissing = clips.some(
+    (clip) => clip.hasVoice !== false && Boolean(clip.narrationText.trim()) && !clip.audioUrl,
+  );
+  if (audioClips.length === 0 || requiredAudioMissing) {
     return null;
   }
 
@@ -82,52 +163,50 @@ export async function buildMergedNarrationAudio(resultId: string, clips: Narrati
 
   const ffmpegPath = resolveFfmpegPath();
 
-  const listFilePath = join(dataDir, `${resultId}-concat.txt`);
   const outputFileName = `${resultId}.mp3`;
   const outputPath = join(outputDir, outputFileName);
-  const trimmedPaths: string[] = [];
+  const effectiveStartMap = buildEffectiveClipStartMap(clips);
+  const inputArgs = ["-y"];
+  const filterParts: string[] = [];
+  const audioLabels: string[] = [];
 
-  try {
-    for (let i = 0; i < clips.length; i++) {
-      const clip = clips[i];
-      const srcPath = toAbsoluteLocalPath(sourceUrls[i]);
-      const preferredDuration = clip.audioDurationSeconds ?? clip.durationSeconds;
-      if (preferredDuration && preferredDuration > 0) {
-        const trimmedPath = join(dataDir, `${resultId}-trim-${i}.mp3`);
-        await trimAudioToDuration(ffmpegPath, srcPath, trimmedPath, preferredDuration);
-        trimmedPaths.push(trimmedPath);
-      } else {
-        trimmedPaths.push(srcPath);
-      }
-    }
+  audioClips.forEach(({ clip, index }, inputIndex) => {
+    inputArgs.push("-i", toAbsoluteLocalPath(clip.audioUrl!));
 
-    writeFileSync(
-      listFilePath,
-      trimmedPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n"),
-      "utf8",
-    );
+    const clipDuration = Math.max(0.2, getSafeSeconds(clip.audioDurationSeconds ?? clip.durationSeconds, 2));
+    const startAtSeconds = effectiveStartMap.get(index) ?? getSafeSeconds(clip.startAtSeconds);
+    const delayMs = Math.round(startAtSeconds * 1000);
+    const fadeOutSeconds = Math.min(0.5, Math.max(0.15, clipDuration));
+    const label = `[a${inputIndex}]`;
+    const chain = [
+      "aresample=48000",
+      `atrim=duration=${clipDuration}`,
+      "asetpts=PTS-STARTPTS",
+      `afade=t=out:st=${Math.max(0, clipDuration - fadeOutSeconds)}:d=${fadeOutSeconds}`,
+      delayMs > 0 ? `adelay=${delayMs}|${delayMs}` : null,
+    ].filter((item): item is string => Boolean(item));
 
-    await execFileAsync(ffmpegPath, [
-      "-y",
-      "-f", "concat",
-      "-safe", "0",
-      "-i", listFilePath,
-      "-c", "copy",
-      outputPath,
-    ]);
+    filterParts.push(`[${inputIndex}:a]${chain.join(",")}${label}`);
+    audioLabels.push(label);
+  });
 
-    return {
-      publicUrl: `/generated-audio/${taskId?.trim() || "_unassigned"}/narration-merged/${outputFileName}`,
-    };
-  } finally {
-    for (const p of trimmedPaths) {
-      if (p.includes("-trim-") && existsSync(p)) {
-        unlinkSync(p);
-      }
-    }
+  filterParts.push(
+    `${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0,alimiter=limit=0.95[a]`,
+  );
 
-    if (existsSync(listFilePath)) {
-      unlinkSync(listFilePath);
-    }
-  }
+  await execFileAsync(ffmpegPath, [
+    ...inputArgs,
+    "-filter_complex",
+    filterParts.join(";"),
+    "-map",
+    "[a]",
+    "-vn",
+    "-q:a",
+    "2",
+    outputPath,
+  ]);
+
+  return {
+    publicUrl: `/generated-audio/${taskId?.trim() || "_unassigned"}/narration-merged/${outputFileName}`,
+  };
 }

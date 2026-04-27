@@ -36,6 +36,78 @@ function getSafeSeconds(value: number | null | undefined, fallback = 0) {
   return Math.max(0, value);
 }
 
+function getClipSegmentKey(clip: NarrationDraftClip, index: number) {
+  const segmentIndex = clip.segmentIndex ?? clip.shotIndex ?? index + 1;
+  const sortIndex = Math.round(segmentIndex * 1000);
+  const segmentId = clip.segmentId?.trim() || clip.bindToSegmentId?.trim() || `segment-${segmentIndex}`;
+  return `${String(sortIndex).padStart(8, "0")}-${segmentId}`;
+}
+
+function getClipWindowSeconds(clip: NarrationDraftClip) {
+  return Math.max(
+    0.2,
+    getSafeSeconds(clip.durationSeconds),
+    getSafeSeconds(clip.audioDurationSeconds),
+    clip.words?.length ? Math.max(...clip.words.map((word) => getSafeSeconds(word.endTime))) : 0,
+  );
+}
+
+function buildEffectiveClipStartMap(clips: NarrationDraftClip[]) {
+  const segmentMap = new Map<
+    string,
+    {
+      firstStartAtSeconds: number;
+      endAtSeconds: number;
+      clipIndexes: number[];
+    }
+  >();
+
+  clips.forEach((clip, index) => {
+    const key = getClipSegmentKey(clip, index);
+    const startAtSeconds = getSafeSeconds(clip.startAtSeconds);
+    const windowEndAtSeconds = startAtSeconds + getClipWindowSeconds(clip);
+    const current = segmentMap.get(key);
+
+    if (current) {
+      current.firstStartAtSeconds = Math.min(current.firstStartAtSeconds, startAtSeconds);
+      current.endAtSeconds = Math.max(current.endAtSeconds, windowEndAtSeconds);
+      current.clipIndexes.push(index);
+      return;
+    }
+
+    segmentMap.set(key, {
+      firstStartAtSeconds: startAtSeconds,
+      endAtSeconds: windowEndAtSeconds,
+      clipIndexes: [index],
+    });
+  });
+
+  const segments = Array.from(segmentMap.entries()).sort(([left], [right]) => left.localeCompare(right));
+  let previousEndAtSeconds = segments[0] ? segments[0][1].endAtSeconds : 0;
+  const startsOverlapAcrossSegments = segments.slice(1).some(([, segment]) => {
+    const overlaps = segment.firstStartAtSeconds < previousEndAtSeconds - 0.05;
+    previousEndAtSeconds = Math.max(previousEndAtSeconds, segment.endAtSeconds);
+    return overlaps;
+  });
+
+  if (!startsOverlapAcrossSegments) {
+    return new Map(clips.map((clip, index) => [index, getSafeSeconds(clip.startAtSeconds)]));
+  }
+
+  const startMap = new Map<number, number>();
+  let cursor = 0;
+
+  for (const [, segment] of segments) {
+    for (const clipIndex of segment.clipIndexes) {
+      const localStartAtSeconds = getSafeSeconds(clips[clipIndex]?.startAtSeconds);
+      startMap.set(clipIndex, Number((cursor + localStartAtSeconds - segment.firstStartAtSeconds).toFixed(3)));
+    }
+    cursor = Number((cursor + segment.endAtSeconds - segment.firstStartAtSeconds).toFixed(3));
+  }
+
+  return startMap;
+}
+
 function normalizeCueText(text: string) {
   return text
     .split(/\r?\n/)
@@ -43,50 +115,12 @@ function normalizeCueText(text: string) {
     .filter(Boolean)
     .join("\n");
 }
-
-export function wrapSubtitleText(text: string, maxCharsPerLine = 12, maxLines = 2): string {
-  const cleaned = text.replace(/\s+/g, "").trim();
-  if (cleaned.length <= maxCharsPerLine) {
-    return cleaned;
-  }
-
-  const punctuation = /([，。！？；、：])/;
-  const segments = cleaned.split(punctuation).reduce<string[]>((acc, part, i) => {
-    if (i % 2 === 1 && acc.length > 0) {
-      acc[acc.length - 1] += part;
-    } else if (part) {
-      acc.push(part);
-    }
-    return acc;
-  }, []);
-
-  const lines: string[] = [];
-  let current = "";
-  for (const seg of segments) {
-    if ((current + seg).length > maxCharsPerLine && current) {
-      lines.push(current);
-      current = seg;
-    } else {
-      current += seg;
-    }
-  }
-  if (current) {
-    lines.push(current);
-  }
-
-  if (lines.length <= maxLines) {
-    return lines.join("\n");
-  }
-
-  const result = lines.slice(0, maxLines);
-  const lastLine = result[maxLines - 1];
-  if (lastLine && lastLine.length > maxCharsPerLine) {
-    result[maxLines - 1] = lastLine.slice(0, maxCharsPerLine);
-  }
-  return result.join("\n");
-}
-
-export { groupWordsIntoPhrases, splitTextIntoPhrases, type SubtitlePhrase } from "./subtitle-text-utils";
+export {
+  groupWordsIntoPhrases,
+  splitTextIntoPhrases,
+  wrapSubtitleText,
+  type SubtitlePhrase,
+} from "./subtitle-text-utils";
 
 export function formatSrtTimestamp(totalSeconds: number) {
   const milliseconds = Math.max(0, Math.round(totalSeconds * 1000));
@@ -99,6 +133,8 @@ export function formatSrtTimestamp(totalSeconds: number) {
 }
 
 export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[]) {
+  const effectiveStartMap = buildEffectiveClipStartMap(clips);
+
   return clips
     .map((clip, index) => {
       const text = normalizeCueText(clip.subtitleText || clip.narrationText || "");
@@ -106,13 +142,11 @@ export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[])
         return null;
       }
 
-      const startAtSeconds = getSafeSeconds(clip.startAtSeconds);
+      const startAtSeconds = effectiveStartMap.get(index) ?? getSafeSeconds(clip.startAtSeconds);
       const durationSeconds = Math.max(0.8, getSafeSeconds(clip.audioDurationSeconds ?? clip.durationSeconds, 2));
-      const wordEndTime = clip.words?.length
-        ? Math.max(...clip.words.map((word) => getSafeSeconds(word.endTime)))
-        : 0;
+      const wordEndTime = clip.words?.length ? Math.max(...clip.words.map((word) => getSafeSeconds(word.endTime))) : 0;
       const computedEndAtSeconds = clip.words?.length
-        ? Math.max(startAtSeconds + 0.8, wordEndTime)
+        ? Math.max(startAtSeconds + 0.8, startAtSeconds + wordEndTime)
         : startAtSeconds + durationSeconds;
 
       return {

@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../lib/auth-session";
+import { createAdminTaskStageTracker } from "../../../../lib/admin-data-flow-tracking";
+import { runWithModelUsageContext } from "../../../../lib/model-usage-context";
 import { getVoiceManagementRuntime } from "../../../../lib/voice-management-config";
 import { deleteClonedVoice, upsertClonedVoice } from "../../../../lib/voice-management-store";
 import { queryVoiceCloneStatus, supportedCloneFormats, uploadVoiceClone } from "../../../../lib/voice-clone-service";
@@ -12,6 +15,11 @@ function getFileExtension(name: string) {
 }
 
 export async function POST(request: NextRequest) {
+  const session = requireUserApiSession(request);
+  if (!session) {
+    return userApiUnauthorizedResponse();
+  }
+
   try {
     const runtime = getVoiceManagementRuntime();
     const formData = await request.formData();
@@ -49,8 +57,16 @@ export async function POST(request: NextRequest) {
 
     const cloneId = crypto.randomUUID();
     const now = new Date().toISOString();
+    const stageTracker = createAdminTaskStageTracker({
+      taskId: cloneId,
+      stageKey: "voice_clone",
+      provider: "火山引擎 · 声音复刻",
+      modelId: runtime.cloneResourceId,
+      startedAt: now,
+    });
     upsertClonedVoice({
       cloneId,
+      ownerUserId: session.userId,
       title,
       speakerId,
       alias: title,
@@ -70,24 +86,35 @@ export async function POST(request: NextRequest) {
 
     let uploadResult;
     try {
-      uploadResult = await uploadVoiceClone({
-        speakerId,
-        title,
-        audioBuffer: Buffer.from(await file.arrayBuffer()),
-        fileFormat: format as (typeof supportedCloneFormats)[number],
-        transcript,
-        language,
-        modelType,
-        enableDenoise,
-      });
+      uploadResult = await runWithModelUsageContext(
+        {
+          userId: session.userId,
+          routePath: "/api/voice-management/clone",
+          objectType: "voice_clone",
+          objectId: cloneId,
+        },
+        async () =>
+          uploadVoiceClone({
+            speakerId,
+            title,
+            audioBuffer: Buffer.from(await file.arrayBuffer()),
+            fileFormat: format as (typeof supportedCloneFormats)[number],
+            transcript,
+            language,
+            modelType,
+            enableDenoise,
+          }),
+      );
     } catch (uploadError) {
-      deleteClonedVoice(cloneId);
+      stageTracker.fail(uploadError);
+      deleteClonedVoice(cloneId, session.userId);
       throw uploadError;
     }
 
     const status = await queryVoiceCloneStatus(uploadResult.speakerId).catch(() => null);
     const saved = upsertClonedVoice({
       cloneId,
+      ownerUserId: session.userId,
       title,
       speakerId: uploadResult.speakerId,
       alias: title,
@@ -104,6 +131,7 @@ export async function POST(request: NextRequest) {
       createdAt: now,
       updatedAt: new Date().toISOString(),
     });
+    stageTracker.complete({ finishedAt: saved.updatedAt });
 
     return NextResponse.json({
       clonedVoice: saved,

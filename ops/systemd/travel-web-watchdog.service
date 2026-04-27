@@ -1,0 +1,14 @@
+[Unit]
+Description=Travel Web watchdog
+After=travel-web.service
+Wants=travel-web.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/travel
+Environment=PORT=3000
+Environment=HEALTHCHECK_HOST=127.0.0.1
+Environment=HEALTHCHECK_RESTART=1
+Environment=HEALTHCHECK_SERVICE_NAME=travel-web.service
+EnvironmentFile=-/etc/travel/travel-web.env
+ExecStart=/usr/bin/node scripts/server-healthcheck.mjs

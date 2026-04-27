@@ -1,15 +1,18 @@
 import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
+import { getVideoTypeCategoryPrompt, getVideoTypeAddonPrompt } from "./video-type-prompts";
 import { dbGetAll, dbUpsert, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { formatSecondValue } from "./duration-format";
+import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import type { NarrationDraftClip } from "./narration";
 import { listNarrationResults, type NarrationResultRecord } from "./narration-result-store";
 import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { getTaskDirectorPlan } from "./video-task-director";
+import { listTaskVisualSelectedImages } from "./task-visual-image-store";
 import {
   ensureLocalVideoForJob,
   ensureResolvedDurationForJob,
@@ -17,10 +20,16 @@ import {
   listVideoJobs,
   type VideoJobRecord,
 } from "./video-job-store";
-import type { VideoTaskRecord } from "./video-task-schema";
+import type { TaskArtifactDeletionOptions } from "./task-artifact-cleanup";
+import type {
+  HotelAssetSceneType,
+  ShotGenerationMode,
+  ShotSourceTrace,
+  VideoTaskAssetSourceType,
+  VideoTaskRecord,
+} from "./video-task-schema";
 
 const execFileAsync = promisify(execFile);
-const packageRequire = createRequire(process.cwd() + "/package.json");
 const COLLECTION = "task-clip-shots";
 const legacyJsonPath = joinRuntimeDataPath("task-clip-shots.json");
 
@@ -86,6 +95,29 @@ export type TaskClipShotPayload = {
   job: VideoJobRecord | null;
   lipSyncJob: VideoJobRecord | null;
   thumbnailUrl: string | null;
+  sourceShots: TaskClipSourceShot[];
+};
+
+export type TaskClipSourceShot = {
+  shotId: string;
+  shotIndex: number;
+  title: string;
+  sceneType?: HotelAssetSceneType;
+  contentDescription?: string | null;
+  assetId?: string | null;
+  assetSourceType?: VideoTaskAssetSourceType | null;
+  assetSubjectSummary?: string | null;
+  sourceMaterialId?: string | null;
+  sourceStartAtSeconds?: number | null;
+  sourceEndAtSeconds?: number | null;
+  sourceTimeRangeLabel?: string | null;
+  generationMode?: ShotGenerationMode;
+  sourceTrace?: ShotSourceTrace | null;
+  referenceImageUrl?: string | null;
+  selectedVisualImageUrl?: string | null;
+  selectedVisualImageSessionId?: string | null;
+  needImageEnhancement?: boolean;
+  isAtmosphereInsert?: boolean;
 };
 
 function getTaskClipThumbnailDir(taskId: string) {
@@ -140,16 +172,16 @@ function writeStore(records: TaskClipShotRecord[]) {
 }
 
 function resolveFfmpegPath() {
-  const runtimePath = packageRequire("ffmpeg-static") as string | null;
-  if (!runtimePath || !existsSync(runtimePath)) {
-    throw new Error("当前环境缺少可用的 FFmpeg 可执行文件");
-  }
-  return runtimePath;
+  return getFfmpegBinaryPath();
 }
 
 function buildWordTimelineText(words: NarrationDraftClip["words"]) {
   return (words ?? [])
-    .map((word) => `${word.startTime.toFixed(2)}-${word.endTime.toFixed(2)}秒：${word.word}`)
+    .map((word) => {
+      const start = formatSecondValue(word.startTime, { maximumFractionDigits: 2 }) ?? "0";
+      const end = formatSecondValue(word.endTime, { maximumFractionDigits: 2 }) ?? "0";
+      return `${start}-${end}秒：${word.word}`;
+    })
     .join("；");
 }
 
@@ -187,6 +219,45 @@ export function buildTaskClipGenerationPrompt(input: {
     `输出画质：${input.task.parameters.video.mode}。`,
     `提示词相关性：${input.task.parameters.video.cfgScale}。`,
     `运镜策略：${input.task.parameters.video.cameraControl}。`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function buildSeedanceSegmentPrompt(input: {
+  segmentId: string;
+  segmentIndex: number;
+  shotDescriptions: Array<{ shotIndex: number; prompt: string; durationSeconds?: number; startAtSeconds?: number; endAtSeconds?: number }>;
+  narrationText: string;
+  durationSeconds: number;
+  task: VideoTaskRecord;
+}) {
+  const clipConstraint = getEffectiveConstraintPrompt("clip_generation");
+  const typeCategory = getVideoTypeCategoryPrompt(input.task.parameters.video.videoType, "clip_generation");
+  const typeAddon = getVideoTypeAddonPrompt(input.task.parameters.video.videoType, "clip_generation");
+
+  const totalShots = input.shotDescriptions.length;
+
+  const shotLines = input.shotDescriptions.map((shot, i) => {
+    const imageRef = `@image${i + 1}`;
+    const dur = shot.durationSeconds ? Math.round(shot.durationSeconds * 10) / 10 : null;
+    const durPrefix = dur != null ? `（${dur}秒）：` : "";
+    return `${durPrefix}${imageRef} ${shot.prompt}`;
+  });
+
+  const rhythmGuide = totalShots > 1
+    ? `本片段共 ${totalShots} 个画面，总时长 ${input.durationSeconds} 秒，画面之间自然过渡。`
+    : `本片段总时长 ${input.durationSeconds} 秒。`;
+
+  return [
+    `片段 ${input.segmentIndex}（${input.segmentId}）视频生成要求：`,
+    ...shotLines,
+    "",
+    rhythmGuide,
+    `画面比例：${input.task.parameters.video.aspectRatio}。`,
+    clipConstraint,
+    typeCategory,
+    typeAddon,
   ]
     .filter(Boolean)
     .join("\n");
@@ -232,6 +303,7 @@ export function parseTaskClipShots(task: VideoTaskRecord, narrationResult?: Narr
       shotIndex: segment.segmentIndex,
       shotTitle: segment.title,
       segmentMode: segment.segmentMode,
+      durationSeconds: segment.durationSeconds,
       multiPrompt: segment.multiPrompt,
       requiresLipSync: segment.requiresLipSync,
       videoPrompt: segment.videoPrompt,
@@ -288,6 +360,45 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
   const clipRecords = listTaskClipShots(task.taskId);
   const jobMap = new Map(listVideoJobs().map((job) => [job.jobId, job]));
   const skipSideEffects = options?.readOnly === true;
+  const directorPlan = getTaskDirectorPlan(task);
+  const selectedVisualImageMap = new Map(
+    listTaskVisualSelectedImages(task.taskId).map((item) => [item.shotIndex, item]),
+  );
+  const sourceShotMap = new Map<string, TaskClipSourceShot[]>(
+    directorPlan.storyShots.reduce<Array<[string, TaskClipSourceShot[]]>>((entries, shot) => {
+      const current = entries.find(([segmentId]) => segmentId === shot.segmentId)?.[1];
+      const selectedVisualImage = selectedVisualImageMap.get(shot.shotIndex) ?? null;
+      const nextShot = {
+        shotId: shot.shotId,
+        shotIndex: shot.shotIndex,
+        title: shot.title,
+        sceneType: shot.sceneType,
+        contentDescription: shot.contentDescription ?? shot.sceneDescription ?? null,
+        assetId: shot.assetId ?? null,
+        assetSourceType: shot.assetSourceType ?? null,
+        assetSubjectSummary: shot.assetSubjectSummary ?? null,
+        sourceMaterialId: shot.sourceMaterialId ?? null,
+        sourceStartAtSeconds: shot.sourceStartAtSeconds ?? null,
+        sourceEndAtSeconds: shot.sourceEndAtSeconds ?? null,
+        sourceTimeRangeLabel: shot.sourceTimeRangeLabel ?? null,
+        generationMode: shot.generationMode,
+        sourceTrace: shot.sourceTrace ?? null,
+        referenceImageUrl: shot.referenceImageUrl ?? null,
+        selectedVisualImageUrl: selectedVisualImage?.imageUrl ?? null,
+        selectedVisualImageSessionId: selectedVisualImage?.sessionId ?? null,
+        needImageEnhancement: shot.needImageEnhancement ?? false,
+        isAtmosphereInsert: shot.isAtmosphereInsert ?? false,
+      } satisfies TaskClipSourceShot;
+
+      if (current) {
+        current.push(nextShot);
+        return entries;
+      }
+
+      entries.push([shot.segmentId, [nextShot]]);
+      return entries;
+    }, []),
+  );
 
   return Promise.all(
     shotDefinitions.map(async (definition) => {
@@ -307,6 +418,8 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         !skipSideEffects && ensuredJob?.status === "COMPLETED" && resolvedRecord
           ? (await ensureTaskClipThumbnail(task.taskId, ensuredJob.jobId).catch(() => resolvedRecord.thumbnailUrl)) ?? resolvedRecord.thumbnailUrl
           : resolvedRecord?.thumbnailUrl ?? null;
+      const sourceShots =
+        [...(sourceShotMap.get(definition.segmentId) ?? [])].sort((left, right) => left.shotIndex - right.shotIndex);
 
       return {
         segmentId: definition.segmentId,
@@ -327,16 +440,47 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         job: ensuredJob ?? null,
         lipSyncJob: ensuredLipSyncJob ?? null,
         thumbnailUrl,
+        sourceShots,
       } satisfies TaskClipShotPayload;
     }),
   );
 }
 
-export function deleteTaskClipShotsByTaskId(taskId: string) {
+export function deleteTaskClipShotsByTaskId(taskId: string, options: TaskArtifactDeletionOptions) {
+  if (options.reason !== "user_manual_delete" && options.reason !== "successful_replacement") {
+    throw new Error("删除片段生成记录需要明确的手动删除或成功替换原因");
+  }
+
   const records = readStore().filter((record) => record.taskId !== taskId);
   writeStore(records);
   rmSync(joinRuntimePublicStoragePath("generated-videos", taskId.trim() || "_unassigned", "thumbnails"), {
     recursive: true,
     force: true,
   });
+}
+
+export function deleteTaskClipShotsByTaskIdAndShotIndexes(taskId: string, shotIndexes: number[]) {
+  const normalizedTaskId = taskId.trim();
+  const targetShotIndexes = new Set(
+    shotIndexes.map((shotIndex) => Number(shotIndex)).filter((shotIndex) => Number.isFinite(shotIndex) && shotIndex > 0),
+  );
+
+  if (!normalizedTaskId || targetShotIndexes.size === 0) {
+    return [] as TaskClipShotRecord[];
+  }
+
+  const records = readStore();
+  const deletedRecords = records.filter(
+    (record) => record.taskId === normalizedTaskId && targetShotIndexes.has(record.shotIndex),
+  );
+
+  if (deletedRecords.length === 0) {
+    return [];
+  }
+
+  writeStore(
+    records.filter((record) => !(record.taskId === normalizedTaskId && targetShotIndexes.has(record.shotIndex))),
+  );
+
+  return deletedRecords;
 }

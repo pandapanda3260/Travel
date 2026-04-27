@@ -1,23 +1,64 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import {
+  formatNarrationScriptLines,
+  getShotsForNarrationSegment,
+  parseNarrationScriptLines,
+  type NarrationScriptLine,
+} from "./narration-script";
+import type { ProgressCallback } from "./progress-stream";
+import {
   countNarrationCharacters,
+  estimateNarrationReadingSeconds,
+  getNarrationEmergencyTrimCharacters,
   getNarrationLengthGuidance,
+  getNarrationRepairTriggerCharacters,
+  isNarrationClearlyOverDuration,
   sanitizeNarrationText,
   stripCodeFence,
   trimNarrationToCharacterLimit,
 } from "./narration";
 import {
+  evaluateNarrationHumanizationTarget,
+  NARRATION_HUMANIZATION_TARGET,
+  scoreNarrationHumanization,
+  shouldRewriteNarrationForHumanization,
+} from "./narration-humanization-evaluator";
+import {
   buildNarrationDeliveryStrategies,
   buildNarrationStandardsPromptBlock,
   inspectNarrationQuality,
 } from "./narration-standards";
-import { buildNarrationPolishSystemPrompt, buildNarrationRepairSystemPrompt } from "./narration-prompt-library";
-import { PROMPT_GENERATION_RUNTIME_HARD_RULES, SHOT_PLAN_RUNTIME_HARD_RULES } from "./prompt-runtime-library";
+import {
+  buildNarrationHumanizationRewriteSystemPrompt,
+  buildNarrationPolishSystemPrompt,
+  buildNarrationRepairSystemPrompt,
+} from "./narration-prompt-library";
 import { callTaskGenerationLlm, getTaskGenerationRuntime } from "./task-generation-runtime";
+import {
+  buildNarrationScriptFromSubtitlePlan,
+  normalizeSubtitlePlanSource,
+  syncNarrationScriptIntoSubtitlePlan,
+  usesSegmentLevelSubtitleSource,
+} from "./subtitle-plan-source";
 import { buildDirectorPlanFromTaskData, buildDraftBundleFromDirectorPlan } from "./video-task-director";
 import { deriveVideoTaskStructure } from "./video-task-structure";
+import { getVideoTypeCategoryPrompt, getVideoTypeAddonPrompt } from "./video-type-prompts";
+import { WeightedProgressTracker } from "./weighted-progress-tracker";
+import { applyHotelAssetPlanning } from "./hotel-shot-planner";
+import { buildHotelCapturedMaterialContext } from "./hotel-shot-candidates";
 import {
+  applyAgencyGuideVoiceoverSparseCharacters,
+  getAgencyGuideVoiceoverMaxCharacterShots,
+} from "./agency-guide-voiceover-policy";
+import {
+  applyMainCharacterAppearancePolicy,
+  getMainCharacterAppearancePolicy,
+} from "./main-character-appearance-policy";
+import {
+  getVideoTaskWorkflowKind,
   getVideoTaskTypeProfile,
+  isHotelVideoType,
+  usesCapturedMaterialFirstWorkflow,
   type ShotPlan,
   type ShotPlanItem,
   type TaskConstraints,
@@ -25,7 +66,10 @@ import {
   type VideoTaskDraftBundle,
   type VideoTaskParameterBundle,
   type VideoTaskSource,
+  type VideoTaskVideoType,
 } from "./video-task-schema";
+import type { TaskHotelAssetRecord } from "./task-hotel-asset-store";
+import type { VideoMaterialRecord } from "./video-material-store";
 
 function getImageOrientationLabel(size: string) {
   const [widthText, heightText] = size.split("x");
@@ -69,6 +113,86 @@ function getPlannedStoryShotDurationSeconds(parameters: VideoTaskParameterBundle
   );
 }
 
+function getPlannedNarrationSegmentDurationSeconds(parameters: VideoTaskParameterBundle, segmentIndex?: number | null) {
+  if (parameters.video.segmentMode === "hybrid_intro_plus_montage" && (segmentIndex ?? 1) === 1) {
+    return Math.max(1, parameters.video.introSegmentDurationSeconds ?? Math.min(3, parameters.video.durationSeconds));
+  }
+
+  return Math.max(1, parameters.video.durationSeconds);
+}
+
+function getPlannedNarrationReferenceDurationSeconds(
+  parameters: VideoTaskParameterBundle,
+  segmentIndex?: number | null,
+) {
+  return usesSegmentLevelSubtitleSource(parameters.video.videoType)
+    ? getPlannedNarrationSegmentDurationSeconds(parameters, segmentIndex)
+    : getPlannedStoryShotDurationSeconds(parameters);
+}
+
+function createDraftBundleProgressTracker(
+  onProgress: ProgressCallback | undefined,
+  parameters: VideoTaskParameterBundle,
+) {
+  if (!onProgress) {
+    return null;
+  }
+
+  const storyShotCount = getPlannedStoryShotCount(parameters);
+  const segmentCount = Math.max(1, parameters.video.segmentCount);
+  const hasVoice = getVideoTaskTypeProfile(parameters.video.videoType).hasVoice;
+
+  return new WeightedProgressTracker(
+    onProgress,
+    [
+      {
+        id: "skeleton",
+        weight: 3.2 + storyShotCount * 0.22,
+        estimatedMs: 7_200 + storyShotCount * 220,
+      },
+      { id: "repair_1", weight: 1.3, estimatedMs: 4_200 },
+      { id: "repair_2", weight: 1.3, estimatedMs: 4_200 },
+      {
+        id: "visual_enrichment",
+        weight: 1.8 + storyShotCount * 0.12,
+        estimatedMs: 4_200 + storyShotCount * 130,
+      },
+      {
+        id: "subject_enrichment",
+        weight: 1.6 + storyShotCount * 0.1,
+        estimatedMs: 4_000 + storyShotCount * 110,
+      },
+      {
+        id: "subtitle_enrichment",
+        weight: hasVoice ? 1.6 + segmentCount * 0.16 : 1.1,
+        estimatedMs: hasVoice ? 3_900 + segmentCount * 170 : 2_600,
+      },
+      {
+        id: "prompt_generation",
+        weight: 2.3 + storyShotCount * 0.18,
+        estimatedMs: 5_300 + storyShotCount * 160,
+      },
+      {
+        id: "narration_polish",
+        weight: hasVoice ? 1.7 + segmentCount * 0.14 : 0.9,
+        estimatedMs: hasVoice ? 4_300 + segmentCount * 180 : 2_100,
+      },
+      {
+        id: "narration_repair",
+        weight: hasVoice ? 1.4 + segmentCount * 0.12 : 0.6,
+        estimatedMs: hasVoice ? 3_700 + segmentCount * 170 : 1_400,
+      },
+      { id: "build_director_plan", weight: 0.9, estimatedMs: 800 },
+    ],
+    {
+      step: "shot_plan",
+      floorPercent: 2,
+      capPercent: 99,
+      tickMs: 400,
+    },
+  );
+}
+
 function getExpectedDurationRangeLabel(range: VideoTaskParameterBundle["video"]["expectedDurationRange"]) {
   switch (range) {
     case "25_35":
@@ -81,8 +205,15 @@ function getExpectedDurationRangeLabel(range: VideoTaskParameterBundle["video"][
   }
 }
 
-function buildSourceSummary(source: VideoTaskSource, parameters: VideoTaskParameterBundle) {
-  const narrationGuidance = getNarrationLengthGuidance(getPlannedStoryShotDurationSeconds(parameters));
+function buildSourceSummary(
+  source: VideoTaskSource,
+  parameters: VideoTaskParameterBundle,
+  options?: {
+    hotelAssets?: TaskHotelAssetRecord[];
+    referenceVideoMaterial?: VideoMaterialRecord | null;
+  },
+) {
+  const narrationGuidance = getNarrationLengthGuidance(getPlannedNarrationReferenceDurationSeconds(parameters));
   const videoTypeProfile = getVideoTaskTypeProfile(parameters.video.videoType);
   const templatePromptOnly = source.videoTemplatePrompt.trim() || null;
   const autoStructure = deriveVideoTaskStructure({
@@ -93,6 +224,14 @@ function buildSourceSummary(source: VideoTaskSource, parameters: VideoTaskParame
     requestedDurationSeconds: parameters.video.durationSeconds,
     requestedStoryShotsPerSegment: parameters.video.storyShotsPerSegment,
   });
+  const capturedMaterialContext =
+    isHotelVideoType(parameters.video.videoType) && usesCapturedMaterialFirstWorkflow(parameters.video.videoType)
+      ? buildHotelCapturedMaterialContext({
+          hotelAssets: options?.hotelAssets ?? [],
+          referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+          workflowKind: getVideoTaskWorkflowKind(parameters.video.videoType),
+        })
+      : null;
 
   return JSON.stringify(
     {
@@ -157,6 +296,7 @@ function buildSourceSummary(source: VideoTaskSource, parameters: VideoTaskParame
         "镜头计划与提示词生成的系统提示词由服务端 constraint 预设与 constraint-prompt-store 注入，不在此 JSON 内展开全文。",
       automationNote:
         "输出片段数、规划镜头数、单片段时长等结构参数由视频类型与期望时长先自动推导，再作为上下文交给模型继续细化。",
+      capturedMaterialContext,
     },
     null,
     2,
@@ -171,12 +311,37 @@ function buildConstraintRules(constraints: TaskConstraints): string[] {
   const rules: string[] = [];
 
   if (constraints.peopleStructure) {
-    rules.push(`人物结构约束：本视频的人物组合为 ${constraints.peopleStructure}。`);
+    const structureMap: Record<string, string> = {
+      "2_adults_2_children": "2个大人 + 2个小孩（共4人）。大人和小孩的人数必须严格匹配，不能多也不能少。",
+      "2_adults_1_child": "2个大人 + 1个小孩（共3人）。",
+      "1_adult_2_children": "1个大人 + 2个小孩（共3人）。",
+      "1_adult_1_child": "1个大人 + 1个小孩（共2人）。",
+      couple: "2个成年人（共2人）。",
+    };
+    const desc = structureMap[constraints.peopleStructure] ?? constraints.peopleStructure;
+    rules.push(
+      `人物结构（强约束）：本视频中出镜人物固定为 ${desc} 每个有人物的镜头都必须严格遵守这个人数组合，绝对不能出现多余的人物，也不能少人。`,
+    );
   }
 
   if (constraints.adultGenderRule === "one_male_one_female") {
-    rules.push("性别约束：如果有两个成年人出镜，必须设定为一男一女（father 和 mother），禁止两个同性成年人组合。");
+    rules.push(
+      "成人性别（强约束）：两个成年人必须是一男一女（father 和 mother），绝对禁止出现两个同性成年人。不能出现两位男士或两位女士并排的画面。",
+    );
   }
+
+  if (constraints.peopleStructure?.includes("children")) {
+    rules.push(
+      "儿童一致性（强约束）：小孩的性别、年龄段、身高比例必须在所有镜头中保持完全一致，不能在不同镜头中变成不同性别或不同年龄段的儿童。儿童的性别和年龄段应在第一个出现儿童的镜头中确定，后续所有镜头必须严格保持一致。如果用户提示词中指定了儿童的性别或年龄，必须按用户要求执行；如果没有特别指定，默认约4-8岁。",
+    );
+  }
+
+  rules.push(
+    "人物比例（强约束）：画面中人物的大小比例必须符合真实物理透视关系。中景人物不能比远景建筑还小，近景人物不能过大变形。大人和小孩之间的身高比例必须符合现实。",
+  );
+  rules.push(
+    "人物行为（强约束）：不同人物之间的肢体接触和互动必须自然合理，禁止出现不合常理的亲密接触（如陌生人之间握手、拥抱等）。家庭成员之间的互动应温馨自然。",
+  );
 
   if (constraints.requirePeopleInEveryShot) {
     rules.push("出镜约束：每个镜头必须有人物出镜，禁止纯空镜。");
@@ -187,9 +352,11 @@ function buildConstraintRules(constraints: TaskConstraints): string[] {
   }
 
   if (constraints.characterConsistency === "high") {
-    rules.push("人物一致性（高）：所有出现人物的镜头，人物外观、年龄段、服装风格必须保持一致，不能换人。");
+    rules.push(
+      "人物一致性（高）：所有出现人物的镜头，人物外观（面容、发型、肤色）、年龄段、服装风格、身材比例必须保持完全一致，不能换人、不能变脸、不能变装。",
+    );
   } else if (constraints.characterConsistency === "medium") {
-    rules.push("人物一致性（中）：同一个角色在不同镜头中应保持可辨识的相似特征。");
+    rules.push("人物一致性（中）：同一个角色在不同镜头中应保持可辨识的相似特征，包括性别、年龄段和整体外观。");
   }
 
   if (constraints.sceneConsistency === "high") {
@@ -205,15 +372,17 @@ function buildConstraintRules(constraints: TaskConstraints): string[] {
   return rules;
 }
 
-function buildShotPlanSystemPrompt(constraints: TaskConstraints) {
+function buildShotPlanSystemPrompt(constraints: TaskConstraints, videoType?: VideoTaskVideoType) {
+  const resolvedType = videoType ?? "agency_guide_voiceover";
   const constraintRules = buildConstraintRules(constraints);
-  const basePrompt = getEffectiveConstraintPrompt("shot_plan");
+  const mainPrompt = getEffectiveConstraintPrompt("shot_plan");
+  const categoryPrompt = getVideoTypeCategoryPrompt(resolvedType, "shot_plan");
+  const addonPrompt = getVideoTypeAddonPrompt(resolvedType, "shot_plan");
 
   return [
-    basePrompt,
-    "",
-    "系统底线要求（始终生效）：",
-    ...SHOT_PLAN_RUNTIME_HARD_RULES.map((rule, index) => `${index + 1}. ${rule}`),
+    mainPrompt,
+    categoryPrompt,
+    addonPrompt,
     ...(constraintRules.length > 0
       ? ["", "本任务的专属约束（必须严格遵守）：", ...constraintRules.map((r, i) => `${i + 1}. ${r}`)]
       : []),
@@ -282,12 +451,41 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
   };
 }
 
+function applyVideoTypeShotPlanPolicy(plan: ShotPlan, videoType: VideoTaskVideoType) {
+  const normalizedPlan = normalizeSubtitlePlanSource(plan, videoType);
+  if (videoType === "agency_guide_voiceover") {
+    return applyAgencyGuideVoiceoverSparseCharacters(normalizedPlan);
+  }
+  return normalizedPlan;
+}
+
 function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBundle): ShotPlan | null {
   try {
     const parsed = JSON.parse(stripCodeFence(content)) as {
       globalStyle?: string;
       totalDurationSeconds?: number;
-      shots?: Array<Partial<ShotPlanItem>>;
+      styleConstraints?: Record<string, string>;
+      reusableModules?: Record<string, string>;
+      narrativeCurves?: Record<string, string>;
+      subtitlePlan?: Array<{
+        segmentIndex?: number;
+        segmentId?: string;
+        subtitles?: Array<{
+          text?: string;
+          startAtSeconds?: number;
+          durationSeconds?: number;
+          charCount?: number;
+          coveredShotIndexes?: number[];
+        }>;
+      }>;
+      shots?: Array<
+        Partial<ShotPlanItem> & {
+          visual?: Record<string, unknown>;
+          subject?: Record<string, unknown>;
+          cinematography?: Record<string, unknown>;
+          structure?: Record<string, unknown>;
+        }
+      >;
     };
 
     if (!Array.isArray(parsed.shots) || parsed.shots.length === 0) {
@@ -296,6 +494,8 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
 
     const shots: ShotPlanItem[] = parsed.shots.map((raw, i) => ({
       shotIndex: raw.shotIndex ?? i + 1,
+      segmentId: raw.segmentId ?? null,
+      segmentIndex: raw.segmentIndex ?? null,
       purpose: raw.purpose ?? "experience",
       location: raw.location ?? "",
       hasCharacters: raw.hasCharacters ?? false,
@@ -311,14 +511,123 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
       durationSeconds: Math.max(0.8, Number(raw.durationSeconds) || getPlannedStoryShotDurationSeconds(parameters)),
       sceneDescription: raw.sceneDescription ?? "",
       narrationHint: raw.narrationHint ?? "",
+      startAtSeconds: Number(raw.startAtSeconds) || undefined,
+      endAtSeconds: Number(raw.endAtSeconds) || undefined,
+      functionTag: typeof raw.functionTag === "string" ? raw.functionTag : undefined,
+      sellingPointType: typeof raw.sellingPointType === "string" ? raw.sellingPointType : undefined,
+      visual: raw.visual
+        ? {
+            sceneSetting: String(raw.visual.sceneSetting ?? ""),
+            shotScale: String(raw.visual.shotScale ?? ""),
+            wideContent: String(raw.visual.wideContent ?? ""),
+            midContent: String(raw.visual.midContent ?? ""),
+            closeContent: String(raw.visual.closeContent ?? ""),
+            composition: String(raw.visual.composition ?? ""),
+            colorTone: String(raw.visual.colorTone ?? ""),
+            keyDetails: String(raw.visual.keyDetails ?? ""),
+          }
+        : undefined,
+      subject: raw.subject
+        ? {
+            mainCharacterCount: Number(raw.subject.mainCharacterCount) || 0,
+            mainCharacterGender: String(raw.subject.mainCharacterGender ?? ""),
+            relationship: String(raw.subject.relationship ?? ""),
+            clothing: String(raw.subject.clothing ?? ""),
+            ageRange: String(raw.subject.ageRange ?? ""),
+            features: String(raw.subject.features ?? ""),
+            appearance: String(raw.subject.appearance ?? ""),
+            style: String(raw.subject.style ?? ""),
+            position: String(raw.subject.position ?? ""),
+            extraCount: Number(raw.subject.extraCount) || 0,
+            extraDistribution: String(raw.subject.extraDistribution ?? ""),
+            extraScale: String(raw.subject.extraScale ?? ""),
+          }
+        : undefined,
+      cinematography: raw.cinematography
+        ? {
+            shotType: String(raw.cinematography.shotType ?? ""),
+            rhythm: String(raw.cinematography.rhythm ?? ""),
+            infoDensity: String(raw.cinematography.infoDensity ?? ""),
+            lighting: String(raw.cinematography.lighting ?? ""),
+          }
+        : undefined,
+      structure: raw.structure
+        ? {
+            phase: String(raw.structure.phase ?? ""),
+            prevTransition: String(raw.structure.prevTransition ?? ""),
+            nextTransition: String(raw.structure.nextTransition ?? ""),
+            transitionType: String(raw.structure.transitionType ?? ""),
+          }
+        : undefined,
     }));
 
-    return {
-      shots,
-      globalStyle: parsed.globalStyle?.trim() ?? "",
-      totalDurationSeconds: Number(parsed.totalDurationSeconds) || shots.reduce((sum, s) => sum + s.durationSeconds, 0),
-      validationErrors: [],
-    };
+    let computedStartTime = 0;
+    for (const shot of shots) {
+      if (shot.startAtSeconds == null) {
+        shot.startAtSeconds = Math.round(computedStartTime * 100) / 100;
+      }
+      if (shot.endAtSeconds == null) {
+        shot.endAtSeconds = Math.round((shot.startAtSeconds + shot.durationSeconds) * 100) / 100;
+      }
+      computedStartTime = shot.endAtSeconds;
+    }
+
+    const subtitlePlan = Array.isArray(parsed.subtitlePlan)
+      ? parsed.subtitlePlan.map((seg) => ({
+          segmentIndex: Number(seg.segmentIndex) || 0,
+          segmentId: String(seg.segmentId ?? ""),
+          subtitles: Array.isArray(seg.subtitles)
+            ? seg.subtitles.map((sub) => ({
+                text: String(sub.text ?? ""),
+                startAtSeconds: Number(sub.startAtSeconds) || 0,
+                durationSeconds: Number(sub.durationSeconds) || 0,
+                charCount:
+                  Number(sub.charCount) || String(sub.text ?? "").replace(/[^\u4e00-\u9fff\u3400-\u4dbf]/g, "").length,
+                coveredShotIndexes: Array.isArray(sub.coveredShotIndexes) ? sub.coveredShotIndexes.map(Number) : [],
+              }))
+            : [],
+        }))
+      : undefined;
+
+    return applyVideoTypeShotPlanPolicy(
+      {
+        shots,
+        globalStyle: parsed.globalStyle?.trim() ?? "",
+        totalDurationSeconds:
+          Number(parsed.totalDurationSeconds) || shots.reduce((sum, s) => sum + s.durationSeconds, 0),
+        validationErrors: [],
+        styleConstraints: parsed.styleConstraints
+          ? {
+              style: String(parsed.styleConstraints.style ?? ""),
+              videoType: String(parsed.styleConstraints.videoType ?? ""),
+              forbidden: String(parsed.styleConstraints.forbidden ?? ""),
+              realismLevel: String(parsed.styleConstraints.realismLevel ?? ""),
+              styleConsistency: String(parsed.styleConstraints.styleConsistency ?? ""),
+              characterConsistency: String(parsed.styleConstraints.characterConsistency ?? ""),
+            }
+          : undefined,
+        reusableModules: parsed.reusableModules
+          ? {
+              characterSetting: String(parsed.reusableModules.characterSetting ?? ""),
+              sceneSetting: String(parsed.reusableModules.sceneSetting ?? ""),
+              actionTemplates: String(parsed.reusableModules.actionTemplates ?? ""),
+              shotTemplates: String(parsed.reusableModules.shotTemplates ?? ""),
+            }
+          : undefined,
+        narrativeCurves: parsed.narrativeCurves
+          ? {
+              openingStrategy: String(parsed.narrativeCurves.openingStrategy ?? ""),
+              midStructure: String(parsed.narrativeCurves.midStructure ?? ""),
+              closingStrategy: String(parsed.narrativeCurves.closingStrategy ?? ""),
+              rhythmCurve: String(parsed.narrativeCurves.rhythmCurve ?? ""),
+              emotionCurve: String(parsed.narrativeCurves.emotionCurve ?? ""),
+              infoOrder: String(parsed.narrativeCurves.infoOrder ?? ""),
+            }
+          : undefined,
+        subtitlePlan,
+      },
+      parameters.video.videoType,
+    );
   } catch {
     return null;
   }
@@ -399,6 +708,16 @@ function validateShotPlan(plan: ShotPlan, _source: VideoTaskSource, parameters: 
     }
   }
 
+  if (parameters.video.videoType === "agency_guide_voiceover" && plan.shots.length > 0) {
+    const characterShotCount = plan.shots.filter(
+      (shot) => shot.hasCharacters || (shot.subject?.mainCharacterCount ?? 0) > 0,
+    ).length;
+    const maxCharacterShots = getAgencyGuideVoiceoverMaxCharacterShots(plan.shots.length);
+    if (characterShotCount > maxCharacterShots) {
+      errors.push(`空镜旁白类型的人物主体镜头过多：最多允许 ${maxCharacterShots} 个，当前为 ${characterShotCount} 个`);
+    }
+  }
+
   if (
     profile.hasVoice &&
     parameters.video.segmentMode !== "single_speaking" &&
@@ -468,14 +787,12 @@ function buildRepairPrompt(plan: ShotPlan, errors: string[]): string {
 // ---------------------------------------------------------------------------
 
 function buildPromptGenerationSystemPrompt(parameters: VideoTaskParameterBundle) {
-  return [
-    getEffectiveConstraintPrompt("prompt_generation"),
-    "",
-    "以下是始终生效的底线要求：",
-    ...PROMPT_GENERATION_RUNTIME_HARD_RULES.map((rule, index) => `${index + 1}. ${rule}`),
-    "",
-    buildNarrationStandardsPromptBlock(parameters.video.videoType),
-  ].join("\n");
+  const videoType = parameters.video.videoType;
+  const mainPrompt = getEffectiveConstraintPrompt("prompt_generation");
+  const categoryPrompt = getVideoTypeCategoryPrompt(videoType, "prompt_generation");
+  const addonPrompt = getVideoTypeAddonPrompt(videoType, "prompt_generation");
+
+  return [mainPrompt, categoryPrompt, addonPrompt, "", buildNarrationStandardsPromptBlock(videoType)].join("\n");
 }
 
 function buildPromptGenerationUserContent(
@@ -483,11 +800,21 @@ function buildPromptGenerationUserContent(
   parameters: VideoTaskParameterBundle,
   source: VideoTaskSource,
 ) {
-  const narrationGuidance = getNarrationLengthGuidance(getPlannedStoryShotDurationSeconds(parameters));
-  const voicedShots = plan.shots.filter((shot) => shot.hasVoice || shot.hasSubtitle);
+  const normalizedPlan = normalizeSubtitlePlanSource(plan, parameters.video.videoType);
+  const averageSegmentSubtitleDuration =
+    normalizedPlan.subtitlePlan && normalizedPlan.subtitlePlan.length > 0
+      ? normalizedPlan.subtitlePlan.reduce((sum, segment) => sum + (segment.subtitles[0]?.durationSeconds ?? 0), 0) /
+        normalizedPlan.subtitlePlan.length
+      : getPlannedNarrationReferenceDurationSeconds(parameters);
+  const narrationGuidance = getNarrationLengthGuidance(
+    usesSegmentLevelSubtitleSource(parameters.video.videoType)
+      ? Math.max(1, Math.round(averageSegmentSubtitleDuration || parameters.video.durationSeconds))
+      : getPlannedStoryShotDurationSeconds(parameters),
+  );
+  const voicedShots = normalizedPlan.shots.filter((shot) => shot.hasVoice || shot.hasSubtitle);
   const deliveryStrategyMap = new Map(
     buildNarrationDeliveryStrategies(
-      plan.shots.map((shot) => ({
+      normalizedPlan.shots.map((shot) => ({
         shotIndex: shot.shotIndex,
         purpose: shot.purpose,
         hasVoice: shot.hasVoice,
@@ -500,10 +827,107 @@ function buildPromptGenerationUserContent(
       parameters.video.videoType,
     ).map((item) => [item.shotIndex, item]),
   );
+  const segmentNarrationBudgets = usesSegmentLevelSubtitleSource(parameters.video.videoType)
+    ? (normalizedPlan.subtitlePlan ?? []).map((segment) => {
+        const segmentShots = normalizedPlan.shots.filter(
+          (shot) =>
+            (shot.segmentId && shot.segmentId === segment.segmentId) ||
+            (!shot.segmentId && (shot.segmentIndex ?? shot.shotIndex) === segment.segmentIndex),
+        );
+        const durationSeconds =
+          segment.subtitles[0]?.durationSeconds ||
+          Number(segmentShots.reduce((sum, shot) => sum + Math.max(0.8, shot.durationSeconds || 0), 0).toFixed(2)) ||
+          getPlannedNarrationSegmentDurationSeconds(parameters, segment.segmentIndex);
+        const guidance = getNarrationLengthGuidance(durationSeconds);
+        return {
+          segmentIndex: segment.segmentIndex,
+          segmentId: segment.segmentId,
+          durationSeconds,
+          referenceCharacterRange: [guidance.minCharacters, guidance.suggestedCharacters] as [number, number],
+          referenceMaxCharacters: guidance.maxCharacters,
+          coveredShotIndexes: segment.subtitles[0]?.coveredShotIndexes?.length
+            ? segment.subtitles[0].coveredShotIndexes
+            : segmentShots.map((shot) => shot.shotIndex),
+        };
+      })
+    : Array.from(
+        normalizedPlan.shots.reduce<
+          Map<
+            number,
+            {
+              segmentIndex: number;
+              segmentId: string;
+              durationSeconds: number;
+              referenceCharacterRange: [number, number];
+              referenceMaxCharacters: number;
+              coveredShotIndexes: number[];
+            }
+          >
+        >((map, shot) => {
+          const segmentIndex = shot.segmentIndex ?? shot.shotIndex;
+          const current = map.get(segmentIndex);
+          const nextDuration = Number(
+            ((current?.durationSeconds ?? 0) + Math.max(0.8, shot.durationSeconds || 0)).toFixed(2),
+          );
+          const guidance = getNarrationLengthGuidance(nextDuration);
+          map.set(segmentIndex, {
+            segmentIndex,
+            segmentId: shot.segmentId ?? `segment-${segmentIndex}`,
+            durationSeconds: nextDuration,
+            referenceCharacterRange: [guidance.minCharacters, guidance.suggestedCharacters],
+            referenceMaxCharacters: guidance.maxCharacters,
+            coveredShotIndexes: [...(current?.coveredShotIndexes ?? []), shot.shotIndex],
+          });
+          return map;
+        }, new Map()),
+      ).map(([, item]) => item);
+  const narrationExecutionNotes = usesSegmentLevelSubtitleSource(parameters.video.videoType)
+    ? segmentNarrationBudgets.map((segmentBudget, index) => {
+        const segmentShots = normalizedPlan.shots.filter(
+          (shot) => (shot.segmentIndex ?? shot.shotIndex) === segmentBudget.segmentIndex,
+        );
+        const anchorShot = segmentShots[0] ?? null;
+        return {
+          segmentIndex: segmentBudget.segmentIndex,
+          coveredShotIndexes: segmentBudget.coveredShotIndexes,
+          durationSeconds: segmentBudget.durationSeconds,
+          purpose: anchorShot?.purpose ?? "experience",
+          emotion: anchorShot?.emotion ?? "",
+          sceneDescription: segmentShots
+            .map((shot) => shot.sceneDescription)
+            .filter(Boolean)
+            .join("；"),
+          narrationHint: segmentShots
+            .map((shot) => shot.narrationHint)
+            .filter(Boolean)
+            .join("；"),
+          styleGoal: getNarrationStyleGoalForPurpose(anchorShot?.purpose ?? "experience"),
+          transitionNeed: index > 0 ? "要和上一片段自然衔接" : "负责起势和钩子",
+          nextShotRelation:
+            index < segmentNarrationBudgets.length - 1
+              ? `下一句需要顺着片段 ${segmentNarrationBudgets[index + 1]?.segmentIndex} 往下走`
+              : "负责收束",
+          deliveryStrategy: anchorShot?.shotIndex ? (deliveryStrategyMap.get(anchorShot.shotIndex) ?? null) : null,
+        };
+      })
+    : voicedShots.map((shot, index) => ({
+        shotIndex: shot.shotIndex,
+        purpose: shot.purpose,
+        durationSeconds: shot.durationSeconds,
+        emotion: shot.emotion,
+        styleGoal: getNarrationStyleGoalForPurpose(shot.purpose),
+        transitionNeed: index > 0 ? "要考虑与上一句自然衔接" : "负责起势和钩子",
+        nextShotRelation:
+          index < voicedShots.length - 1
+            ? `下一句需要顺着镜头 ${voicedShots[index + 1]?.shotIndex} 往下走`
+            : "负责收束",
+        deliveryStrategy: deliveryStrategyMap.get(shot.shotIndex) ?? null,
+      }));
 
   return JSON.stringify(
     {
-      shotPlan: plan,
+      narrationStyleBrief: buildNarrationStyleBrief(source, parameters.video.videoType, normalizedPlan),
+      shotPlan: normalizedPlan,
       structureBlueprint: deriveVideoTaskStructure({
         source,
         videoType: parameters.video.videoType,
@@ -521,20 +945,11 @@ function buildPromptGenerationUserContent(
       renderSegmentCount: parameters.video.segmentCount,
       plannedStoryShotCount: getPlannedStoryShotCount(parameters),
       narrationCharacterBudget: narrationGuidance,
+      segmentNarrationBudgets,
       storyboardEnabled: parameters.audio.storyboardEnabled,
-      narrationExecutionNotes: voicedShots.map((shot, index) => ({
-        shotIndex: shot.shotIndex,
-        purpose: shot.purpose,
-        durationSeconds: shot.durationSeconds,
-        emotion: shot.emotion,
-        styleGoal: getNarrationStyleGoalForPurpose(shot.purpose),
-        transitionNeed: index > 0 ? "要考虑与上一句自然衔接" : "负责起势和钩子",
-        nextShotRelation:
-          index < voicedShots.length - 1
-            ? `下一句需要顺着镜头 ${voicedShots[index + 1]?.shotIndex} 往下走`
-            : "负责收束",
-        deliveryStrategy: deliveryStrategyMap.get(shot.shotIndex) ?? null,
-      })),
+      characterAppearancePolicy: getMainCharacterAppearancePolicy(source),
+      narrativeCurves: normalizedPlan.narrativeCurves ?? null,
+      narrationExecutionNotes,
     },
     null,
     2,
@@ -546,24 +961,42 @@ function buildFallbackDraftBundleFromShotPlan(
   parameters: VideoTaskParameterBundle,
 ): VideoTaskDraftBundle {
   const orientation = getImageOrientationLabel(parameters.image.size);
+  const normalizedPlan = normalizeSubtitlePlanSource(plan, parameters.video.videoType);
 
-  const imageLines = plan.shots
-    .map((shot) => `镜头${shot.shotIndex}：${shot.sceneDescription}，${orientation}，写实摄影风格，电影级质感。`)
+  const imageLines = normalizedPlan.shots
+    .map((shot) => {
+      if (shot.img2imgPrompt?.trim()) {
+        return `镜头${shot.shotIndex}：${shot.img2imgPrompt.trim()}`;
+      }
+      const noCharacterRule =
+        parameters.video.videoType === "agency_guide_voiceover"
+          ? shot.hasCharacters || (shot.subject?.mainCharacterCount ?? 0) > 0
+            ? "人物只在强相关体验场景中自然点缀，不抢景点主体，不成人像写真感"
+            : "无主角人物出镜，不要正面人物主体，主体是景点、建筑、环境或设施本身"
+          : "";
+      return `镜头${shot.shotIndex}：${shot.sceneDescription}，${orientation}，写实摄影风格，电影级质感${noCharacterRule ? `，${noCharacterRule}` : ""}。no text, no letters, no words, no watermark, no collage, no split screen, single continuous image, realistic perspective and proportions。`;
+    })
     .join("\n");
 
-  const videoLines = plan.shots
+  const videoLines = normalizedPlan.shots
     .map(
       (shot) =>
-        `镜头${shot.shotIndex}：${shot.action}，${shot.cameraMovement === "auto" ? "自然运镜" : shot.cameraMovement}，${shot.emotion}，${shot.durationSeconds}秒。`,
+        `镜头${shot.shotIndex}：${
+          shot.i2vPrompt?.trim()
+            ? shot.i2vPrompt.trim()
+            : `${shot.action}，${shot.cameraMovement === "auto" ? "自然运镜" : shot.cameraMovement}，${shot.emotion}，${shot.durationSeconds}秒。`
+        }`,
     )
     .join("\n");
 
-  const narrationLines = plan.shots
-    .map(
-      (shot) =>
-        `镜头${shot.shotIndex}：${shot.hasVoice === false && shot.hasSubtitle === false ? "" : sanitizeNarrationText(shot.narrationHint)}`,
-    )
-    .join("\n");
+  const narrationLines = usesSegmentLevelSubtitleSource(parameters.video.videoType)
+    ? buildNarrationScriptFromSubtitlePlan(normalizedPlan, parameters.video.videoType)
+    : normalizedPlan.shots
+        .map(
+          (shot) =>
+            `镜头${shot.shotIndex}：${shot.hasVoice === false && shot.hasSubtitle === false ? "" : sanitizeNarrationText(shot.narrationHint)}`,
+        )
+        .join("\n");
 
   return {
     textToImagePrompt: imageLines,
@@ -582,20 +1015,25 @@ function buildFallbackDraftBundle(source: VideoTaskSource, parameters: VideoTask
   const shotDuration = getPlannedStoryShotDurationSeconds(parameters);
   const totalDurationSeconds = getPlannedTotalDurationSeconds(parameters);
   const narrationSubject = source.productInfoTitle?.trim() || "酒店亮点";
-  const narrationLines = Array.from({ length: shotCount }, (_, index) => {
-    const isVoiced = shotCount <= 3 || index === 0 || index === shotCount - 1 || (index + 1) % 2 === 1;
+  const narrationLineCount = usesSegmentLevelSubtitleSource(parameters.video.videoType)
+    ? Math.max(1, parameters.video.segmentCount)
+    : shotCount;
+  const narrationLabel = usesSegmentLevelSubtitleSource(parameters.video.videoType) ? "片段" : "镜头";
+  const narrationLines = Array.from({ length: narrationLineCount }, (_, index) => {
+    const isVoiced =
+      narrationLineCount <= 3 || index === 0 || index === narrationLineCount - 1 || (index + 1) % 2 === 1;
     if (!isVoiced) {
-      return `镜头${index + 1}：`;
+      return `${narrationLabel}${index + 1}：`;
     }
     if (index === 0) {
-      return `镜头${index + 1}：先把${narrationSubject}最抓人的地方说出来`;
+      return `${narrationLabel}${index + 1}：先把${narrationSubject}最抓人的地方说出来`;
     }
 
-    if (index === shotCount - 1) {
-      return `镜头${index + 1}：最后把${narrationSubject}值得立刻出发的感觉收住`;
+    if (index === narrationLineCount - 1) {
+      return `${narrationLabel}${index + 1}：最后把${narrationSubject}值得立刻出发的感觉收住`;
     }
 
-    return `镜头${index + 1}：把${narrationSubject}里最有画面感的一点讲清楚`;
+    return `${narrationLabel}${index + 1}：把${narrationSubject}里最有画面感的一点讲清楚`;
   }).join("\n");
 
   return {
@@ -609,35 +1047,107 @@ function buildFallbackDraftBundle(source: VideoTaskSource, parameters: VideoTask
 // Step 3.5: Narration length repair
 // ---------------------------------------------------------------------------
 
-function parseNarrationLines(script: string): Array<{ shotIndex: number; text: string }> {
-  const pattern = /镜头\s*(\d+)\s*[.．、:：]?\s*/g;
-  const matches = Array.from(script.matchAll(pattern));
-  if (matches.length === 0) return [];
-  return matches.map((match, mi) => {
-    const startIdx = (match.index ?? 0) + match[0].length;
-    const endIdx = matches[mi + 1]?.index ?? script.length;
-    return { shotIndex: Number(match[1]), text: script.slice(startIdx, endIdx).trim() };
-  });
+function getNarrationLineShots(line: NarrationScriptLine, shotPlan?: ShotPlan | null) {
+  if (line.scope === "segment") {
+    return getShotsForNarrationSegment(shotPlan, line.segmentIndex);
+  }
+
+  const targetShot = shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex) ?? null;
+  return targetShot ? [targetShot] : [];
 }
 
-function reassembleNarrationScript(lines: Array<{ shotIndex: number; text: string }>): string {
-  return lines.map((l) => `镜头${l.shotIndex}：${l.text}`).join("\n");
+function getNarrationLineContext(line: NarrationScriptLine, shotPlan?: ShotPlan | null) {
+  const relatedShots = getNarrationLineShots(line, shotPlan);
+  const anchorShot = relatedShots[0] ?? shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex) ?? null;
+
+  return {
+    relatedShots,
+    anchorShot,
+    purpose: anchorShot?.purpose ?? "experience",
+    location: Array.from(new Set(relatedShots.map((shot) => shot.location).filter(Boolean))).join("；"),
+    emotion: anchorShot?.emotion ?? "",
+    narrationHint: Array.from(new Set(relatedShots.map((shot) => shot.narrationHint).filter(Boolean))).join("；"),
+    sceneDescription: Array.from(new Set(relatedShots.map((shot) => shot.sceneDescription).filter(Boolean))).join("；"),
+    hasVoice:
+      relatedShots.some((shot) => shot.hasVoice || shot.hasSubtitle) ||
+      Boolean(anchorShot?.hasVoice || anchorShot?.hasSubtitle),
+    hasSubtitle: relatedShots.some((shot) => shot.hasSubtitle) || Boolean(anchorShot?.hasSubtitle),
+    requiresLipSync: relatedShots.some((shot) => shot.requiresLipSync) || Boolean(anchorShot?.requiresLipSync),
+    hasTalent: relatedShots.some((shot) => shot.hasTalent) || Boolean(anchorShot?.hasTalent),
+  };
+}
+
+function getFallbackNarrationText(line: NarrationScriptLine, shotPlan?: ShotPlan | null) {
+  const context = getNarrationLineContext(line, shotPlan);
+  return context.narrationHint || `${line.label}${line.index}亮点`;
 }
 
 /** 解说词超长时最多尝试缩写的轮数。 */
 export const NARRATION_LENGTH_MAX_REPAIR_ROUNDS = 2;
 
-const lowSignalNarrationPatterns = [/直接冲$/u, /太出片了$/u, /最值了$/u, /都逛完了$/u, /这样逛更省力$/u, /别乱订$/u];
+const lowSignalNarrationPatterns = [
+  /直接冲$/u,
+  /太出片了$/u,
+  /最值了$/u,
+  /都逛完了$/u,
+  /这样逛更省力$/u,
+  /别乱订$/u,
+  /直接抄作业/u,
+  /这趟.+就值了/u,
+  /顺路看/u,
+  /照样轻松/u,
+  /接得稳/u,
+  /一落地就有人接/u,
+  /快速住进.+休息/u,
+  /看底蕴/u,
+  /刚到门口就有度假感/u,
+  /干净利落这一路线/u,
+  /吃饭和遛娃都安排上了/u,
+  /氛围也很放松/u,
+  /整套体验都挺完整/u,
+  /经典景点都逛到了/u,
+];
 
-function getNarrationLineDurationSeconds(
+function getNarrationDurationSecondsForShot(
   shotIndex: number,
   parameters: VideoTaskParameterBundle,
   shotPlan?: ShotPlan | null,
 ) {
-  return (
-    shotPlan?.shots.find((shot) => shot.shotIndex === shotIndex)?.durationSeconds ??
-    getPlannedStoryShotDurationSeconds(parameters)
-  );
+  const targetShot = shotPlan?.shots.find((shot) => shot.shotIndex === shotIndex) ?? null;
+  if (targetShot && shotPlan?.shots?.length) {
+    const segmentShots = shotPlan.shots.filter(
+      (shot) =>
+        (targetShot.segmentId && shot.segmentId === targetShot.segmentId) ||
+        (!targetShot.segmentId && shot.segmentIndex != null && shot.segmentIndex === targetShot.segmentIndex),
+    );
+    const segmentDuration = segmentShots.reduce((sum, shot) => sum + Math.max(0, shot.durationSeconds || 0), 0);
+    if (segmentDuration > 0) {
+      return segmentDuration;
+    }
+    if (targetShot.durationSeconds > 0) {
+      return targetShot.durationSeconds;
+    }
+  }
+
+  return getPlannedNarrationReferenceDurationSeconds(parameters, targetShot?.segmentIndex ?? shotIndex);
+}
+
+function getNarrationLineDurationSeconds(
+  line: NarrationScriptLine,
+  parameters: VideoTaskParameterBundle,
+  shotPlan?: ShotPlan | null,
+) {
+  if (line.scope === "segment") {
+    const segmentDuration = getShotsForNarrationSegment(shotPlan, line.segmentIndex).reduce(
+      (sum, shot) => sum + Math.max(0, shot.durationSeconds || 0),
+      0,
+    );
+    if (segmentDuration > 0) {
+      return segmentDuration;
+    }
+  }
+
+  return getNarrationDurationSecondsForShot(line.shotIndex, parameters, shotPlan);
 }
 
 function getNarrationStyleGoalForPurpose(purpose: string) {
@@ -658,6 +1168,90 @@ function getNarrationStyleGoalForPurpose(purpose: string) {
   }
 }
 
+type NarrationStyleSourceContext = Pick<
+  VideoTaskSource,
+  "productInfoTitle" | "productInfoSnapshot" | "userPrompt" | "videoTemplatePrompt"
+>;
+
+function inferNarrationAudience(source: NarrationStyleSourceContext, videoType: VideoTaskVideoType) {
+  const context = [source.productInfoTitle, source.productInfoSnapshot, source.userPrompt, source.videoTemplatePrompt]
+    .filter(Boolean)
+    .join("\n");
+  const audiences: string[] = [];
+
+  if (/孩子|带娃|亲子|家庭|小朋友/u.test(context)) {
+    audiences.push("带孩子或家庭出行的人");
+  }
+  if (/情侣|夫妻|约会|蜜月/u.test(context)) {
+    audiences.push("情侣或夫妻客群");
+  }
+  if (/老人|父母|长辈|爸妈/u.test(context)) {
+    audiences.push("带父母或长辈的人");
+  }
+  if (/商务|差旅|会议|通勤/u.test(context)) {
+    audiences.push("商务差旅或高效率出行的人");
+  }
+  if (/学生|年轻|闺蜜|朋友|周末/u.test(context)) {
+    audiences.push("年轻朋友或周末短途人群");
+  }
+  if (/采购|囤货|试吃|超市|卖场|选购/u.test(context)) {
+    audiences.push("想高效选购和发现划算好物的人");
+  }
+
+  if (audiences.length > 0) {
+    return Array.from(new Set(audiences)).join("、");
+  }
+  if (String(videoType).startsWith("hotel_")) {
+    return "正在比较住宿体验、位置、服务和性价比的人";
+  }
+  if (String(videoType).startsWith("retail_")) {
+    return "想知道有什么值得逛、怎么买更省心的人";
+  }
+  if (String(videoType).startsWith("agency_")) {
+    return "想少踩坑、把路线和体验安排明白的人";
+  }
+  return "正在做选择、需要真实理由和体验感的人";
+}
+
+function buildNarrationStyleBrief(
+  source: NarrationStyleSourceContext,
+  videoType: VideoTaskVideoType,
+  shotPlan?: ShotPlan | null,
+) {
+  const typeProfile = getVideoTaskTypeProfile(videoType);
+  const hasVoiceOrSubtitle = shotPlan?.shots.some((shot) => shot.hasVoice || shot.hasSubtitle) ?? true;
+
+  return {
+    videoType,
+    videoTypeLabel: typeProfile.label,
+    appliesWhen: hasVoiceOrSubtitle
+      ? "本视频存在台词/字幕，必须执行真人推荐标准"
+      : "如本类型无台词/字幕，则 narrationScript 保持为空",
+    likelyAudience: inferNarrationAudience(source, videoType),
+    scriptMission: "写成真人在推荐一个具体选择：先建立对象感和判断，再给画面可验证的理由，最后自然收束到行动或记忆点。",
+    trustEntryOptions: [
+      "指出一个常见误区或选择坑",
+      "先给明确判断，再补为什么",
+      "用具体场景说明谁适合",
+      "用画面细节证明体验或服务价值",
+    ],
+    valueProofChecklist: [
+      "对象：这句话是在对谁说",
+      "原因：为什么推荐或为什么这样安排",
+      "证据：画面、动线、服务、空间、商品、体验里哪个细节能证明",
+      "情绪：听起来是真实感受，不是广告口号",
+    ],
+    continuityGoal: "整条脚本要有开场钩子、中段理由、结尾收束的连续推进；不要让每个镜头像互不相关的宣传短句。",
+    lowQualitySignals: [
+      "只说省心、轻松、舒服、值得，但没有原因",
+      "只罗列地点、空间、商品或服务名",
+      "直接抄作业、这趟就值了、顺路看、照样轻松、经典都逛到这类口号",
+      "每句都像独立标题，前后没有承接",
+    ],
+    narrativeCurves: shotPlan?.narrativeCurves ?? null,
+  };
+}
+
 async function polishNarrationScriptQuality(
   script: string,
   source: VideoTaskSource,
@@ -673,36 +1267,48 @@ async function polishNarrationScriptQuality(
     return script;
   }
 
+  const parsedLines = parseNarrationScriptLines(script, shotPlan);
+  if (parsedLines.length === 0) {
+    return script;
+  }
+
   const currentLineMap = new Map(
-    parseNarrationLines(script).map((line) => [
+    parsedLines.map((line) => [
       line.shotIndex,
       sanitizeNarrationText(line.text, {
         stripLeadingDayPrefix: true,
       }),
     ]),
   );
-  const voicedShots = shotPlan.shots.filter((shot) => shot.hasVoice || shot.hasSubtitle);
-  if (voicedShots.length === 0) {
+  const voicedLines = parsedLines.filter((line) => {
+    const context = getNarrationLineContext(line, shotPlan);
+    return context.hasVoice || context.hasSubtitle;
+  });
+  if (voicedLines.length === 0) {
     return script;
   }
 
   try {
     const deliveryStrategyMap = new Map(
       buildNarrationDeliveryStrategies(
-        shotPlan.shots.map((shot) => ({
-          shotIndex: shot.shotIndex,
-          purpose: shot.purpose,
-          hasVoice: shot.hasVoice,
-          hasSubtitle: shot.hasSubtitle,
-          requiresLipSync: shot.requiresLipSync,
-          hasTalent: shot.hasTalent,
-          emotion: shot.emotion,
-          durationSeconds: getNarrationLineDurationSeconds(shot.shotIndex, parameters, shotPlan),
-        })),
+        voicedLines.map((line) => {
+          const context = getNarrationLineContext(line, shotPlan);
+          return {
+            shotIndex: line.shotIndex,
+            purpose: context.purpose,
+            hasVoice: context.hasVoice,
+            hasSubtitle: context.hasSubtitle,
+            requiresLipSync: context.requiresLipSync,
+            hasTalent: context.hasTalent,
+            emotion: context.emotion,
+            durationSeconds: getNarrationLineDurationSeconds(line, parameters, shotPlan),
+          };
+        }),
         parameters.video.videoType,
       ).map((item) => [item.shotIndex, item]),
     );
     const payload = {
+      narrationStyleBrief: buildNarrationStyleBrief(source, parameters.video.videoType, shotPlan),
       sourceContext: {
         productTitle: source.productInfoTitle?.trim() || "",
         userPrompt: source.userPrompt.trim(),
@@ -710,34 +1316,44 @@ async function polishNarrationScriptQuality(
         expectedDurationRange: getExpectedDurationRangeLabel(parameters.video.expectedDurationRange),
         videoType: parameters.video.videoType,
       },
-      shots: voicedShots.map((shot) => {
-        const durationSeconds = getNarrationLineDurationSeconds(shot.shotIndex, parameters, shotPlan);
+      shots: voicedLines.map((line, index) => {
+        const context = getNarrationLineContext(line, shotPlan);
+        const durationSeconds = getNarrationLineDurationSeconds(line, parameters, shotPlan);
         const guidance = getNarrationLengthGuidance(durationSeconds);
-        const shotIndex = shot.shotIndex;
-        const currentVoicedIndex = voicedShots.findIndex((item) => item.shotIndex === shotIndex);
-        const previousVoicedShot = currentVoicedIndex > 0 ? voicedShots[currentVoicedIndex - 1] : null;
-        const nextVoicedShot =
-          currentVoicedIndex >= 0 && currentVoicedIndex < voicedShots.length - 1
-            ? voicedShots[currentVoicedIndex + 1]
-            : null;
+        const previousVoicedLine = index > 0 ? voicedLines[index - 1] : null;
+        const nextVoicedLine = index < voicedLines.length - 1 ? voicedLines[index + 1] : null;
+        const previousContext = previousVoicedLine ? getNarrationLineContext(previousVoicedLine, shotPlan) : null;
+        const nextContext = nextVoicedLine ? getNarrationLineContext(nextVoicedLine, shotPlan) : null;
+        const previousText = previousVoicedLine ? (currentLineMap.get(previousVoicedLine.shotIndex) ?? "") : "";
+        const nextText = nextVoicedLine ? (currentLineMap.get(nextVoicedLine.shotIndex) ?? "") : "";
         return {
-          shotIndex,
-          purpose: shot.purpose,
+          shotIndex: line.shotIndex,
+          displayLabel: line.label,
+          displayIndex: line.index,
+          purpose: context.purpose,
           durationSeconds,
           maxCharacters: guidance.maxCharacters,
           suggestedCharacters: guidance.suggestedCharacters,
-          location: shot.location,
-          emotion: shot.emotion,
-          narrationHint: shot.narrationHint,
-          sceneDescription: shot.sceneDescription,
-          styleGoal: getNarrationStyleGoalForPurpose(shot.purpose),
-          previousShotPurpose: previousVoicedShot?.purpose ?? null,
-          nextShotPurpose: nextVoicedShot?.purpose ?? null,
-          transitionNeed: previousVoicedShot ? "要顺着上一句自然承接" : "负责起势和建立兴趣",
-          deliveryStrategy: deliveryStrategyMap.get(shotIndex) ?? null,
-          currentText: currentLineMap.get(shot.shotIndex) ?? "",
+          location: context.location,
+          emotion: context.emotion,
+          narrationHint: context.narrationHint,
+          sceneDescription: context.sceneDescription,
+          styleGoal: getNarrationStyleGoalForPurpose(context.purpose),
+          previousShotPurpose: previousContext?.purpose ?? null,
+          nextShotPurpose: nextContext?.purpose ?? null,
+          previousText,
+          nextText,
+          transitionNeed: previousVoicedLine ? "要顺着上一句自然承接" : "负责起势和建立兴趣",
+          deliveryStrategy: deliveryStrategyMap.get(line.shotIndex) ?? null,
+          currentText: currentLineMap.get(line.shotIndex) ?? "",
         };
       }),
+      fullCurrentScript: voicedLines.map((line) => ({
+        shotIndex: line.shotIndex,
+        displayLabel: line.label,
+        displayIndex: line.index,
+        text: currentLineMap.get(line.shotIndex) ?? "",
+      })),
     };
 
     const repaired = await callTaskGenerationLlm({
@@ -767,26 +1383,172 @@ async function polishNarrationScriptQuality(
         ]),
     );
 
-    const lines = shotPlan.shots.map((shot) => ({
-      shotIndex: shot.shotIndex,
-      text:
-        shot.hasVoice || shot.hasSubtitle
-          ? (repairedMap.get(shot.shotIndex) ??
-            currentLineMap.get(shot.shotIndex) ??
-            sanitizeNarrationText(shot.narrationHint, {
-              stripLeadingDayPrefix: true,
-            }))
-          : "",
-    }));
+    const lines = parsedLines.map((line) => {
+      const context = getNarrationLineContext(line, shotPlan);
+      return {
+        ...line,
+        text:
+          context.hasVoice || context.hasSubtitle
+            ? (repairedMap.get(line.shotIndex) ??
+              currentLineMap.get(line.shotIndex) ??
+              sanitizeNarrationText(getFallbackNarrationText(line, shotPlan), {
+                stripLeadingDayPrefix: true,
+              }))
+            : "",
+      };
+    });
 
-    return reassembleNarrationScript(normalizeNarrationLines(lines, parameters, shotPlan));
+    return formatNarrationScriptLines(normalizeNarrationLines(lines, parameters, shotPlan));
   } catch {
     return script;
   }
 }
 
+export const NARRATION_HUMANIZATION_MAX_REWRITE_ROUNDS = 2;
+export const NARRATION_HUMANIZATION_MIN_ACCEPT_IMPROVEMENT = 6;
+
+async function rewriteNarrationForHumanizationIfNeeded(
+  script: string,
+  source: VideoTaskSource,
+  parameters: VideoTaskParameterBundle,
+  shotPlan?: ShotPlan | null,
+) {
+  if (!shotPlan?.shots?.length) {
+    return script;
+  }
+
+  const runtime = getTaskGenerationRuntime();
+  if (!runtime.liveEnabled) {
+    return script;
+  }
+
+  let currentScript = script;
+  let currentScore = scoreNarrationHumanization(currentScript);
+  if (!shouldRewriteNarrationForHumanization(currentScore)) {
+    return currentScript;
+  }
+
+  for (let attempt = 0; attempt < NARRATION_HUMANIZATION_MAX_REWRITE_ROUNDS; attempt += 1) {
+    const parsedLines = parseNarrationScriptLines(currentScript, shotPlan);
+    const voicedLines = parsedLines.filter((line) => {
+      const context = getNarrationLineContext(line, shotPlan);
+      return context.hasVoice || context.hasSubtitle;
+    });
+    if (voicedLines.length === 0) {
+      return currentScript;
+    }
+
+    try {
+      const payload = {
+        target: NARRATION_HUMANIZATION_TARGET,
+        currentEvaluation: {
+          ...currentScore,
+          targetResult: evaluateNarrationHumanizationTarget([currentScore]),
+        },
+        narrationStyleBrief: buildNarrationStyleBrief(source, parameters.video.videoType, shotPlan),
+        sourceContext: {
+          productTitle: source.productInfoTitle?.trim() || "",
+          productSnapshot: source.productInfoSnapshot?.trim().slice(0, 1000) || "",
+          userPrompt: source.userPrompt.trim(),
+          referenceTemplate: source.videoTemplatePrompt.trim().slice(0, 1200),
+          videoType: parameters.video.videoType,
+        },
+        fullCurrentScript: voicedLines.map((line) => ({
+          shotIndex: line.shotIndex,
+          displayLabel: line.label,
+          displayIndex: line.index,
+          text: line.text,
+        })),
+        lines: voicedLines.map((line, index) => {
+          const context = getNarrationLineContext(line, shotPlan);
+          const durationSeconds = getNarrationLineDurationSeconds(line, parameters, shotPlan);
+          const guidance = getNarrationLengthGuidance(durationSeconds);
+          return {
+            shotIndex: line.shotIndex,
+            displayLabel: line.label,
+            displayIndex: line.index,
+            currentText: line.text,
+            durationSeconds,
+            maxCharacters: guidance.maxCharacters,
+            suggestedCharacters: guidance.suggestedCharacters,
+            purpose: context.purpose,
+            location: context.location,
+            emotion: context.emotion,
+            narrationHint: context.narrationHint,
+            sceneDescription: context.sceneDescription,
+            previousText: index > 0 ? (voicedLines[index - 1]?.text ?? "") : "",
+            nextText: index < voicedLines.length - 1 ? (voicedLines[index + 1]?.text ?? "") : "",
+            requiredImprovement:
+              index === 0
+                ? "开场补足对象、痛点、判断或反差"
+                : index === voicedLines.length - 1
+                  ? "收尾补足具体价值和行动感"
+                  : "中段补足动作画面、体验理由和前后承接",
+          };
+        }),
+      };
+
+      const rewritten = await callTaskGenerationLlm({
+        systemPrompt: buildNarrationHumanizationRewriteSystemPrompt(parameters.video.videoType),
+        userContent: JSON.stringify(payload, null, 2),
+        temperature: 0.48,
+        maxCompletionTokens: 3200,
+      });
+      if (!rewritten) {
+        break;
+      }
+
+      const parsed = JSON.parse(stripCodeFence(rewritten)) as Array<{ shotIndex?: number; text?: string }>;
+      if (!Array.isArray(parsed)) {
+        break;
+      }
+
+      const rewriteMap = new Map(
+        parsed
+          .filter((item) => item.shotIndex && item.text?.trim())
+          .map((item) => [
+            item.shotIndex!,
+            sanitizeNarrationText(item.text, {
+              stripLeadingDayPrefix: true,
+            }),
+          ]),
+      );
+      const nextLines = parsedLines.map((line) => {
+        const context = getNarrationLineContext(line, shotPlan);
+        return {
+          ...line,
+          text: context.hasVoice || context.hasSubtitle ? (rewriteMap.get(line.shotIndex) ?? line.text) : "",
+        };
+      });
+      const nextScript = formatNarrationScriptLines(normalizeNarrationLines(nextLines, parameters, shotPlan));
+      const nextScore = scoreNarrationHumanization(nextScript);
+      const targetPassed = !shouldRewriteNarrationForHumanization(nextScore);
+      const improvedEnough =
+        nextScore.score >= currentScore.score + NARRATION_HUMANIZATION_MIN_ACCEPT_IMPROVEMENT ||
+        (nextScore.score > currentScore.score &&
+          (nextScore.metrics.trust > currentScore.metrics.trust ||
+            nextScore.metrics.imagery > currentScore.metrics.imagery ||
+            nextScore.metrics.continuity > currentScore.metrics.continuity));
+
+      if (!targetPassed && !improvedEnough) {
+        break;
+      }
+
+      currentScript = nextScript;
+      currentScore = nextScore;
+      if (targetPassed) {
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  return currentScript;
+}
+
 function normalizeNarrationLines(
-  lines: Array<{ shotIndex: number; text: string }>,
+  lines: NarrationScriptLine[],
   parameters: VideoTaskParameterBundle,
   shotPlan?: ShotPlan | null,
 ) {
@@ -795,23 +1557,29 @@ function normalizeNarrationLines(
   ).length;
 
   return lines.map((line) => {
-    const durationSeconds = getNarrationLineDurationSeconds(line.shotIndex, parameters, shotPlan);
+    const durationSeconds = getNarrationLineDurationSeconds(line, parameters, shotPlan);
     const guidance = getNarrationLengthGuidance(durationSeconds);
+    const repairTriggerCharacters = getNarrationRepairTriggerCharacters(durationSeconds);
+    const emergencyTrimCharacters = getNarrationEmergencyTrimCharacters(durationSeconds);
     let text = sanitizeNarrationText(line.text, {
       stripLeadingDayPrefix: dayPrefixCount >= 2,
     });
-    if (countNarrationCharacters(text) > guidance.maxCharacters) {
-      text = trimNarrationToCharacterLimit(text, guidance.maxCharacters);
+    const charCount = countNarrationCharacters(text);
+    const needsEmergencyTrim =
+      charCount > emergencyTrimCharacters ||
+      estimateNarrationReadingSeconds(text) > durationSeconds + Math.max(2.2, durationSeconds * 0.6);
+    if (needsEmergencyTrim) {
+      text = trimNarrationToCharacterLimit(text, Math.max(guidance.maxCharacters, repairTriggerCharacters));
     }
     return {
-      shotIndex: line.shotIndex,
+      ...line,
       text,
     };
   });
 }
 
 function findNarrationRepairCandidates(
-  lines: Array<{ shotIndex: number; text: string }>,
+  lines: NarrationScriptLine[],
   parameters: VideoTaskParameterBundle,
   shotPlan?: ShotPlan | null,
 ) {
@@ -832,8 +1600,8 @@ function findNarrationRepairCandidates(
     lines.map((line) => ({
       shotIndex: line.shotIndex,
       text: line.text,
-      durationSeconds: getNarrationLineDurationSeconds(line.shotIndex, parameters, shotPlan),
-      purpose: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.purpose ?? null,
+      durationSeconds: getNarrationLineDurationSeconds(line, parameters, shotPlan),
+      purpose: getNarrationLineContext(line, shotPlan).purpose,
     })),
   );
   const issueMessageMap = qualityIssues.reduce<Map<number, string[]>>((map, issue) => {
@@ -845,7 +1613,7 @@ function findNarrationRepairCandidates(
 
   return lines
     .map((line) => {
-      const durationSeconds = getNarrationLineDurationSeconds(line.shotIndex, parameters, shotPlan);
+      const durationSeconds = getNarrationLineDurationSeconds(line, parameters, shotPlan);
       const guidance = getNarrationLengthGuidance(durationSeconds);
       const trimmedText = line.text.trim();
       const normalizedText = sanitizeNarrationText(trimmedText, {
@@ -856,11 +1624,14 @@ function findNarrationRepairCandidates(
         (normalizedText.length <= Math.max(6, Math.floor(guidance.suggestedCharacters * 0.5)) ||
           lowSignalNarrationPatterns.some((pattern) => pattern.test(normalizedText)));
       return {
+        ...line,
         shotIndex: line.shotIndex,
         text: trimmedText,
         durationSeconds,
         guidance,
-        overLimit: countNarrationCharacters(trimmedText) > guidance.maxCharacters,
+        overLimit:
+          countNarrationCharacters(trimmedText) > getNarrationRepairTriggerCharacters(durationSeconds) ||
+          isNarrationClearlyOverDuration(trimmedText, durationSeconds),
         hasDayPrefix: dayPrefixCount >= 2 && /^(?:第[一二三四五六七八九十两\d]+天|Day\s*\d+)/i.test(trimmedText),
         hasTerminalOh: /哦+[，。！？；、：,.!?;'"“”‘’（）()【】《》…—-]*$/u.test(trimmedText),
         hasTerminalPunctuation: /[，。！？；、：,.!?;'"“”‘’（）()【】《》…—-]$/u.test(trimmedText),
@@ -886,15 +1657,16 @@ async function repairNarrationIfOverLimit(
   script: string,
   parameters: VideoTaskParameterBundle,
   shotPlan?: ShotPlan | null,
+  source?: VideoTaskSource | null,
 ): Promise<string> {
-  let lines = parseNarrationLines(script);
+  let lines = parseNarrationScriptLines(script, shotPlan);
   if (lines.length === 0) return script;
 
   lines = normalizeNarrationLines(lines, parameters, shotPlan);
 
   const runtime = getTaskGenerationRuntime();
   if (!runtime.liveEnabled) {
-    return reassembleNarrationScript(lines);
+    return formatNarrationScriptLines(lines);
   }
 
   for (let attempt = 0; attempt < NARRATION_LENGTH_MAX_REPAIR_ROUNDS; attempt += 1) {
@@ -904,41 +1676,61 @@ async function repairNarrationIfOverLimit(
       buildNarrationDeliveryStrategies(
         lines.map((line) => ({
           shotIndex: line.shotIndex,
-          purpose: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.purpose ?? "experience",
-          hasVoice: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.hasVoice ?? true,
-          hasSubtitle: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.hasSubtitle ?? true,
-          requiresLipSync: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.requiresLipSync ?? false,
-          hasTalent: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.hasTalent ?? false,
-          emotion: shotPlan?.shots.find((shot) => shot.shotIndex === line.shotIndex)?.emotion ?? "",
-          durationSeconds: getNarrationLineDurationSeconds(line.shotIndex, parameters, shotPlan),
+          purpose: getNarrationLineContext(line, shotPlan).purpose,
+          hasVoice: getNarrationLineContext(line, shotPlan).hasVoice,
+          hasSubtitle: getNarrationLineContext(line, shotPlan).hasSubtitle,
+          requiresLipSync: getNarrationLineContext(line, shotPlan).requiresLipSync,
+          hasTalent: getNarrationLineContext(line, shotPlan).hasTalent,
+          emotion: getNarrationLineContext(line, shotPlan).emotion,
+          durationSeconds: getNarrationLineDurationSeconds(line, parameters, shotPlan),
         })),
         parameters.video.videoType,
       ).map((item) => [item.shotIndex, item]),
     );
 
     try {
-      const repairRequest = candidateLines.map((line) => ({
-        shotIndex: line.shotIndex,
-        currentText: line.text,
-        currentLength: countNarrationCharacters(line.text),
-        durationSeconds: line.durationSeconds,
-        maxCharacters: line.guidance.maxCharacters,
-        suggestedCharacters: line.guidance.suggestedCharacters,
-        issues: Array.from(
-          new Set(
-            [
-              line.overLimit ? "超时风险" : null,
-              line.hasDayPrefix ? "机械化 Day/第X天 开头" : null,
-              line.hasTerminalOh ? "句尾带哦" : null,
-              line.hasTerminalPunctuation ? "句尾带标点" : null,
-              line.duplicated ? "与其他镜头台词重复" : null,
-              line.lowSignal ? "信息量偏低或像口号" : null,
-              ...line.qualityMessages,
-            ].filter(Boolean),
-          ),
+      const repairRequest = {
+        narrationStyleBrief: buildNarrationStyleBrief(
+          source ?? { productInfoTitle: "", productInfoSnapshot: "", userPrompt: "", videoTemplatePrompt: "" },
+          parameters.video.videoType,
+          shotPlan,
         ),
-        deliveryStrategy: deliveryStrategyMap.get(line.shotIndex) ?? null,
-      }));
+        fullCurrentScript: lines.map((line) => ({
+          shotIndex: line.shotIndex,
+          displayLabel: line.label,
+          displayIndex: line.index,
+          text: line.text,
+        })),
+        repairItems: candidateLines.map((line) => {
+          const lineIndex = lines.findIndex((item) => item.shotIndex === line.shotIndex);
+          return {
+            shotIndex: line.shotIndex,
+            displayLabel: line.label,
+            displayIndex: line.index,
+            previousText: lineIndex > 0 ? (lines[lineIndex - 1]?.text ?? "") : "",
+            nextText: lineIndex >= 0 && lineIndex < lines.length - 1 ? (lines[lineIndex + 1]?.text ?? "") : "",
+            currentText: line.text,
+            currentLength: countNarrationCharacters(line.text),
+            durationSeconds: line.durationSeconds,
+            maxCharacters: line.guidance.maxCharacters,
+            suggestedCharacters: line.guidance.suggestedCharacters,
+            issues: Array.from(
+              new Set(
+                [
+                  line.overLimit ? "超时风险" : null,
+                  line.hasDayPrefix ? "机械化 Day/第X天 开头" : null,
+                  line.hasTerminalOh ? "句尾带哦" : null,
+                  line.hasTerminalPunctuation ? "句尾带标点" : null,
+                  line.duplicated ? "与其他镜头台词重复" : null,
+                  line.lowSignal ? "信息量偏低或像口号" : null,
+                  ...line.qualityMessages,
+                ].filter(Boolean),
+              ),
+            ),
+            deliveryStrategy: deliveryStrategyMap.get(line.shotIndex) ?? null,
+          };
+        }),
+      };
 
       const repaired = await callTaskGenerationLlm({
         systemPrompt: buildNarrationRepairSystemPrompt(parameters.video.videoType),
@@ -959,7 +1751,7 @@ async function repairNarrationIfOverLimit(
       );
 
       lines = lines.map((l) => ({
-        shotIndex: l.shotIndex,
+        ...l,
         text: sanitizeNarrationText(repairMap.get(l.shotIndex) ?? l.text),
       }));
       lines = normalizeNarrationLines(lines, parameters, shotPlan);
@@ -968,7 +1760,7 @@ async function repairNarrationIfOverLimit(
     }
   }
 
-  return reassembleNarrationScript(normalizeNarrationLines(lines, parameters, shotPlan));
+  return formatNarrationScriptLines(normalizeNarrationLines(lines, parameters, shotPlan));
 }
 
 // ---------------------------------------------------------------------------
@@ -984,121 +1776,598 @@ export type DraftBundleWithShotPlan = {
   directorPlan: VideoTaskDirectorPlan;
 };
 
+// ---------------------------------------------------------------------------
+// Shot Plan Enrichment Steps (2-4)
+// ---------------------------------------------------------------------------
+
+function buildVisualEnrichmentPrompt(shotPlan: ShotPlan, source: VideoTaskSource, videoType: VideoTaskVideoType) {
+  const mainPrompt = getEffectiveConstraintPrompt("shot_plan_visual");
+  const categoryPrompt = getVideoTypeCategoryPrompt(videoType, "shot_plan_visual");
+  const addonPrompt = getVideoTypeAddonPrompt(videoType, "shot_plan_visual");
+
+  return {
+    systemPrompt: [mainPrompt, categoryPrompt, addonPrompt].filter(Boolean).join("\n"),
+    userContent: JSON.stringify(
+      {
+        sourceContext: { title: source.productInfoTitle ?? "", userPrompt: source.userPrompt },
+        shotPlanSkeleton: shotPlan,
+      },
+      null,
+      2,
+    ),
+  };
+}
+
+function parseVisualEnrichmentResponse(content: string, shotPlan: ShotPlan): ShotPlan {
+  try {
+    const parsed = JSON.parse(stripCodeFence(content)) as {
+      shots?: Array<{
+        shotIndex?: number;
+        visual?: Record<string, unknown>;
+        cinematography?: Record<string, unknown>;
+        structure?: Record<string, unknown>;
+      }>;
+    };
+    if (!Array.isArray(parsed.shots)) return shotPlan;
+
+    for (const enriched of parsed.shots) {
+      const target = shotPlan.shots.find((s) => s.shotIndex === enriched.shotIndex);
+      if (!target) continue;
+      if (enriched.visual) {
+        target.visual = {
+          sceneSetting: String(enriched.visual.sceneSetting ?? ""),
+          shotScale: String(enriched.visual.shotScale ?? ""),
+          wideContent: String(enriched.visual.wideContent ?? ""),
+          midContent: String(enriched.visual.midContent ?? ""),
+          closeContent: String(enriched.visual.closeContent ?? ""),
+          composition: String(enriched.visual.composition ?? ""),
+          colorTone: String(enriched.visual.colorTone ?? ""),
+          keyDetails: String(enriched.visual.keyDetails ?? ""),
+        };
+      }
+      if (enriched.cinematography) {
+        target.cinematography = {
+          shotType: String(enriched.cinematography.shotType ?? ""),
+          rhythm: String(enriched.cinematography.rhythm ?? ""),
+          infoDensity: String(enriched.cinematography.infoDensity ?? ""),
+          lighting: String(enriched.cinematography.lighting ?? ""),
+        };
+      }
+      if (enriched.structure) {
+        target.structure = {
+          phase: String(enriched.structure.phase ?? ""),
+          prevTransition: String(enriched.structure.prevTransition ?? ""),
+          nextTransition: String(enriched.structure.nextTransition ?? ""),
+          transitionType: String(enriched.structure.transitionType ?? ""),
+        };
+      }
+    }
+  } catch {
+    /* parsing failed, keep original shotPlan */
+  }
+  return shotPlan;
+}
+
+function buildSubjectEnrichmentPrompt(shotPlan: ShotPlan, source: VideoTaskSource, videoType: VideoTaskVideoType) {
+  const mainPrompt = getEffectiveConstraintPrompt("shot_plan_subject");
+  const categoryPrompt = getVideoTypeCategoryPrompt(videoType, "shot_plan_subject");
+  const addonPrompt = getVideoTypeAddonPrompt(videoType, "shot_plan_subject");
+  const characterAppearancePolicy = getMainCharacterAppearancePolicy(source);
+  const characterPresencePolicy =
+    videoType === "agency_guide_voiceover"
+      ? {
+          mode: "sparse_characters",
+          summary:
+            "这是空镜旁白类型。绝大多数镜头应为纯景色/景点/环境展示，只有极少数和真实体验强相关的镜头允许人物点缀出镜。",
+          maxCharacterShots: getAgencyGuideVoiceoverMaxCharacterShots(shotPlan.shots.length),
+          strongSceneExamples: ["入住办理", "服务互动", "亲子体验", "用餐品尝", "活动体验", "乘坐交通工具"],
+          hardRules: [
+            "普通景色、地标、建筑、环境、设施、菜品、夜景镜头默认不要主角人物。",
+            "允许人物的镜头里，人物也只能点缀出镜，不能长期占据画面主体。",
+            "不要为所有镜头都建立统一主角锚点；如果人物镜头极少，reusableModules.characterSetting 可以为空。",
+            "如果 maxCharacterShots = 0，则所有镜头的 subject.mainCharacterCount 都应为 0。",
+          ],
+        }
+      : null;
+
+  return {
+    systemPrompt: [mainPrompt, categoryPrompt, addonPrompt].filter(Boolean).join("\n"),
+    userContent: JSON.stringify(
+      {
+        sourceContext: { title: source.productInfoTitle ?? "", userPrompt: source.userPrompt },
+        characterAppearancePolicy,
+        characterPresencePolicy,
+        shotPlanWithVisual: shotPlan,
+      },
+      null,
+      2,
+    ),
+  };
+}
+
+function parseSubjectEnrichmentResponse(
+  content: string,
+  shotPlan: ShotPlan,
+  videoType: VideoTaskVideoType,
+  source: VideoTaskSource,
+): ShotPlan {
+  try {
+    const parsed = JSON.parse(stripCodeFence(content)) as {
+      styleConstraints?: Record<string, string>;
+      reusableModules?: Record<string, string>;
+      shots?: Array<{
+        shotIndex?: number;
+        subject?: Record<string, unknown>;
+      }>;
+    };
+
+    if (parsed.styleConstraints) {
+      shotPlan.styleConstraints = {
+        style: String(parsed.styleConstraints.style ?? ""),
+        videoType: String(parsed.styleConstraints.videoType ?? ""),
+        forbidden: String(parsed.styleConstraints.forbidden ?? ""),
+        realismLevel: String(parsed.styleConstraints.realismLevel ?? ""),
+        styleConsistency: String(parsed.styleConstraints.styleConsistency ?? ""),
+        characterConsistency: String(parsed.styleConstraints.characterConsistency ?? ""),
+      };
+    }
+    if (parsed.reusableModules) {
+      shotPlan.reusableModules = {
+        characterSetting: String(parsed.reusableModules.characterSetting ?? ""),
+        sceneSetting: String(parsed.reusableModules.sceneSetting ?? ""),
+        actionTemplates: String(parsed.reusableModules.actionTemplates ?? ""),
+        shotTemplates: String(parsed.reusableModules.shotTemplates ?? ""),
+      };
+    }
+    if (Array.isArray(parsed.shots)) {
+      for (const enriched of parsed.shots) {
+        const target = shotPlan.shots.find((s) => s.shotIndex === enriched.shotIndex);
+        if (!target || !enriched.subject) continue;
+        target.subject = {
+          mainCharacterCount: Number(enriched.subject.mainCharacterCount) || 0,
+          mainCharacterGender: String(enriched.subject.mainCharacterGender ?? ""),
+          relationship: String(enriched.subject.relationship ?? ""),
+          clothing: String(enriched.subject.clothing ?? ""),
+          ageRange: String(enriched.subject.ageRange ?? ""),
+          features: String(enriched.subject.features ?? ""),
+          appearance: String(enriched.subject.appearance ?? ""),
+          style: String(enriched.subject.style ?? ""),
+          position: String(enriched.subject.position ?? ""),
+          extraCount: Number(enriched.subject.extraCount) || 0,
+          extraDistribution: String(enriched.subject.extraDistribution ?? ""),
+          extraScale: String(enriched.subject.extraScale ?? ""),
+        };
+      }
+    }
+  } catch {
+    /* parsing failed, keep original shotPlan */
+  }
+  return applyVideoTypeShotPlanPolicy(applyMainCharacterAppearancePolicy(shotPlan, source), videoType);
+}
+
+function buildSubtitleEnrichmentPrompt(shotPlan: ShotPlan, source: VideoTaskSource, videoType: VideoTaskVideoType) {
+  const mainPrompt = getEffectiveConstraintPrompt("shot_plan_subtitle");
+  const categoryPrompt = getVideoTypeCategoryPrompt(videoType, "shot_plan_subtitle");
+  const addonPrompt = getVideoTypeAddonPrompt(videoType, "shot_plan_subtitle");
+  const segmentGuidance = Array.from(
+    shotPlan.shots.reduce<
+      Map<
+        number,
+        {
+          segmentIndex: number;
+          segmentId: string;
+          durationSeconds: number;
+          referenceMaxCharacters: number;
+          referenceCharacterRange: [number, number];
+          coveredShotIndexes: number[];
+          sceneSummary: string;
+          narrationHints: string[];
+        }
+      >
+    >((map, shot) => {
+      const segmentIndex = shot.segmentIndex ?? shot.shotIndex;
+      const existing = map.get(segmentIndex);
+      const durationSeconds = Math.max(0.8, shot.durationSeconds || 0);
+      const guidance = getNarrationLengthGuidance(durationSeconds);
+
+      if (!existing) {
+        map.set(segmentIndex, {
+          segmentIndex,
+          segmentId: shot.segmentId ?? `segment-${segmentIndex}`,
+          durationSeconds,
+          referenceMaxCharacters: guidance.maxCharacters,
+          referenceCharacterRange: [guidance.minCharacters, guidance.suggestedCharacters],
+          coveredShotIndexes: [shot.shotIndex],
+          sceneSummary: shot.sceneDescription,
+          narrationHints: shot.narrationHint ? [shot.narrationHint] : [],
+        });
+        return map;
+      }
+
+      const nextDuration = Number((existing.durationSeconds + durationSeconds).toFixed(2));
+      const nextGuidance = getNarrationLengthGuidance(nextDuration);
+      existing.durationSeconds = nextDuration;
+      existing.referenceMaxCharacters = nextGuidance.maxCharacters;
+      existing.referenceCharacterRange = [nextGuidance.minCharacters, nextGuidance.suggestedCharacters];
+      existing.coveredShotIndexes.push(shot.shotIndex);
+      existing.sceneSummary = [existing.sceneSummary, shot.sceneDescription].filter(Boolean).join("；");
+      if (shot.narrationHint) {
+        existing.narrationHints.push(shot.narrationHint);
+      }
+      return map;
+    }, new Map()),
+  ).map(([, value]) => ({
+    ...value,
+    narrationHints: Array.from(new Set(value.narrationHints)).slice(0, 4),
+  }));
+
+  return {
+    systemPrompt: [mainPrompt, categoryPrompt, addonPrompt, "", buildNarrationStandardsPromptBlock(videoType)]
+      .filter(Boolean)
+      .join("\n"),
+    userContent: JSON.stringify(
+      {
+        narrationStyleBrief: buildNarrationStyleBrief(source, videoType, shotPlan),
+        sourceContext: {
+          productTitle: source.productInfoTitle?.trim() || "",
+          productSnapshot: source.productInfoSnapshot?.trim() || "",
+          userPrompt: source.userPrompt,
+          referenceTemplatePrompt: source.videoTemplatePrompt.trim().slice(0, 1200),
+        },
+        segmentGuidance,
+        completeShotPlan: shotPlan,
+      },
+      null,
+      2,
+    ),
+  };
+}
+
+function parseSubtitleEnrichmentResponse(content: string, shotPlan: ShotPlan, videoType: VideoTaskVideoType): ShotPlan {
+  try {
+    const parsed = JSON.parse(stripCodeFence(content)) as {
+      narrativeCurves?: Record<string, string>;
+      subtitlePlan?: Array<{
+        segmentIndex?: number;
+        segmentId?: string;
+        subtitles?: Array<{
+          text?: string;
+          startAtSeconds?: number;
+          durationSeconds?: number;
+          charCount?: number;
+          coveredShotIndexes?: number[];
+        }>;
+      }>;
+    };
+
+    if (parsed.narrativeCurves) {
+      shotPlan.narrativeCurves = {
+        openingStrategy: String(parsed.narrativeCurves.openingStrategy ?? ""),
+        midStructure: String(parsed.narrativeCurves.midStructure ?? ""),
+        closingStrategy: String(parsed.narrativeCurves.closingStrategy ?? ""),
+        rhythmCurve: String(parsed.narrativeCurves.rhythmCurve ?? ""),
+        emotionCurve: String(parsed.narrativeCurves.emotionCurve ?? ""),
+        infoOrder: String(parsed.narrativeCurves.infoOrder ?? ""),
+      };
+    }
+    if (Array.isArray(parsed.subtitlePlan)) {
+      shotPlan.subtitlePlan = parsed.subtitlePlan.map((seg) => ({
+        segmentIndex: Number(seg.segmentIndex) || 0,
+        segmentId: String(seg.segmentId ?? ""),
+        subtitles: Array.isArray(seg.subtitles)
+          ? seg.subtitles.map((sub) => ({
+              text: sanitizeNarrationText(String(sub.text ?? ""), {
+                stripLeadingDayPrefix: true,
+              }),
+              startAtSeconds: Number(sub.startAtSeconds) || 0,
+              durationSeconds: Number(sub.durationSeconds) || 0,
+              charCount:
+                Number(sub.charCount) ||
+                countNarrationCharacters(
+                  sanitizeNarrationText(String(sub.text ?? ""), {
+                    stripLeadingDayPrefix: true,
+                  }),
+                ),
+              coveredShotIndexes: Array.isArray(sub.coveredShotIndexes) ? sub.coveredShotIndexes.map(Number) : [],
+            }))
+          : [],
+      }));
+    }
+  } catch {
+    /* parsing failed, keep original shotPlan */
+  }
+  return normalizeSubtitlePlanSource(shotPlan, videoType);
+}
+
+async function enrichShotPlan(
+  shotPlan: ShotPlan,
+  source: VideoTaskSource,
+  parameters: VideoTaskParameterBundle,
+  progressTracker?: WeightedProgressTracker | null,
+): Promise<ShotPlan> {
+  const videoType = parameters.video.videoType;
+
+  // Step 2: Visual & Cinematography enrichment
+  progressTracker?.start("visual_enrichment", "视觉设计中...");
+  try {
+    const visual = buildVisualEnrichmentPrompt(shotPlan, source, videoType);
+    const visualContent = await callTaskGenerationLlm({
+      systemPrompt: visual.systemPrompt,
+      userContent: visual.userContent,
+      temperature: 0.3,
+      maxCompletionTokens: 5000,
+    });
+    if (visualContent) {
+      shotPlan = parseVisualEnrichmentResponse(visualContent, shotPlan);
+    }
+  } catch {
+    /* visual enrichment failed, continue */
+  }
+  progressTracker?.complete("visual_enrichment", "视觉设计完成");
+
+  // Step 3: Subject & Style enrichment
+  progressTracker?.start("subject_enrichment", "人物与风格设计中...");
+  try {
+    const subject = buildSubjectEnrichmentPrompt(shotPlan, source, videoType);
+    const subjectContent = await callTaskGenerationLlm({
+      systemPrompt: subject.systemPrompt,
+      userContent: subject.userContent,
+      temperature: 0.3,
+      maxCompletionTokens: 5000,
+    });
+    if (subjectContent) {
+      shotPlan = parseSubjectEnrichmentResponse(subjectContent, shotPlan, videoType, source);
+    }
+  } catch {
+    /* subject enrichment failed, continue */
+  }
+  progressTracker?.complete("subject_enrichment", "人物与风格完成");
+
+  // Step 4: Subtitle & Narrative enrichment
+  progressTracker?.start("subtitle_enrichment", "字幕与叙事规划中...");
+  try {
+    const subtitle = buildSubtitleEnrichmentPrompt(shotPlan, source, videoType);
+    const subtitleContent = await callTaskGenerationLlm({
+      systemPrompt: subtitle.systemPrompt,
+      userContent: subtitle.userContent,
+      temperature: 0.3,
+      maxCompletionTokens: 4000,
+    });
+    if (subtitleContent) {
+      shotPlan = parseSubtitleEnrichmentResponse(subtitleContent, shotPlan, videoType);
+    }
+  } catch {
+    /* subtitle enrichment failed, continue */
+  }
+  progressTracker?.complete("subtitle_enrichment", "字幕规划完成");
+
+  return applyMainCharacterAppearancePolicy(shotPlan, source);
+}
+
 export async function generateVideoTaskDraftBundle(
   source: VideoTaskSource,
   parameters: VideoTaskParameterBundle,
+  onProgress?: ProgressCallback,
+  options?: {
+    hotelAssets?: TaskHotelAssetRecord[];
+    referenceVideoMaterial?: VideoMaterialRecord | null;
+  },
 ): Promise<DraftBundleWithShotPlan> {
   const runtime = getTaskGenerationRuntime();
+  const progressTracker = createDraftBundleProgressTracker(onProgress, parameters);
 
-  if (!runtime.liveEnabled) {
-    const fallbackPlan = buildFallbackShotPlan(source, parameters);
-    const directorPlan = buildDirectorPlanFromTaskData({
-      draftBundle: buildFallbackDraftBundleFromShotPlan(fallbackPlan, parameters),
-      shotPlan: fallbackPlan,
-      parameters,
-    });
-    return {
-      draftBundle: buildDraftBundleFromDirectorPlan(directorPlan),
-      shotPlan: fallbackPlan,
-      directorPlan,
-    };
-  }
-
-  // Step 1: Generate shot plan
-  let shotPlan: ShotPlan | null = null;
   try {
-    const shotPlanContent = await callTaskGenerationLlm({
-      systemPrompt: buildShotPlanSystemPrompt(parameters.constraints),
-      userContent: buildSourceSummary(source, parameters),
-      temperature: 0.35,
-      maxCompletionTokens: 5000,
-    });
-
-    if (shotPlanContent) {
-      shotPlan = parseShotPlanResponse(shotPlanContent, parameters);
+    if (!runtime.liveEnabled) {
+      progressTracker?.start("skeleton", "当前模型离线，切换本地兜底...");
+      let fallbackPlan = buildFallbackShotPlan(source, parameters);
+      if (isHotelVideoType(parameters.video.videoType) && usesCapturedMaterialFirstWorkflow(parameters.video.videoType)) {
+        fallbackPlan = applyHotelAssetPlanning({
+          shotPlan: fallbackPlan,
+          hotelAssets: options?.hotelAssets ?? [],
+          referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+          workflowKind: getVideoTaskWorkflowKind(parameters.video.videoType),
+        });
+      }
+      progressTracker?.complete("skeleton", "已生成兜底镜头规划");
+      progressTracker?.skip("repair_1", "跳过修复轮次 1");
+      progressTracker?.skip("repair_2", "跳过修复轮次 2");
+      progressTracker?.skip("visual_enrichment", "跳过视觉增强");
+      progressTracker?.skip("subject_enrichment", "跳过人物增强");
+      progressTracker?.skip("subtitle_enrichment", "跳过字幕增强");
+      progressTracker?.skip("prompt_generation", "直接使用兜底提示词");
+      progressTracker?.skip("narration_polish", "跳过台词润色");
+      progressTracker?.skip("narration_repair", "跳过台词校验");
+      progressTracker?.start("build_director_plan", "整理镜头计划...");
+      const directorPlan = buildDirectorPlanFromTaskData({
+        draftBundle: buildFallbackDraftBundleFromShotPlan(fallbackPlan, parameters),
+        shotPlan: fallbackPlan,
+        parameters,
+      });
+      progressTracker?.complete("build_director_plan", "镜头计划已整理");
+      progressTracker?.finish("镜头计划生成完成");
+      return {
+        draftBundle: buildDraftBundleFromDirectorPlan(directorPlan),
+        shotPlan: fallbackPlan,
+        directorPlan,
+      };
     }
-  } catch {
-    // shot plan generation failed, continue with fallback
-  }
 
-  if (!shotPlan) {
-    shotPlan = buildFallbackShotPlan(source, parameters);
-  }
-
-  // Step 2: Validate and repair
-  let validationErrors = validateShotPlan(shotPlan, source, parameters);
-
-  for (let attempt = 0; attempt < SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS && validationErrors.length > 0; attempt += 1) {
+    // Step 1: Generate shot plan skeleton
+    progressTracker?.start("skeleton", "生成镜头骨架...");
+    let shotPlan: ShotPlan | null = null;
     try {
-      const repairContent = await callTaskGenerationLlm({
-        systemPrompt: buildShotPlanSystemPrompt(parameters.constraints),
-        userContent: buildRepairPrompt(shotPlan, validationErrors),
-        temperature: 0.2,
+      const shotPlanContent = await callTaskGenerationLlm({
+        systemPrompt: buildShotPlanSystemPrompt(parameters.constraints, parameters.video.videoType),
+        userContent: buildSourceSummary(source, parameters, {
+          hotelAssets: options?.hotelAssets ?? [],
+          referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+        }),
+        temperature: 0.35,
         maxCompletionTokens: 5000,
       });
 
-      if (repairContent) {
-        const repaired = parseShotPlanResponse(repairContent, parameters);
-        if (repaired) {
-          shotPlan = repaired;
-          validationErrors = validateShotPlan(shotPlan, source, parameters);
-        }
+      if (shotPlanContent) {
+        shotPlan = parseShotPlanResponse(shotPlanContent, parameters);
       }
     } catch {
-      break;
+      // shot plan generation failed, continue with fallback
     }
-  }
 
-  shotPlan.validationErrors = validationErrors;
+    if (!shotPlan) {
+      shotPlan = buildFallbackShotPlan(source, parameters);
+    }
+    progressTracker?.complete("skeleton", "镜头骨架完成");
 
-  // Step 3: Generate prompts from shot plan
-  let draftBundle: VideoTaskDraftBundle | null = null;
-  try {
-    const promptContent = await callTaskGenerationLlm({
-      systemPrompt: buildPromptGenerationSystemPrompt(parameters),
-      userContent: buildPromptGenerationUserContent(shotPlan, parameters, source),
-      temperature: 0.3,
-      maxCompletionTokens: 7000,
+    // Step 2: Validate and repair
+    let validationErrors = validateShotPlan(shotPlan, source, parameters);
+    let performedRepairRounds = 0;
+
+    for (
+      let attempt = 0;
+      attempt < SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS && validationErrors.length > 0;
+      attempt += 1
+    ) {
+      performedRepairRounds = attempt + 1;
+      const repairUnitId = `repair_${attempt + 1}` as const;
+      progressTracker?.start(repairUnitId, `校验并修复镜头规划（第 ${attempt + 1} 轮）...`);
+      try {
+        const repairContent = await callTaskGenerationLlm({
+          systemPrompt: buildShotPlanSystemPrompt(parameters.constraints, parameters.video.videoType),
+          userContent: buildRepairPrompt(shotPlan, validationErrors),
+          temperature: 0.2,
+          maxCompletionTokens: 5000,
+        });
+
+        if (repairContent) {
+          const repaired = parseShotPlanResponse(repairContent, parameters);
+          if (repaired) {
+            shotPlan = repaired;
+            validationErrors = validateShotPlan(shotPlan, source, parameters);
+          }
+        }
+      } catch {
+        progressTracker?.complete(repairUnitId, `第 ${attempt + 1} 轮修复中断，继续后续流程`);
+        break;
+      }
+      progressTracker?.complete(
+        repairUnitId,
+        validationErrors.length > 0 ? `第 ${attempt + 1} 轮修复完成，继续复检` : `第 ${attempt + 1} 轮修复通过`,
+      );
+    }
+
+    if (performedRepairRounds < SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS) {
+      for (let attempt = performedRepairRounds; attempt < SHOT_PLAN_VALIDATION_MAX_REPAIR_ROUNDS; attempt += 1) {
+        progressTracker?.skip(`repair_${attempt + 1}`, `跳过修复轮次 ${attempt + 1}`);
+      }
+    }
+
+    shotPlan.validationErrors = validationErrors;
+
+    // Steps 2-4: Enrich shot plan with visual, subject, subtitle details
+    shotPlan = await enrichShotPlan(shotPlan, source, parameters, progressTracker);
+    if (isHotelVideoType(parameters.video.videoType) && usesCapturedMaterialFirstWorkflow(parameters.video.videoType)) {
+      shotPlan = applyHotelAssetPlanning({
+        shotPlan,
+        hotelAssets: options?.hotelAssets ?? [],
+        referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+        workflowKind: getVideoTaskWorkflowKind(parameters.video.videoType),
+      });
+    }
+
+    // Step 5: Generate prompts from shot plan
+    progressTracker?.start("prompt_generation", "生成提示词...");
+    let draftBundle: VideoTaskDraftBundle | null = null;
+    try {
+      const promptContent = await callTaskGenerationLlm({
+        systemPrompt: buildPromptGenerationSystemPrompt(parameters),
+        userContent: buildPromptGenerationUserContent(shotPlan, parameters, source),
+        temperature: 0.3,
+        maxCompletionTokens: 7000,
+      });
+
+      if (promptContent) {
+        const parsed = JSON.parse(stripCodeFence(promptContent)) as Partial<VideoTaskDraftBundle>;
+        const fallback = buildFallbackDraftBundleFromShotPlan(shotPlan, parameters);
+
+        draftBundle = {
+          textToImagePrompt: parsed.textToImagePrompt?.trim() || fallback.textToImagePrompt,
+          imageToVideoPrompt: parsed.imageToVideoPrompt?.trim() || fallback.imageToVideoPrompt,
+          narrationScript: parsed.narrationScript?.trim() || fallback.narrationScript,
+        };
+      }
+    } catch {
+      // prompt generation failed, use fallback
+    }
+
+    if (!draftBundle) {
+      draftBundle = buildFallbackDraftBundleFromShotPlan(shotPlan, parameters);
+    }
+
+    if (usesSegmentLevelSubtitleSource(parameters.video.videoType)) {
+      shotPlan =
+        syncNarrationScriptIntoSubtitlePlan(shotPlan, draftBundle.narrationScript, parameters.video.videoType) ??
+        shotPlan;
+      draftBundle.narrationScript =
+        buildNarrationScriptFromSubtitlePlan(shotPlan, parameters.video.videoType) || draftBundle.narrationScript;
+    }
+
+    progressTracker?.complete("prompt_generation", "提示词完成");
+
+    // Step 3.5: Polish narration quality before timing repair
+    progressTracker?.start("narration_polish", "台词润色中...");
+    draftBundle.narrationScript = await polishNarrationScriptQuality(
+      draftBundle.narrationScript,
+      source,
+      parameters,
+      shotPlan,
+    );
+    draftBundle.narrationScript = await rewriteNarrationForHumanizationIfNeeded(
+      draftBundle.narrationScript,
+      source,
+      parameters,
+      shotPlan,
+    );
+    if (usesSegmentLevelSubtitleSource(parameters.video.videoType)) {
+      shotPlan =
+        syncNarrationScriptIntoSubtitlePlan(shotPlan, draftBundle.narrationScript, parameters.video.videoType) ??
+        shotPlan;
+      draftBundle.narrationScript =
+        buildNarrationScriptFromSubtitlePlan(shotPlan, parameters.video.videoType) || draftBundle.narrationScript;
+    }
+    progressTracker?.complete("narration_polish", "台词润色与真人化完成");
+
+    // Step 3.6: Check narration quality / timing and repair risky lines
+    progressTracker?.start("narration_repair", "校验解说时长...");
+    draftBundle.narrationScript = await repairNarrationIfOverLimit(
+      draftBundle.narrationScript,
+      parameters,
+      shotPlan,
+      source,
+    );
+    if (usesSegmentLevelSubtitleSource(parameters.video.videoType)) {
+      shotPlan =
+        syncNarrationScriptIntoSubtitlePlan(shotPlan, draftBundle.narrationScript, parameters.video.videoType) ??
+        shotPlan;
+      draftBundle.narrationScript =
+        buildNarrationScriptFromSubtitlePlan(shotPlan, parameters.video.videoType) || draftBundle.narrationScript;
+    }
+    progressTracker?.complete("narration_repair", "解说时长校验完成");
+
+    progressTracker?.start("build_director_plan", "整理镜头计划...");
+    const directorPlan = buildDirectorPlanFromTaskData({
+      draftBundle,
+      shotPlan,
+      parameters,
     });
+    progressTracker?.complete("build_director_plan", "镜头计划已保存");
+    progressTracker?.finish("镜头计划生成完成");
 
-    if (promptContent) {
-      const parsed = JSON.parse(stripCodeFence(promptContent)) as Partial<VideoTaskDraftBundle>;
-      const fallback = buildFallbackDraftBundleFromShotPlan(shotPlan, parameters);
-
-      draftBundle = {
-        textToImagePrompt: parsed.textToImagePrompt?.trim() || fallback.textToImagePrompt,
-        imageToVideoPrompt: parsed.imageToVideoPrompt?.trim() || fallback.imageToVideoPrompt,
-        narrationScript: parsed.narrationScript?.trim() || fallback.narrationScript,
-      };
-    }
-  } catch {
-    // prompt generation failed, use fallback
+    return {
+      draftBundle: buildDraftBundleFromDirectorPlan(directorPlan),
+      shotPlan,
+      directorPlan,
+    };
+  } finally {
+    progressTracker?.dispose();
   }
-
-  if (!draftBundle) {
-    draftBundle = buildFallbackDraftBundleFromShotPlan(shotPlan, parameters);
-  }
-
-  // Step 3.5: Polish narration quality before timing repair
-  draftBundle.narrationScript = await polishNarrationScriptQuality(
-    draftBundle.narrationScript,
-    source,
-    parameters,
-    shotPlan,
-  );
-
-  // Step 3.6: Check narration quality / timing and repair risky lines
-  draftBundle.narrationScript = await repairNarrationIfOverLimit(draftBundle.narrationScript, parameters, shotPlan);
-
-  const directorPlan = buildDirectorPlanFromTaskData({
-    draftBundle,
-    shotPlan,
-    parameters,
-  });
-
-  return {
-    draftBundle: buildDraftBundleFromDirectorPlan(directorPlan),
-    shotPlan,
-    directorPlan,
-  };
 }

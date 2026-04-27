@@ -1,15 +1,17 @@
 import { execFile } from "node:child_process";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { getSpeechSynthesisRuntime } from "./audio-provider-config";
+import { getSpeechSynthesisRuntime, type SpeechSynthesisRuntime } from "./audio-provider-config";
+import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
+import { createMockSpeechResult } from "./mock-aigc-assets";
+import { recordModelUsage } from "./model-usage-service";
 import { joinRuntimePublicStoragePath } from "./runtime-storage";
 import { withRetry } from "./retry";
+import { defaultModelRequestTimeoutMs, fetchWithTimeout } from "./timeout";
 
 const execFileAsync = promisify(execFile);
-const packageRequire = createRequire(process.cwd() + "/package.json");
 
 export type SpeechSynthesisRequest = {
   text: string;
@@ -21,6 +23,11 @@ export type SpeechSynthesisRequest = {
   speechRate?: number;
   loudnessRate?: number;
   enableSubtitle?: boolean;
+  emotion?: string | null;
+  emotionScale?: number | null;
+  contextTexts?: string[];
+  pitch?: number | null;
+  silenceDuration?: number | null;
 };
 
 export type SpeechSynthesisResult = {
@@ -32,6 +39,10 @@ export type SpeechSynthesisResult = {
     endTime: number;
   }>;
   usageTextWords: number | null;
+};
+
+export type SpeechSynthesisResultWithResource = SpeechSynthesisResult & {
+  resolvedResourceId: string | undefined;
 };
 
 function normalizeApiBase(apiBase: string) {
@@ -58,13 +69,7 @@ function getAudioOutputUrl(taskId: string | null | undefined, fileName: string) 
 }
 
 function resolveFfmpegPath() {
-  const runtimePath = packageRequire("ffmpeg-static") as string | null;
-
-  if (!runtimePath || !existsSync(runtimePath)) {
-    throw new Error("当前环境缺少可用的 FFmpeg 可执行文件");
-  }
-
-  return runtimePath;
+  return getFfmpegBinaryPath();
 }
 
 async function probeMediaDurationSeconds(inputPath: string) {
@@ -98,7 +103,78 @@ async function probeMediaDurationSeconds(inputPath: string) {
   }
 }
 
-function parseSseTextPayload(source: string) {
+function readTimedWordNumber(source: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = source[key];
+    if (value == null || value === "") {
+      continue;
+    }
+
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+
+  return null;
+}
+
+function normalizeTimedWordPayload(item: unknown) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+
+  const record = item as Record<string, unknown>;
+  const word = String(record.word ?? record.text ?? record.value ?? "").trim();
+  if (!word) {
+    return null;
+  }
+
+  const startTime = readTimedWordNumber(record, ["startTime", "start_time", "beginTime", "begin_time", "start", "begin"]);
+  const endTime = readTimedWordNumber(record, ["endTime", "end_time", "finishTime", "finish_time", "end", "stop"]);
+  if (startTime == null || endTime == null) {
+    return null;
+  }
+
+  return {
+    word,
+    startTime,
+    endTime: Math.max(startTime, endTime),
+  };
+}
+
+function collectTimedWordPayloads(value: unknown, depth = 0): Array<{ word: string; startTime: number; endTime: number }> {
+  if (depth > 5) {
+    return [];
+  }
+
+  const normalized = normalizeTimedWordPayload(value);
+  if (normalized) {
+    return [normalized];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectTimedWordPayloads(item, depth + 1));
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, nestedValue]) => {
+    const normalizedKey = key.toLowerCase();
+    if (
+      typeof nestedValue === "string" &&
+      ["audio", "audio_data", "binary", "buffer", "data"].includes(normalizedKey)
+    ) {
+      return [];
+    }
+
+    return collectTimedWordPayloads(nestedValue, depth + 1);
+  });
+}
+
+export function parseSseTextPayload(source: string) {
   const lines = source.split(/\r?\n/);
   const audioChunks: Buffer[] = [];
   const words: Array<{ word: string; startTime: number; endTime: number }> = [];
@@ -117,7 +193,7 @@ function parseSseTextPayload(source: string) {
       continue;
     }
 
-    const payload = JSON.parse(payloadText) as {
+    let payload: {
       code?: number;
       message?: string;
       data?: string | null;
@@ -133,6 +209,12 @@ function parseSseTextPayload(source: string) {
       };
     };
 
+    try {
+      payload = JSON.parse(payloadText) as typeof payload;
+    } catch {
+      continue;
+    }
+
     if (typeof payload.code === "number") {
       lastCode = payload.code;
     }
@@ -145,17 +227,7 @@ function parseSseTextPayload(source: string) {
       audioChunks.push(Buffer.from(payload.data, "base64"));
     }
 
-    if (Array.isArray(payload.sentence?.words)) {
-      words.push(
-        ...payload.sentence.words
-          .filter((item) => item.word)
-          .map((item) => ({
-            word: item.word!,
-            startTime: Number(item.startTime) || 0,
-            endTime: Number(item.endTime) || 0,
-          })),
-      );
-    }
+    words.push(...collectTimedWordPayloads(payload));
 
     if (typeof payload.usage?.text_words === "number") {
       usageTextWords = payload.usage.text_words;
@@ -171,49 +243,132 @@ function parseSseTextPayload(source: string) {
   };
 }
 
+function normalizeTimedWords(
+  words: SpeechSynthesisResult["words"],
+  audioDurationSeconds: number | null,
+): SpeechSynthesisResult["words"] {
+  if (words.length === 0) {
+    return words;
+  }
+
+  const maxEndTime = Math.max(...words.map((word) => Number(word.endTime) || 0));
+  const shouldConvertMilliseconds = audioDurationSeconds != null && maxEndTime > Math.max(audioDurationSeconds * 4, 60);
+  const divisor = shouldConvertMilliseconds ? 1000 : 1;
+
+  return words.map((word) => {
+    const startTime = Math.max(0, (Number(word.startTime) || 0) / divisor);
+    const endTime = Math.max(startTime, (Number(word.endTime) || 0) / divisor);
+    return {
+      word: word.word,
+      startTime: Number(startTime.toFixed(3)),
+      endTime: Number(endTime.toFixed(3)),
+    };
+  });
+}
+
+function normalizeContextTexts(contextTexts: SpeechSynthesisRequest["contextTexts"]) {
+  if (!Array.isArray(contextTexts)) {
+    return [];
+  }
+
+  return contextTexts
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function getBoundedNumber(value: number | null | undefined, min: number, max: number) {
+  if (value == null || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(min, Math.min(max, value));
+}
+
+export function buildSpeechSynthesisRequestPayload(input: SpeechSynthesisRequest, runtime: SpeechSynthesisRuntime) {
+  const format = input.format ?? "mp3";
+  const emotion = input.emotion?.trim();
+  const emotionScale = getBoundedNumber(input.emotionScale, 1, 5);
+  const pitch = getBoundedNumber(input.pitch, -12, 12);
+  const silenceDuration = getBoundedNumber(input.silenceDuration, 0, 10_000);
+  const contextTexts = normalizeContextTexts(input.contextTexts);
+  const audioParams: Record<string, unknown> = {
+    format,
+    sample_rate: input.sampleRate ?? runtime.defaultSampleRate,
+    speech_rate: input.speechRate ?? 0,
+    loudness_rate: input.loudnessRate ?? 0,
+    enable_subtitle: input.enableSubtitle ?? true,
+  };
+  const additions: Record<string, unknown> = {
+    disable_markdown_filter: true,
+    disable_emoji_filter: true,
+    cache_config: {
+      text_type: 1,
+      use_cache: true,
+    },
+  };
+
+  if (emotion) {
+    audioParams.emotion = emotion;
+  }
+  if (emotionScale != null) {
+    audioParams.emotion_scale = emotionScale;
+  }
+  if (contextTexts.length > 0) {
+    additions.context_texts = contextTexts;
+  }
+  if (pitch != null) {
+    additions.post_process = { pitch };
+  }
+  if (silenceDuration != null) {
+    additions.silence_duration = silenceDuration;
+  }
+
+  return {
+    user: {
+      uid: "travel-studio",
+    },
+    req_params: {
+      text: input.text,
+      speaker: input.voiceId ?? runtime.defaultVoiceId,
+      audio_params: audioParams,
+      additions: JSON.stringify(additions),
+    },
+  };
+}
+
 export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<SpeechSynthesisResult> {
   const runtime = getSpeechSynthesisRuntime();
 
   if (!runtime.liveEnabled) {
-    throw new Error("火山引擎豆包语音合成 2.0 当前未启用，请先配置音频服务凭证。");
+    return createMockSpeechResult({
+      text: input.text,
+      taskId: input.taskId,
+      sampleRate: input.sampleRate ?? runtime.defaultSampleRate,
+    });
   }
 
   const format = input.format ?? "mp3";
   const parsed = await withRetry(async () => {
-    const res = await fetch(`${normalizeApiBase(runtime.apiBase)}/api/v3/tts/unidirectional/sse`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Api-App-Id": runtime.appId,
-        "X-Api-Access-Key": runtime.accessToken,
-        "X-Api-Resource-Id": input.resourceId ?? runtime.resourceId,
-        "X-Api-Request-Id": crypto.randomUUID(),
-        "X-Control-Require-Usage-Tokens-Return": "*",
+    const res = await fetchWithTimeout(
+      `${normalizeApiBase(runtime.apiBase)}/api/v3/tts/unidirectional/sse`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-App-Id": runtime.appId,
+          "X-Api-Access-Key": runtime.accessToken,
+          "X-Api-Resource-Id": input.resourceId ?? runtime.resourceId,
+          "X-Api-Request-Id": crypto.randomUUID(),
+          "X-Control-Require-Usage-Tokens-Return": "*",
+        },
+        body: JSON.stringify(buildSpeechSynthesisRequestPayload(input, runtime)),
       },
-      body: JSON.stringify({
-        user: {
-          uid: "travel-studio",
-        },
-        req_params: {
-          text: input.text,
-          speaker: input.voiceId ?? runtime.defaultVoiceId,
-          audio_params: {
-            format,
-            sample_rate: input.sampleRate ?? runtime.defaultSampleRate,
-            speech_rate: input.speechRate ?? 0,
-            loudness_rate: input.loudnessRate ?? 0,
-            enable_subtitle: input.enableSubtitle ?? true,
-          },
-          additions: JSON.stringify({
-            disable_markdown_filter: true,
-            cache_config: {
-              text_type: 1,
-              use_cache: true,
-            },
-          }),
-        },
-      }),
-    });
+      {
+        timeoutMs: defaultModelRequestTimeoutMs,
+        timeoutMessage: "语音合成请求超时，请稍后重试",
+      },
+    );
 
     const rawText = await res.text();
     if (!res.ok) throw new Error(rawText || "语音合成失败");
@@ -232,14 +387,72 @@ export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<S
   const absolutePath = join(outputDir, fileName);
   writeFileSync(absolutePath, parsed.audioBuffer);
   const probedDurationSeconds = await probeMediaDurationSeconds(absolutePath).catch(() => null);
-  const wordTimelineDurationSeconds = parsed.words.length
-    ? (parsed.words[parsed.words.length - 1]?.endTime ?? null)
-    : null;
+  const words = normalizeTimedWords(parsed.words, probedDurationSeconds);
+  const wordTimelineDurationSeconds = words.length ? (words[words.length - 1]?.endTime ?? null) : null;
+
+  recordModelUsage({
+    pricingKey: "doubao.speech.tts.2.0",
+    serviceName: "audio.tts",
+    provider: runtime.providerLabel,
+    modelId: input.resourceId ?? runtime.resourceId,
+    metrics: {
+      characterCount: Array.from(input.text).length,
+      requestCount: 1,
+    },
+    requestId: crypto.randomUUID(),
+    remark: "语音合成",
+  });
 
   return {
     audioUrl: getAudioOutputUrl(input.taskId, fileName),
     audioDurationSeconds: probedDurationSeconds ?? wordTimelineDurationSeconds,
-    words: parsed.words,
+    words,
     usageTextWords: parsed.usageTextWords,
   };
+}
+
+export async function synthesizeSpeechWithResourceFallbacks(
+  input: SpeechSynthesisRequest & {
+    fallbackResourceIds?: string[];
+  },
+): Promise<SpeechSynthesisResultWithResource> {
+  const candidateResourceIds = Array.from(
+    new Set([input.resourceId, ...(input.fallbackResourceIds ?? [])].filter((item): item is string => Boolean(item))),
+  );
+
+  if (candidateResourceIds.length === 0) {
+    const result = await synthesizeSpeech(input);
+    return {
+      ...result,
+      resolvedResourceId: input.resourceId,
+    };
+  }
+
+  let lastError: unknown = null;
+
+  for (const [candidateIndex, candidateResourceId] of candidateResourceIds.entries()) {
+    try {
+      const result = await synthesizeSpeech({
+        ...input,
+        resourceId: candidateResourceId,
+      });
+
+      return {
+        ...result,
+        resolvedResourceId: candidateResourceId,
+      };
+    } catch (error) {
+      lastError = error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isLastCandidate = candidateIndex === candidateResourceIds.length - 1;
+
+      if (errorMessage.includes("resource ID is mismatched") && !isLastCandidate) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("语音合成失败");
 }

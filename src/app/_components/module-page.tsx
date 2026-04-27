@@ -1,23 +1,21 @@
+import { PageBrandTitle } from "./page-brand-title";
+
 type ModulePageProps = {
   eyebrow: string;
   title: string;
   description: string;
   highlights: string[];
+  pageName: string;
 };
 
-export function ModulePage({ eyebrow, title, description, highlights }: ModulePageProps) {
+export function ModulePage({ eyebrow, title, description, highlights, pageName }: ModulePageProps) {
   return (
     <main className="shell">
       <section className="content">
         <section className="header-panel">
           <header className="topbar">
             <div className="topbar-main compact">
-              <div className="topbar-title brand-inline">
-                <div className="brand-mark">AI</div>
-                <div className="brand-name-row">
-                  <h2>Hospitality AI Studio</h2>
-                </div>
-              </div>
+              <PageBrandTitle pageName={pageName} />
             </div>
           </header>
 

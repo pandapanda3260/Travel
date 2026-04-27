@@ -1,9 +1,9 @@
-import type { NextConfig } from "next";
+const projectRoot = import.meta.dirname;
 
-const nextConfig: NextConfig = {
-  serverExternalPackages: ["sharp", "ffmpeg-static", "better-sqlite3"],
+const nextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   turbopack: {
-    root: __dirname,
+    root: projectRoot,
   },
 };
 

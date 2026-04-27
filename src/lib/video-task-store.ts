@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
+import { dbGet, dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import { importLegacyVideoTasksIfNeeded } from "./legacy-local-data-import";
 import { joinRuntimeDataPath } from "./runtime-storage";
 import {
@@ -9,14 +9,19 @@ import {
   audioSampleRateOptions,
   audioSpeechRateOptions,
   getDefaultTaskCreationParameterState,
+  getTaskCreationExpectedDurationDefaults,
   inferTaskCreationExpectedDurationRange,
+  normalizeCompositionBackgroundMusicVolume,
 } from "./task-creation-parameters";
+import { hydrateSubtitleConfig } from "./subtitle-style-config";
+import { normalizeNullableMediaSourceInput } from "./media-source-input";
 import { buildDirectorPlanFromTaskData, buildShotPlanFromDirectorPlan } from "./video-task-director";
 import {
   computeVideoTaskStoryShotCount,
   deriveVideoTaskTitle,
   getDefaultTaskConstraints,
   getVideoTaskTypeProfile,
+  normalizeVideoTaskStatus,
   normalizeVideoTaskSource,
   type ShotPlan,
   type VideoTaskDirectorPlan,
@@ -39,119 +44,9 @@ function ensureStore() {
 
 function readStore() {
   ensureStore();
-  const defaults = getDefaultTaskCreationParameterState();
 
   try {
-    return dbGetAll<Partial<VideoTaskRecord>>(COLLECTION).map((record) => {
-      const source = normalizeVideoTaskSource(record.source);
-      const rawVideoType = record.parameters?.video?.videoType ?? defaults.videoType;
-      const profile = getVideoTaskTypeProfile(rawVideoType);
-      const segmentCount = record.parameters?.video?.segmentCount ?? defaults.videoSegmentCount;
-      const durationSeconds = record.parameters?.video?.durationSeconds ?? defaults.videoDurationSeconds;
-      const storyShotsPerSegment = record.parameters?.video?.storyShotsPerSegment ?? profile.recommendedShotsPerSegment;
-      const storyShotCount =
-        record.parameters?.video?.storyShotCount ??
-        computeVideoTaskStoryShotCount({
-          videoType: rawVideoType,
-          segmentCount,
-          storyShotsPerSegment,
-        });
-      const expectedDurationRange =
-        record.parameters?.video?.expectedDurationRange ??
-        inferTaskCreationExpectedDurationRange({
-          videoType: rawVideoType,
-          videoSegmentCount: segmentCount,
-          videoDurationSeconds: durationSeconds,
-        });
-
-      const parameters: VideoTaskRecord["parameters"] = {
-        image: {
-          size: record.parameters?.image?.size ?? defaults.imageSize,
-          guidanceScale: record.parameters?.image?.guidanceScale ?? defaults.imageGuidanceScale,
-          watermark: record.parameters?.image?.watermark ?? defaults.imageWatermark,
-          seed: record.parameters?.image?.seed ?? null,
-        },
-        video: {
-          videoType: rawVideoType,
-          segmentMode: record.parameters?.video?.segmentMode ?? profile.defaultSegmentMode,
-          expectedDurationRange,
-          storyShotCount,
-          storyShotsPerSegment,
-          introSegmentDurationSeconds:
-            record.parameters?.video?.introSegmentDurationSeconds ?? profile.introSegmentDurationSeconds ?? null,
-          mode: record.parameters?.video?.mode ?? defaults.videoMode,
-          multiShot: record.parameters?.video?.multiShot ?? defaults.videoMultiShot,
-          shotType: record.parameters?.video?.shotType ?? defaults.videoShotType,
-          enableTailFrame: record.parameters?.video?.enableTailFrame ?? defaults.videoEnableTailFrame,
-          segmentCount,
-          durationSeconds,
-          aspectRatio: record.parameters?.video?.aspectRatio ?? defaults.videoAspectRatio,
-          cfgScale: record.parameters?.video?.cfgScale ?? defaults.videoCfgScale,
-          cameraControl: record.parameters?.video?.cameraControl ?? defaults.videoCameraControl,
-          generateAudio: record.parameters?.video?.generateAudio ?? defaults.videoGenerateAudio,
-          watermark: record.parameters?.video?.watermark ?? defaults.videoWatermark,
-          negativePrompt: record.parameters?.video?.negativePrompt ?? defaults.videoNegativePrompt,
-        },
-        audio: {
-          voiceId: record.parameters?.audio?.voiceId ?? defaults.audioVoiceId,
-          storyboardEnabled: record.parameters?.audio?.storyboardEnabled ?? defaults.audioStoryboardEnabled,
-          storyboardVoiceIds: record.parameters?.audio?.storyboardVoiceIds ?? defaults.audioStoryboardVoiceIds,
-          format: audioFormatOptions.some((item) => item.value === record.parameters?.audio?.format)
-            ? record.parameters!.audio!.format
-            : defaults.audioFormat,
-          sampleRate: audioSampleRateOptions.some((item) => item.value === record.parameters?.audio?.sampleRate)
-            ? record.parameters!.audio!.sampleRate
-            : defaults.audioSampleRate,
-          speechRate: audioSpeechRateOptions.some((item) => item.value === record.parameters?.audio?.speechRate)
-            ? record.parameters!.audio!.speechRate
-            : defaults.audioSpeechRate,
-          loudnessRate: audioLoudnessRateOptions.some((item) => item.value === record.parameters?.audio?.loudnessRate)
-            ? record.parameters!.audio!.loudnessRate
-            : defaults.audioLoudnessRate,
-          enableSubtitle:
-            typeof record.parameters?.audio?.enableSubtitle === "boolean"
-              ? record.parameters.audio.enableSubtitle
-              : defaults.audioEnableSubtitle,
-        },
-        constraints: {
-          ...getDefaultTaskConstraints(),
-          ...(((record.parameters as Record<string, unknown>)?.constraints as Record<string, unknown>) ?? {}),
-        },
-      };
-      const draftBundle = {
-        textToImagePrompt: record.draftBundle?.textToImagePrompt ?? "",
-        imageToVideoPrompt: record.draftBundle?.imageToVideoPrompt ?? "",
-        narrationScript: record.draftBundle?.narrationScript ?? "",
-      };
-      const shotPlan = ((record as Record<string, unknown>).shotPlan as ShotPlan | null) ?? null;
-      const directorPlan = buildDirectorPlanFromTaskData({
-        draftBundle,
-        shotPlan,
-        directorPlan: ((record as Record<string, unknown>).directorPlan as VideoTaskDirectorPlan | null) ?? null,
-        parameters,
-      });
-
-      return {
-        taskId: record.taskId ?? crypto.randomUUID(),
-        title: record.title ?? deriveVideoTaskTitle(source),
-        status: record.status ?? "CREATED",
-        source,
-        draftBundle,
-        shotPlan: shotPlan ?? buildShotPlanFromDirectorPlan(directorPlan),
-        directorPlan,
-        parameters,
-        createdAt: record.createdAt ?? new Date().toISOString(),
-        updatedAt: record.updatedAt ?? record.createdAt ?? new Date().toISOString(),
-        stageTimestamps: {
-          CREATED: record.stageTimestamps?.CREATED ?? record.createdAt ?? new Date().toISOString(),
-          SUBTITLE_AUDIO_READY: record.stageTimestamps?.SUBTITLE_AUDIO_READY,
-          IMAGES_READY: record.stageTimestamps?.IMAGES_READY,
-          CLIPS_READY: record.stageTimestamps?.CLIPS_READY,
-          COMPOSITION_READY: record.stageTimestamps?.COMPOSITION_READY,
-          VIDEO_BURN_READY: record.stageTimestamps?.VIDEO_BURN_READY,
-        },
-      } satisfies VideoTaskRecord;
-    });
+    return dbGetAll<Partial<VideoTaskRecord>>(COLLECTION).map((record) => normalizeVideoTaskRecord(record));
   } catch {
     return [] as VideoTaskRecord[];
   }
@@ -169,11 +64,33 @@ export function listVideoTasks() {
   return readStore().sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
+export function listAccessibleVideoTasks(userId: string) {
+  return listVideoTasks().filter((item) => item.ownerUserId === null || item.ownerUserId === userId);
+}
+
+export function countOwnedVideoTasksCreatedToday(userId: string, nowAt = new Date().toISOString()) {
+  const source = new Date(nowAt);
+  const start = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth(), source.getUTCDate())).toISOString();
+  const end = new Date(new Date(start).getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+  return listVideoTasks().filter(
+    (item) => item.ownerUserId === userId && item.createdAt >= start && item.createdAt < end,
+  ).length;
+}
+
 export function getVideoTask(taskId: string) {
-  return readStore().find((record) => record.taskId === taskId) ?? null;
+  ensureStore();
+
+  try {
+    const record = dbGet<Partial<VideoTaskRecord>>(COLLECTION, taskId);
+    return record ? normalizeVideoTaskRecord(record) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createVideoTask(input: {
+  ownerUserId?: string | null;
   title?: string;
   source: VideoTaskSource;
   draftBundle: VideoTaskDraftBundle;
@@ -185,6 +102,7 @@ export function createVideoTask(input: {
   const timestamp = new Date().toISOString();
   const record: VideoTaskRecord = {
     taskId: crypto.randomUUID(),
+    ownerUserId: input.ownerUserId ?? null,
     title: input.title?.trim() || deriveVideoTaskTitle(input.source),
     status: "CREATED",
     source: input.source,
@@ -213,54 +131,57 @@ export function patchVideoTask(
       image?: Partial<VideoTaskRecord["parameters"]["image"]>;
       video?: Partial<VideoTaskRecord["parameters"]["video"]>;
       audio?: Partial<VideoTaskRecord["parameters"]["audio"]>;
+      composition?: Partial<VideoTaskRecord["parameters"]["composition"]>;
       constraints?: Partial<VideoTaskRecord["parameters"]["constraints"]>;
     };
   },
 ) {
-  const records = readStore();
-  const index = records.findIndex((record) => record.taskId === taskId);
-
-  if (index < 0) {
+  const currentRecord = getVideoTask(taskId);
+  if (!currentRecord) {
     return null;
   }
 
-  const nextStatus = updates.status ?? records[index].status;
+  const nextStatus = updates.status ?? currentRecord.status;
   const nextStageTimestamps = {
-    ...records[index].stageTimestamps,
+    ...currentRecord.stageTimestamps,
     ...updates.stageTimestamps,
   };
 
-  if (nextStatus !== records[index].status && !nextStageTimestamps[nextStatus]) {
+  if (nextStatus !== currentRecord.status && !nextStageTimestamps[nextStatus]) {
     nextStageTimestamps[nextStatus] = new Date().toISOString();
   }
 
   const nextSource = {
-    ...records[index].source,
+    ...currentRecord.source,
     ...updates.source,
   };
 
   const nextDraftBundle = {
-    ...records[index].draftBundle,
+    ...currentRecord.draftBundle,
     ...updates.draftBundle,
   };
 
   const nextParameters = {
-    ...records[index].parameters,
+    ...currentRecord.parameters,
     ...updates.parameters,
     image: {
-      ...records[index].parameters.image,
+      ...currentRecord.parameters.image,
       ...updates.parameters?.image,
     },
     video: {
-      ...records[index].parameters.video,
+      ...currentRecord.parameters.video,
       ...updates.parameters?.video,
     },
     audio: {
-      ...records[index].parameters.audio,
+      ...currentRecord.parameters.audio,
       ...updates.parameters?.audio,
     },
+    composition: {
+      ...currentRecord.parameters.composition,
+      ...updates.parameters?.composition,
+    },
     constraints: {
-      ...records[index].parameters.constraints,
+      ...currentRecord.parameters.constraints,
       ...updates.parameters?.constraints,
     },
   };
@@ -268,17 +189,17 @@ export function patchVideoTask(
     updates.directorPlan ??
     buildDirectorPlanFromTaskData({
       draftBundle: nextDraftBundle,
-      shotPlan: updates.shotPlan ?? records[index].shotPlan,
-      directorPlan: records[index].directorPlan,
+      shotPlan: updates.shotPlan ?? currentRecord.shotPlan,
+      directorPlan: currentRecord.directorPlan,
       parameters: nextParameters,
       forceRebuild: Boolean(updates.draftBundle || updates.parameters || updates.shotPlan),
     });
-  const nextShotPlan = updates.shotPlan ?? buildShotPlanFromDirectorPlan(nextDirectorPlan, records[index].shotPlan);
+  const nextShotPlan = updates.shotPlan ?? buildShotPlanFromDirectorPlan(nextDirectorPlan, currentRecord.shotPlan);
 
   const nextRecord: VideoTaskRecord = {
-    ...records[index],
+    ...currentRecord,
     ...updates,
-    title: updates.title ?? records[index].title ?? deriveVideoTaskTitle(nextSource),
+    title: updates.title ?? currentRecord.title ?? deriveVideoTaskTitle(nextSource),
     status: nextStatus,
     source: nextSource,
     draftBundle: nextDraftBundle,
@@ -295,14 +216,11 @@ export function patchVideoTask(
 }
 
 export function deleteVideoTask(taskId: string) {
-  const records = readStore();
-  const index = records.findIndex((record) => record.taskId === taskId);
-
-  if (index < 0) {
+  const deletedRecord = getVideoTask(taskId);
+  if (!deletedRecord) {
     return null;
   }
 
-  const deletedRecord = records[index];
   ensureStore();
   dbDelete(COLLECTION, taskId);
   return deletedRecord;
@@ -311,4 +229,136 @@ export function deleteVideoTask(taskId: string) {
 export function resetVideoTaskStore() {
   ensureStore();
   dbReplaceAll(COLLECTION, []);
+}
+
+function normalizeVideoTaskRecord(record: Partial<VideoTaskRecord>): VideoTaskRecord {
+  const defaults = getDefaultTaskCreationParameterState();
+  const source = normalizeVideoTaskSource(record.source);
+  const rawVideoType = record.parameters?.video?.videoType ?? defaults.videoType;
+  const profile = getVideoTaskTypeProfile(rawVideoType);
+  const fallbackExpectedDurationRange =
+    record.parameters?.video?.expectedDurationRange ?? defaults.videoExpectedDurationRange;
+  const durationDefaults = getTaskCreationExpectedDurationDefaults(fallbackExpectedDurationRange, rawVideoType);
+  const segmentCount = record.parameters?.video?.segmentCount ?? durationDefaults.videoSegmentCount;
+  const durationSeconds = record.parameters?.video?.durationSeconds ?? durationDefaults.videoDurationSeconds;
+  const storyShotsPerSegment = record.parameters?.video?.storyShotsPerSegment ?? profile.recommendedShotsPerSegment;
+  const storyShotCount =
+    record.parameters?.video?.storyShotCount ??
+    computeVideoTaskStoryShotCount({
+      videoType: rawVideoType,
+      segmentCount,
+      storyShotsPerSegment,
+    });
+  const expectedDurationRange =
+    record.parameters?.video?.expectedDurationRange ??
+    inferTaskCreationExpectedDurationRange({
+      videoType: rawVideoType,
+      videoSegmentCount: segmentCount,
+      videoDurationSeconds: durationSeconds,
+    });
+
+  const parameters: VideoTaskRecord["parameters"] = {
+    image: {
+      size: record.parameters?.image?.size ?? defaults.imageSize,
+      guidanceScale: record.parameters?.image?.guidanceScale ?? defaults.imageGuidanceScale,
+      watermark: record.parameters?.image?.watermark ?? defaults.imageWatermark,
+      seed: record.parameters?.image?.seed ?? null,
+    },
+    video: {
+      videoType: rawVideoType,
+      segmentMode: record.parameters?.video?.segmentMode ?? profile.defaultSegmentMode,
+      expectedDurationRange,
+      storyShotCount,
+      storyShotsPerSegment,
+      introSegmentDurationSeconds:
+        record.parameters?.video?.introSegmentDurationSeconds ?? profile.introSegmentDurationSeconds ?? null,
+      mode: record.parameters?.video?.mode ?? defaults.videoMode,
+      multiShot: record.parameters?.video?.multiShot ?? defaults.videoMultiShot,
+      shotType: record.parameters?.video?.shotType ?? defaults.videoShotType,
+      enableTailFrame: record.parameters?.video?.enableTailFrame ?? defaults.videoEnableTailFrame,
+      segmentCount,
+      durationSeconds,
+      aspectRatio: record.parameters?.video?.aspectRatio ?? defaults.videoAspectRatio,
+      cfgScale: record.parameters?.video?.cfgScale ?? defaults.videoCfgScale,
+      cameraControl: record.parameters?.video?.cameraControl ?? defaults.videoCameraControl,
+      generateAudio: record.parameters?.video?.generateAudio ?? defaults.videoGenerateAudio,
+      watermark: record.parameters?.video?.watermark ?? defaults.videoWatermark,
+      negativePrompt: record.parameters?.video?.negativePrompt ?? defaults.videoNegativePrompt,
+    },
+    audio: {
+      voiceId: record.parameters?.audio?.voiceId ?? defaults.audioVoiceId,
+      storyboardEnabled: record.parameters?.audio?.storyboardEnabled ?? defaults.audioStoryboardEnabled,
+      storyboardVoiceIds: record.parameters?.audio?.storyboardVoiceIds ?? defaults.audioStoryboardVoiceIds,
+      format: audioFormatOptions.some((item) => item.value === record.parameters?.audio?.format)
+        ? record.parameters!.audio!.format
+        : defaults.audioFormat,
+      sampleRate: audioSampleRateOptions.some((item) => item.value === record.parameters?.audio?.sampleRate)
+        ? record.parameters!.audio!.sampleRate
+        : defaults.audioSampleRate,
+      speechRate: audioSpeechRateOptions.some((item) => item.value === record.parameters?.audio?.speechRate)
+        ? record.parameters!.audio!.speechRate
+        : defaults.audioSpeechRate,
+      loudnessRate: audioLoudnessRateOptions.some((item) => item.value === record.parameters?.audio?.loudnessRate)
+        ? record.parameters!.audio!.loudnessRate
+        : defaults.audioLoudnessRate,
+      enableSubtitle:
+        typeof record.parameters?.audio?.enableSubtitle === "boolean"
+          ? record.parameters.audio.enableSubtitle
+          : defaults.audioEnableSubtitle,
+    },
+    composition: {
+      includeBackgroundMusic:
+        typeof record.parameters?.composition?.includeBackgroundMusic === "boolean"
+          ? record.parameters.composition.includeBackgroundMusic
+          : defaults.compositionIncludeBackgroundMusic,
+      backgroundMusicUrl:
+        typeof record.parameters?.composition?.backgroundMusicUrl === "string"
+          ? normalizeNullableMediaSourceInput(record.parameters.composition.backgroundMusicUrl)
+          : null,
+      backgroundMusicVolume: normalizeCompositionBackgroundMusicVolume(
+        record.parameters?.composition?.backgroundMusicVolume,
+      ),
+      subtitleConfig: hydrateSubtitleConfig(
+        record.parameters?.composition?.subtitleConfig,
+        defaults.compositionSubtitleConfig,
+      ),
+    },
+    constraints: {
+      ...getDefaultTaskConstraints(),
+      ...(((record.parameters as Record<string, unknown>)?.constraints as Record<string, unknown>) ?? {}),
+    },
+  };
+  const draftBundle = {
+    textToImagePrompt: record.draftBundle?.textToImagePrompt ?? "",
+    imageToVideoPrompt: record.draftBundle?.imageToVideoPrompt ?? "",
+    narrationScript: record.draftBundle?.narrationScript ?? "",
+  };
+  const shotPlan = ((record as Record<string, unknown>).shotPlan as ShotPlan | null) ?? null;
+  const directorPlan = buildDirectorPlanFromTaskData({
+    draftBundle,
+    shotPlan,
+    directorPlan: ((record as Record<string, unknown>).directorPlan as VideoTaskDirectorPlan | null) ?? null,
+    parameters,
+  });
+
+  return {
+    taskId: record.taskId ?? crypto.randomUUID(),
+    ownerUserId: record.ownerUserId ?? null,
+    title: record.title ?? deriveVideoTaskTitle(source),
+    status: normalizeVideoTaskStatus(record.status),
+    source,
+    draftBundle,
+    shotPlan: shotPlan ?? buildShotPlanFromDirectorPlan(directorPlan),
+    directorPlan,
+    parameters,
+    createdAt: record.createdAt ?? new Date().toISOString(),
+    updatedAt: record.updatedAt ?? record.createdAt ?? new Date().toISOString(),
+    stageTimestamps: {
+      CREATED: record.stageTimestamps?.CREATED ?? record.createdAt ?? new Date().toISOString(),
+      SUBTITLE_AUDIO_READY: record.stageTimestamps?.SUBTITLE_AUDIO_READY,
+      IMAGES_READY: record.stageTimestamps?.IMAGES_READY,
+      CLIPS_READY: record.stageTimestamps?.CLIPS_READY,
+      COMPOSITION_READY: record.stageTimestamps?.COMPOSITION_READY,
+    },
+  } satisfies VideoTaskRecord;
 }

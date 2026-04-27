@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: dev:auto",
+      "type": "npm",
+      "script": "dev:auto",
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: lint",
+      "type": "npm",
+      "script": "lint",
+      "problemMatcher": ["$eslint-stylish"]
+    },
+    {
+      "label": "npm: typecheck",
+      "type": "npm",
+      "script": "typecheck",
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "npm: test",
+      "type": "npm",
+      "script": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: test:e2e",
+      "type": "npm",
+      "script": "test:e2e",
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: analyze:unused",
+      "type": "npm",
+      "script": "analyze:unused",
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: analyze:circular",
+      "type": "npm",
+      "script": "analyze:circular",
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: analyze:bundle",
+      "type": "npm",
+      "script": "analyze:bundle",
+      "problemMatcher": []
+    }
+  ]
+}

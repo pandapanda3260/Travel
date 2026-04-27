@@ -1,7 +1,4 @@
-import { existsSync } from "node:fs";
-import { createRequire } from "node:module";
-
-const packageRequire = createRequire(process.cwd() + "/package.json");
+import { getFfmpegBinaryPathOrNull } from "./ffmpeg-runtime";
 
 export type LocalServiceRuntime = {
   serviceLabel: string;
@@ -11,8 +8,7 @@ export type LocalServiceRuntime = {
 
 export function getFfmpegLocalRuntime(serviceLabel: string): LocalServiceRuntime {
   try {
-    const runtimePath = packageRequire("ffmpeg-static") as string | null;
-    const available = Boolean(runtimePath && existsSync(runtimePath));
+    const available = Boolean(getFfmpegBinaryPathOrNull());
     return {
       serviceLabel,
       available,

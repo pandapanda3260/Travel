@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 
+import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../../lib/auth-session";
+import { runWithModelUsageContext } from "../../../../../lib/model-usage-context";
 import { getProductArchive, patchProductArchive } from "../../../../../lib/product-archive-store";
 import { extractProductArchiveFromImageChunks } from "../../../../../lib/product-archive-vision";
 import { joinRuntimePublicStoragePath } from "../../../../../lib/runtime-storage";
@@ -92,7 +94,8 @@ async function buildVisionImageChunks(bytes: Buffer, mimeType: string, extension
     return darkPixels / analysis.info.width;
   });
   const analysisScale = height / analysisHeight;
-  const toAnalysisRow = (pixelRow: number) => Math.min(analysisHeight - 1, Math.max(0, Math.round(pixelRow / analysisScale)));
+  const toAnalysisRow = (pixelRow: number) =>
+    Math.min(analysisHeight - 1, Math.max(0, Math.round(pixelRow / analysisScale)));
   const toPixelRow = (analysisRow: number) => Math.min(height, Math.max(0, Math.round(analysisRow * analysisScale)));
   const pickCutPosition = (expectedEnd: number, minEnd: number, maxEnd: number) => {
     const searchStart = toAnalysisRow(Math.max(minEnd, expectedEnd - chunkSearchWindowPixels));
@@ -128,8 +131,14 @@ async function buildVisionImageChunks(bytes: Buffer, mimeType: string, extension
         break;
       }
 
-      const minEnd = Math.min(height, segmentStart + Math.max(minimumSearchHeightPixels, Math.floor(targetChunkHeight * 0.7)));
-      const maxEnd = Math.min(height, segmentStart + Math.max(minimumSearchHeightPixels, Math.ceil(targetChunkHeight * 1.3)));
+      const minEnd = Math.min(
+        height,
+        segmentStart + Math.max(minimumSearchHeightPixels, Math.floor(targetChunkHeight * 0.7)),
+      );
+      const maxEnd = Math.min(
+        height,
+        segmentStart + Math.max(minimumSearchHeightPixels, Math.ceil(targetChunkHeight * 1.3)),
+      );
       const expectedEnd = Math.min(height, segmentStart + targetChunkHeight);
       const cutEnd = Math.max(minEnd, pickCutPosition(expectedEnd, minEnd, maxEnd));
       baseChunks.push({ start: segmentStart, end: cutEnd });
@@ -143,7 +152,8 @@ async function buildVisionImageChunks(bytes: Buffer, mimeType: string, extension
 
     for (const [chunkIndex, chunk] of baseChunks.entries()) {
       const effectiveTop = chunkIndex === 0 ? chunk.start : Math.max(0, chunk.start - chunkOverlapPixels);
-      const effectiveBottom = chunkIndex === baseChunks.length - 1 ? chunk.end : Math.min(height, chunk.end + chunkOverlapPixels);
+      const effectiveBottom =
+        chunkIndex === baseChunks.length - 1 ? chunk.end : Math.min(height, chunk.end + chunkOverlapPixels);
       const currentHeight = effectiveBottom - effectiveTop;
       chunkHeights.push(currentHeight);
 
@@ -184,11 +194,19 @@ async function buildVisionImageChunks(bytes: Buffer, mimeType: string, extension
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
+  const session = requireUserApiSession(request);
+  if (!session) {
+    return userApiUnauthorizedResponse();
+  }
+
   try {
     const { archiveId } = await context.params;
     const archive = getProductArchive(archiveId);
     if (!archive) {
       return NextResponse.json({ error: "商品档案不存在" }, { status: 404 });
+    }
+    if (archive.ownerUserId && archive.ownerUserId !== session.userId) {
+      return NextResponse.json({ error: "无权修改该商品档案", code: "PRODUCT_ARCHIVE_FORBIDDEN" }, { status: 403 });
     }
 
     const formData = await request.formData();
@@ -208,7 +226,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const bytes = Buffer.from(await file.arrayBuffer());
     const imageChunks = await buildVisionImageChunks(bytes, file.type, extension);
-    const parsed = await extractProductArchiveFromImageChunks(imageChunks);
+    const parsed = await runWithModelUsageContext(
+      {
+        userId: archive.ownerUserId ?? session.userId,
+        routePath: "/api/product-archives/[archiveId]/image",
+        objectType: "product_archive",
+        objectId: archiveId,
+      },
+      () => extractProductArchiveFromImageChunks(imageChunks),
+    );
 
     const imageDir = joinRuntimePublicStoragePath("product-archives", archiveId, "source");
     mkdirSync(imageDir, { recursive: true });

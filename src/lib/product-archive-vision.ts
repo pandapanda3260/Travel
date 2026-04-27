@@ -1,5 +1,6 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { loadOptionalEnvFile, parseBoolean } from "./env-file";
+import { recordModelUsage } from "./model-usage-service";
 
 type ProductArchiveVisionRuntime = {
   liveEnabled: boolean;
@@ -50,7 +51,12 @@ function isLikelyDuplicateLine(left: string, right: string) {
 
 function getVisionRuntime(): ProductArchiveVisionRuntime {
   const localConfig = loadOptionalEnvFile("text.env.local");
-  const apiKey = process.env.VOLCENGINE_TEXT_API_KEY ?? localConfig.VOLCENGINE_TEXT_API_KEY ?? "";
+  const apiKey =
+    process.env.VOLCENGINE_TEXT_API_KEY ??
+    localConfig.VOLCENGINE_TEXT_API_KEY ??
+    process.env.ARK_API_KEY ??
+    localConfig.ARK_API_KEY ??
+    "";
   const apiBase =
     process.env.VOLCENGINE_TEXT_API_BASE ??
     localConfig.VOLCENGINE_TEXT_API_BASE ??
@@ -162,6 +168,7 @@ export function getProductArchiveVisionProviderMeta() {
   return {
     providerLabel: runtime.providerLabel,
     modelId: runtime.modelId,
+    apiBase: runtime.apiBase,
     liveEnabled: runtime.liveEnabled,
   };
 }
@@ -211,11 +218,32 @@ export async function extractProductArchiveFromImageDataUrl(imageDataUrl: string
   const payload = (await response.json().catch(() => ({}))) as {
     error?: { message?: string };
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_tokens_details?: {
+        cached_tokens?: number;
+      };
+    };
   };
 
   if (!response.ok) {
     throw new Error(payload.error?.message ?? "商品图片解析失败");
   }
+
+  recordModelUsage({
+    pricingKey: runtime.modelId.includes("vision-pro") ? "doubao.vision.1.5.pro.32k" : null,
+    serviceName: "vision.product_archive",
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    metrics: {
+      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
+      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
+      cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+    },
+    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+    remark: "商品档案图片解析",
+  });
 
   const content = payload.choices?.[0]?.message?.content;
   if (!content) {

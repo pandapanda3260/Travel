@@ -1,0 +1,13 @@
+.composer-settings-grid.task-create-grid.product-archive-key-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.prompt-box.product-archive-editor {
+  min-height: 600px;
+}
+
+@media (max-width: 1200px) {
+  .composer-settings-grid.task-create-grid.product-archive-key-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -11,6 +11,8 @@ text.env.local
 fal.env.local
 kling.env.local
 dist
+playwright-report
+test-results/
 
 # Runtime JSON data stores
 data/video-tasks.json
@@ -45,4 +47,3 @@ public/video-materials
 data/
 *.db
 *.bak
-

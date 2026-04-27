@@ -1,12 +1,23 @@
 "use client";
 
-import Image from "next/image";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Play } from "lucide-react";
 
-import { splitTextIntoPhrases } from "../../../../lib/subtitle-text-utils";
+import {
+  directorPrimaryStepActionKeys,
+  directorSecondaryStepActionKeys,
+  getDirectorPrimaryStepButtonLabel,
+} from "../../../../lib/director-step-actions";
+import { type SubtitleConfig } from "../../../../lib/subtitle-style-config";
+import type { TaskClipSourceShot } from "../../../../lib/task-clip-store";
+import { isTaskStageProgressRunning, type TaskStageProgressSnapshot } from "../../../../lib/task-stage-progress";
 import type { VideoTaskRecord } from "../../../../lib/video-task-schema";
+import { useVideoTimecode } from "../../../_components/use-video-timecode";
 
-import { formatLocalServiceDisplay, TaskStatusHintPanel, type TaskStatusHintItem } from "./task-ui";
+import { type TaskStepActionState } from "./task-ui";
+import { useStreamProgress } from "./use-stream-progress";
+import { CompositionSettingsPanel } from "./composition-settings-panel";
 
 type CompositionTransition = "cut" | "fade";
 
@@ -53,6 +64,7 @@ type CompositionMaterial = {
     } | null;
   } | null;
   thumbnailUrl: string | null;
+  sourceShots: TaskClipSourceShot[];
 };
 
 type CompositionRecord = {
@@ -61,10 +73,12 @@ type CompositionRecord = {
   status: "DRAFT" | "PROCESSING" | "COMPLETED" | "FAILED";
   outputVideoUrl: string | null;
   backgroundMusicUrl: string | null;
+  backgroundMusicVolume: number;
   transitionMode: CompositionTransition;
   transitionDurationSeconds: number;
   audioMode: string;
   subtitleSrtUrl: string | null;
+  subtitleConfig: SubtitleConfig;
   createdAt: string;
   updatedAt: string;
   segments: Array<{
@@ -79,12 +93,20 @@ type CompositionRecord = {
 type CompositionModuleResponse = {
   task?: VideoTaskRecord;
   clipShots?: CompositionMaterial[];
+  narrationResult?: {
+    clips: Array<unknown>;
+    updatedAt?: string;
+    subtitleSrtUrl?: string | null;
+  } | null;
   latestComposition?: CompositionRecord | null;
+  latestPlayableComposition?: CompositionRecord | null;
   statusSummary?: {
     clipCount: number;
     completedClipCount: number;
     subtitleReady: boolean;
     narrationReady: boolean;
+    subtitleSourceLabel?: string;
+    narrationSourceLabel?: string;
     latestResultAt: string;
   };
   runtime?: {
@@ -96,10 +118,11 @@ type CompositionModuleResponse = {
   error?: string;
 };
 
-type TimelineItem = {
+type TimelineSegmentSummary = {
   segmentId: string;
   shotIndex: number;
-  transition: CompositionTransition;
+  shotTitle: string;
+  durationSeconds: number;
 };
 
 async function parseApiResponse<T>(response: Response): Promise<T> {
@@ -120,132 +143,198 @@ async function parseApiResponse<T>(response: Response): Promise<T> {
   }
 }
 
-function buildTimelineKey(timeline: TimelineItem[]) {
-  return timeline.map((item) => `${item.segmentId}:${item.transition}`).join("|");
+function toCssAspectRatio(aspectRatio: "16:9" | "9:16" | "1:1" | null | undefined) {
+  switch (aspectRatio) {
+    case "16:9":
+      return "16 / 9";
+    case "1:1":
+      return "1 / 1";
+    case "9:16":
+    default:
+      return "9 / 16";
+  }
+}
+
+function resolveSceneTypeLabel(sceneType: TaskClipSourceShot["sceneType"]) {
+  switch (sceneType) {
+    case "exterior":
+      return "酒店外观";
+    case "lobby":
+      return "大堂";
+    case "room":
+      return "客房";
+    case "bathroom":
+      return "卫浴";
+    case "dining":
+      return "餐厅";
+    case "food":
+      return "早餐/菜品";
+    case "facility":
+      return "配套设施";
+    case "neighborhood":
+      return "周边";
+    case "service_detail":
+      return "服务细节";
+    case "atmosphere":
+      return "氛围镜头";
+    case "other":
+      return "其他";
+    default:
+      return "未分类";
+  }
+}
+
+function resolveGenerationModeLabel(
+  mode: TaskClipSourceShot["generationMode"],
+  assetSourceType?: TaskClipSourceShot["assetSourceType"],
+) {
+  if (assetSourceType === "video_material") {
+    return "实拍视频直出";
+  }
+  switch (mode) {
+    case "photo_direct_i2v":
+      return "实拍图直驱";
+    case "photo_enhanced_i2v":
+      return "实拍图增强后驱动";
+    case "ai_generated_broll":
+      return "AI 补镜头";
+    default:
+      return "待定";
+  }
+}
+
+function formatSourceSummary(sourceShots: TaskClipSourceShot[]) {
+  if (!sourceShots.length) {
+    return "暂无镜头来源记录";
+  }
+
+  return sourceShots
+    .map((shot) => {
+      const subject =
+        shot.assetSubjectSummary?.trim() || shot.contentDescription?.trim() || resolveSceneTypeLabel(shot.sceneType);
+      return `镜头 ${shot.shotIndex} · ${resolveGenerationModeLabel(shot.generationMode, shot.assetSourceType)} · ${subject}`;
+    })
+    .join(" ｜ ");
+}
+
+function buildShotPlanHref(taskId: string, shotIndex: number) {
+  return `/studio/task-creation/${encodeURIComponent(taskId)}/shot-plan?shot=${encodeURIComponent(String(shotIndex))}#shot-${encodeURIComponent(String(shotIndex))}`;
 }
 
 export function CompositionModule({
   task,
+  persistedStageProgress,
   onTaskUpdate,
   onPrimaryActionChange,
+  includeBackgroundMusic,
+  backgroundMusicUrl,
+  backgroundMusicVolume,
+  subtitleConfig,
+  upstreamBlockedReason = null,
+  showSettings = false,
 }: {
   task: VideoTaskRecord | null;
+  persistedStageProgress?: TaskStageProgressSnapshot | null;
   onTaskUpdate: (task: VideoTaskRecord) => void;
-  onPrimaryActionChange?:
-    | ((config: { label: string; disabled: boolean; onAction: () => void } | null) => void)
-    | undefined;
+  onPrimaryActionChange?: ((config: TaskStepActionState | null) => void) | undefined;
+  includeBackgroundMusic: boolean;
+  backgroundMusicUrl: string;
+  backgroundMusicVolume: number;
+  subtitleConfig: SubtitleConfig;
+  upstreamBlockedReason?: string | null;
+  showSettings?: boolean;
 }) {
   const taskId = task?.taskId ?? null;
   const [materials, setMaterials] = useState<CompositionMaterial[]>([]);
-  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
-  const [includeBackgroundMusic, setIncludeBackgroundMusic] = useState(false);
-  const [backgroundMusicUrl, setBackgroundMusicUrl] = useState("");
-  const [subtitleStyle, setSubtitleStyle] = useState<"clean" | "bold" | "outline" | "shadow">("clean");
-  const [subtitleMaxChars, setSubtitleMaxChars] = useState(8);
-  const [subtitlePosition, setSubtitlePosition] = useState<"bottom" | "center" | "top">("bottom");
-  const [subtitleSizeRatio, setSubtitleSizeRatio] = useState(0.022);
-  const [subtitleDisplay, setSubtitleDisplay] = useState<"word_by_word" | "full_sentence">("full_sentence");
-  const [previewSubtitleIndex, setPreviewSubtitleIndex] = useState(0);
   const [latestComposition, setLatestComposition] = useState<CompositionRecord | null>(null);
+  const [latestPlayableComposition, setLatestPlayableComposition] = useState<CompositionRecord | null>(null);
   const [statusSummary, setStatusSummary] = useState<CompositionModuleResponse["statusSummary"] | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [runtime, setRuntime] = useState<CompositionModuleResponse["runtime"] | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const lastHydratedTimelineKeyRef = useRef("");
+  const [sourceReviewExpanded, setSourceReviewExpanded] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const compositionStreamProgress = useStreamProgress();
+  const compositionProgressMessage = compositionStreamProgress.progress.message;
+  const compositionProgressPercent = compositionStreamProgress.progress.percent;
+  const readCompositionStream = compositionStreamProgress.readStream;
+  const resetCompositionStream = compositionStreamProgress.reset;
 
-  const loadCompositionData = useCallback(async () => {
-    if (!taskId) {
-      return;
-    }
+  const completedSegments = useMemo((): TimelineSegmentSummary[] => {
+    return materials
+      .filter((item) => item.job?.status === "COMPLETED")
+      .sort((left, right) => left.segmentIndex - right.segmentIndex)
+      .map((item) => ({
+        segmentId: item.segmentId,
+        shotIndex: item.shotIndex,
+        shotTitle: item.shotTitle,
+        durationSeconds: item.durationSeconds,
+      }));
+  }, [materials]);
+  const compositionPreviewAspectRatio = task?.parameters.video.aspectRatio ?? "9:16";
+  const previewComposition =
+    (latestComposition?.outputVideoUrl ? latestComposition : null) ?? latestPlayableComposition ?? latestComposition;
+  const previewTimecode = useVideoTimecode(previewComposition?.outputVideoUrl ?? null);
 
-    setLoadingStatus("loading");
-    setError(null);
-
-    abortControllerRef.current?.abort();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    try {
-      const response = await fetch(`/api/video-tasks/${taskId}/composition-runs`, {
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      const data = await parseApiResponse<CompositionModuleResponse>(response);
-      if (!response.ok) {
-        throw new Error(data.error ?? "视频合成数据加载失败");
+  const loadCompositionData = useCallback(
+    async (silently = false) => {
+      if (!taskId) {
+        return;
       }
 
-      setMaterials(data.clipShots ?? []);
-      setLatestComposition(data.latestComposition ?? data.result ?? null);
-      setStatusSummary(data.statusSummary ?? null);
-      setRuntime(data.runtime ?? null);
-
-      const compositionSegments = data.latestComposition?.segments ?? [];
-      const hasExistingComposition = compositionSegments.length > 0;
-
-      let nextTimeline: TimelineItem[];
-      if (hasExistingComposition) {
-        nextTimeline = compositionSegments
-          .sort((left, right) => left.order - right.order)
-          .map((segment) => {
-            const matchedMaterial = (data.clipShots ?? []).find((item) => item.job?.jobId === segment.sourceJobId);
-            return matchedMaterial
-              ? {
-                  segmentId: matchedMaterial.segmentId,
-                  shotIndex: matchedMaterial.shotIndex,
-                  transition: segment.transition ?? "cut",
-                }
-              : null;
-          })
-          .filter((item): item is TimelineItem => Boolean(item));
-      } else {
-        nextTimeline = (data.clipShots ?? [])
-          .filter((item) => item.job?.status === "COMPLETED")
-          .sort((left, right) => left.segmentIndex - right.segmentIndex)
-          .map((item) => ({ segmentId: item.segmentId, shotIndex: item.shotIndex, transition: "cut" as const }));
+      if (!silently) {
+        setLoadingStatus("loading");
       }
-      const nextTimelineKey = buildTimelineKey(nextTimeline);
+      setError(null);
 
-      if (nextTimelineKey && lastHydratedTimelineKeyRef.current !== nextTimelineKey) {
-        setTimeline(nextTimeline);
-        lastHydratedTimelineKeyRef.current = nextTimelineKey;
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      try {
+        const response = await fetch(`/api/video-tasks/${taskId}/composition-runs`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = await parseApiResponse<CompositionModuleResponse>(response);
+        if (!response.ok) {
+          throw new Error(data.error ?? "视频合成数据加载失败");
+        }
+
+        if (data.task) {
+          onTaskUpdate(data.task);
+        }
+        setMaterials(data.clipShots ?? []);
+        setLatestComposition(data.latestComposition ?? data.result ?? null);
+        setLatestPlayableComposition(data.latestPlayableComposition ?? data.result ?? data.latestComposition ?? null);
+        setStatusSummary(data.statusSummary ?? null);
+        setLoadingStatus("success");
+      } catch (loadError) {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setLoadingStatus("error");
+        setError(
+          loadError instanceof Error && loadError.message === "Failed to fetch"
+            ? "视频合成接口当前不可达，请稍后重试；如果你刚修改过代码，通常是开发服务正在重编译。"
+            : loadError instanceof Error
+              ? loadError.message
+              : "视频合成数据加载失败",
+        );
       }
-
-      const nextBackgroundMusicUrl = data.latestComposition?.backgroundMusicUrl ?? "";
-      setIncludeBackgroundMusic(Boolean(nextBackgroundMusicUrl));
-      setBackgroundMusicUrl(nextBackgroundMusicUrl);
-      setLoadingStatus("success");
-    } catch (loadError) {
-      if (loadError instanceof DOMException && loadError.name === "AbortError") return;
-      setLoadingStatus("error");
-      setError(
-        loadError instanceof Error && loadError.message === "Failed to fetch"
-          ? "视频合成接口当前不可达，请稍后重试；如果你刚修改过代码，通常是开发服务正在重编译。"
-          : loadError instanceof Error
-            ? loadError.message
-            : "视频合成数据加载失败",
-      );
-    }
-  }, [taskId]);
+    },
+    [onTaskUpdate, taskId],
+  );
 
   useEffect(() => {
     if (!taskId) {
       setMaterials([]);
-      setTimeline([]);
       setLatestComposition(null);
-      setRuntime(null);
+      setLatestPlayableComposition(null);
       setLoadingStatus("idle");
       return;
     }
 
-    setTimeline([]);
-    setIncludeBackgroundMusic(false);
-    setBackgroundMusicUrl("");
-    lastHydratedTimelineKeyRef.current = "";
     void loadCompositionData();
 
     return () => {
@@ -253,105 +342,42 @@ export function CompositionModule({
     };
   }, [loadCompositionData, taskId]);
 
-  const materialMap = useMemo(() => new Map(materials.map((item) => [item.segmentId, item])), [materials]);
-  const timelineMaterials = useMemo(() => {
-    const seen = new Set<string>();
-    return timeline
-      .filter((item) => {
-        if (seen.has(item.segmentId)) return false;
-        seen.add(item.segmentId);
-        return true;
-      })
-      .map((item) => ({ timelineItem: item, material: materialMap.get(item.segmentId) ?? null }))
-      .filter((item): item is { timelineItem: TimelineItem; material: CompositionMaterial } => item.material !== null);
-  }, [timeline, materialMap]);
+  const persistedRunning = isTaskStageProgressRunning(persistedStageProgress);
+  const compositionStageRunning = submitting || persistedRunning || latestComposition?.status === "PROCESSING";
+  const isInitialCompositionLoading = Boolean(
+    taskId &&
+      (loadingStatus === "idle" || loadingStatus === "loading") &&
+      !latestComposition &&
+      !latestPlayableComposition &&
+      materials.length === 0,
+  );
+  const basePrimaryActionLabel = getDirectorPrimaryStepButtonLabel(directorPrimaryStepActionKeys.composeStoryVideo, {
+    running: compositionStageRunning,
+    rerun: Boolean(latestComposition),
+  });
+  const primaryActionLabel =
+    isInitialCompositionLoading
+      ? "合成结果加载中..."
+      : submitting && compositionProgressMessage
+      ? compositionProgressMessage
+      : persistedRunning && persistedStageProgress?.message
+        ? persistedStageProgress.message
+        : basePrimaryActionLabel;
+  const primaryProgressPercent = submitting
+    ? compositionProgressPercent
+    : persistedRunning
+      ? (persistedStageProgress?.percent ?? 0)
+      : 0;
+  const completedClipCount = statusSummary?.completedClipCount ?? completedSegments.length;
+  const compositionBlockedReason =
+    upstreamBlockedReason?.trim() ||
+    (isInitialCompositionLoading || loadingStatus === "loading"
+      ? "合成素材加载中，请稍后再试。"
+      : completedClipCount <= 0
+        ? "请先完成视频片段生成后，再进行视频合成。"
+        : null);
 
-  const compositionHintItems = useMemo((): TaskStatusHintItem[] => {
-    const clipCount = statusSummary?.clipCount ?? materials.length;
-    const completedClips =
-      statusSummary?.completedClipCount ?? materials.filter((m) => m.job?.status === "COMPLETED").length;
-
-    const loadTone: TaskStatusHintItem["tone"] =
-      loadingStatus === "error"
-        ? "danger"
-        : loadingStatus === "success"
-          ? "success"
-          : loadingStatus === "loading"
-            ? "progress"
-            : "neutral";
-    const loadValue =
-      loadingStatus === "loading"
-        ? "加载中"
-        : loadingStatus === "success"
-          ? "已同步"
-          : loadingStatus === "error"
-            ? "失败（可看顶部报错）"
-            : "待加载";
-
-    const clipTone: TaskStatusHintItem["tone"] = !clipCount
-      ? "neutral"
-      : completedClips === clipCount
-        ? "success"
-        : completedClips > 0
-          ? "progress"
-          : "danger";
-    const clipValue = clipCount ? `${completedClips}/${clipCount} 片段可用` : "暂无素材";
-
-    const compStatus = latestComposition?.status;
-    const compTone: TaskStatusHintItem["tone"] =
-      compStatus === "COMPLETED"
-        ? "success"
-        : compStatus === "FAILED"
-          ? "danger"
-          : compStatus === "PROCESSING"
-            ? "progress"
-            : "neutral";
-    const compValue = !latestComposition
-      ? "尚无成片记录"
-      : compStatus === "COMPLETED"
-        ? "输出可预览"
-        : compStatus === "FAILED"
-          ? "上次失败"
-          : compStatus === "PROCESSING"
-            ? "处理中"
-            : "草稿/待合成";
-
-    return [
-      { label: "合成数据接口", value: loadValue, tone: loadTone },
-      {
-        label: "本地合成服务",
-        value: runtime
-          ? formatLocalServiceDisplay({
-              serviceLabel: runtime.serviceLabel,
-              available: runtime.available,
-              unavailableLabel: runtime.statusLabel,
-            })
-          : "待加载",
-        tone: runtime?.available ? "success" : runtime ? "danger" : "neutral",
-      },
-      { label: "可用视频片段", value: clipValue, tone: clipTone },
-      {
-        label: "字幕轨素材",
-        value: statusSummary?.subtitleReady ? "已取到" : "缺失（易致字幕异常）",
-        tone: statusSummary?.subtitleReady ? "success" : "danger",
-      },
-      {
-        label: "配音轨素材",
-        value: statusSummary?.narrationReady ? "已取到" : "缺失（易致无声）",
-        tone: statusSummary?.narrationReady ? "success" : "danger",
-      },
-      {
-        label: "Timeline 入轨",
-        value: timeline.length ? `${timeline.length} 段已排程` : "未加入任何片段（主按钮禁用）",
-        tone: timeline.length > 0 ? "success" : "danger",
-      },
-      { label: "成片任务", value: compValue, tone: compTone },
-    ];
-  }, [latestComposition, loadingStatus, materials, runtime, statusSummary, timeline.length]);
-
-  const primaryActionLabel = submitting ? "合成中..." : latestComposition ? "重新合成视频" : "点击进行第六步 合成视频";
-
-  const submitAutoCompose = useCallback(async () => {
+  const submitComposition = useCallback(async () => {
     if (!taskId) {
       return;
     }
@@ -360,169 +386,86 @@ export function CompositionModule({
     setError(null);
 
     try {
-      const response = await fetch(`/api/video-tasks/${taskId}/composition-runs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "auto_compose",
-          includeBackgroundMusic,
-          backgroundMusicUrl,
-        }),
-      });
-      const data = await parseApiResponse<CompositionModuleResponse>(response);
-      if (!response.ok) {
-        throw new Error(data.error ?? "自动合成失败");
+      const data = await readCompositionStream<CompositionModuleResponse>(
+        `/api/video-tasks/${taskId}/composition-runs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: directorSecondaryStepActionKeys.autoComposeStoryVideo,
+            includeBackgroundMusic,
+            backgroundMusicUrl,
+            backgroundMusicVolume,
+            subtitleConfig,
+          }),
+        },
+      );
+
+      if (data.error) {
+        throw new Error(data.error);
       }
 
       setMaterials(data.clipShots ?? []);
       setLatestComposition(data.result ?? data.latestComposition ?? null);
+      setLatestPlayableComposition(data.latestPlayableComposition ?? data.result ?? data.latestComposition ?? null);
       setStatusSummary(data.statusSummary ?? null);
-      setRuntime(data.runtime ?? null);
-
-      if (data.result?.segments?.length) {
-        const autoTimeline = data.result.segments
-          .sort((left, right) => left.order - right.order)
-          .map((segment) => {
-            const matchedMaterial = (data.clipShots ?? []).find((item) => item.job?.jobId === segment.sourceJobId);
-            return matchedMaterial
-              ? {
-                  segmentId: matchedMaterial.segmentId,
-                  shotIndex: matchedMaterial.shotIndex,
-                  transition: segment.transition ?? ("cut" as const),
-                }
-              : null;
-          })
-          .filter((item): item is TimelineItem => Boolean(item));
-        if (autoTimeline.length) {
-          setTimeline(autoTimeline);
-          lastHydratedTimelineKeyRef.current = buildTimelineKey(autoTimeline);
-        }
-      }
 
       if (data.task) {
         onTaskUpdate(data.task);
       }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "自动合成失败");
+      setError(
+        submitError instanceof Error && submitError.message === "Failed to fetch"
+          ? "视频合成请求未送达，请确认开发服务可用后重试。"
+          : submitError instanceof Error
+            ? submitError.message
+            : "视频合成失败",
+      );
     } finally {
       setSubmitting(false);
+      resetCompositionStream();
     }
-  }, [backgroundMusicUrl, includeBackgroundMusic, onTaskUpdate, taskId]);
+  }, [
+    backgroundMusicUrl,
+    backgroundMusicVolume,
+    includeBackgroundMusic,
+    onTaskUpdate,
+    readCompositionStream,
+    resetCompositionStream,
+    subtitleConfig,
+    taskId,
+  ]);
 
-  const submitComposition = useCallback(
-    async (action: "compose" | "regenerate") => {
-      if (!taskId) {
-        return;
-      }
+  const handlePrimaryAction = useCallback(() => {
+    void submitComposition();
+  }, [submitComposition]);
 
-      setSubmitting(true);
-      setError(null);
+  useEffect(() => {
+    if (!taskId || submitting || !compositionStageRunning) {
+      return;
+    }
 
-      try {
-        const response = await fetch(`/api/video-tasks/${taskId}/composition-runs`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            action,
-            timeline,
-            includeBackgroundMusic,
-            backgroundMusicUrl,
-          }),
-        });
-        const data = await parseApiResponse<CompositionModuleResponse>(response);
-        if (!response.ok) {
-          throw new Error(data.error ?? "视频合成失败");
-        }
+    const timer = window.setInterval(() => {
+      void loadCompositionData(true);
+    }, 3000);
 
-        setMaterials(data.clipShots ?? []);
-        setLatestComposition(data.result ?? data.latestComposition ?? null);
-        setStatusSummary(data.statusSummary ?? null);
-        if (data.task) {
-          onTaskUpdate(data.task);
-        }
-      } catch (submitError) {
-        setError(
-          submitError instanceof Error && submitError.message === "Failed to fetch"
-            ? "视频合成请求未送达，请确认开发服务可用后重试。"
-            : submitError instanceof Error
-              ? submitError.message
-              : "视频合成失败",
-        );
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [backgroundMusicUrl, includeBackgroundMusic, onTaskUpdate, taskId, timeline],
-  );
-
-  function addToTimeline(segmentId: string, shotIndex: number) {
-    setTimeline((current) => {
-      if (current.some((item) => item.segmentId === segmentId)) {
-        return current;
-      }
-      const next = [...current, { segmentId, shotIndex, transition: "cut" as const }];
-      lastHydratedTimelineKeyRef.current = buildTimelineKey(next);
-      return next;
-    });
-  }
-
-  function removeFromTimeline(segmentId: string) {
-    setTimeline((current) => {
-      const next = current.filter((item) => item.segmentId !== segmentId);
-      if (next.length === current.length) return current;
-      lastHydratedTimelineKeyRef.current = buildTimelineKey(next);
-      return next;
-    });
-  }
-
-  function updateTimelineTransition(segmentId: string, transition: CompositionTransition) {
-    setTimeline((current) => {
-      const index = current.findIndex((item) => item.segmentId === segmentId);
-      if (index < 0) return current;
-      const next = [...current];
-      next[index] = { ...next[index], transition };
-      lastHydratedTimelineKeyRef.current = buildTimelineKey(next);
-      return next;
-    });
-  }
-
-  function autoArrangeTimeline() {
-    const completedMaterials = materials
-      .filter((item) => item.job?.status === "COMPLETED")
-      .sort((left, right) => left.segmentIndex - right.segmentIndex);
-    const next: TimelineItem[] = completedMaterials.map((item) => ({
-      segmentId: item.segmentId,
-      shotIndex: item.shotIndex,
-      transition: "cut" as const,
-    }));
-    lastHydratedTimelineKeyRef.current = buildTimelineKey(next);
-    setTimeline(next);
-  }
-
-  function moveTimelineItem(segmentId: string, direction: "up" | "down") {
-    setTimeline((current) => {
-      const index = current.findIndex((item) => item.segmentId === segmentId);
-      if (index < 0) return current;
-      if (direction === "up" && index === 0) return current;
-      if (direction === "down" && index === current.length - 1) return current;
-      const next = [...current];
-      const targetIndex = direction === "up" ? index - 1 : index + 1;
-      [next[targetIndex], next[index]] = [next[index], next[targetIndex]];
-      lastHydratedTimelineKeyRef.current = buildTimelineKey(next);
-      return next;
-    });
-  }
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [compositionStageRunning, loadCompositionData, submitting, taskId]);
 
   function handlePlayPreview() {
-    if (!previewVideoRef.current || !latestComposition?.outputVideoUrl) {
+    if (!previewVideoRef.current || !previewComposition?.outputVideoUrl) {
       return;
     }
 
     previewVideoRef.current.currentTime = 0;
     void previewVideoRef.current.play();
   }
+
+  useEffect(() => {
+    setIsPlaying(false);
+  }, [previewComposition?.outputVideoUrl]);
 
   useEffect(() => {
     if (!onPrimaryActionChange) {
@@ -536,281 +479,61 @@ export function CompositionModule({
 
     onPrimaryActionChange({
       label: primaryActionLabel,
-      disabled: submitting || !timelineMaterials.length,
-      onAction: () => {
-        void submitComposition(latestComposition ? "regenerate" : "compose");
-      },
+      isRunning: compositionStageRunning || isInitialCompositionLoading,
+      progressPercent: primaryProgressPercent,
+      canRun: !compositionBlockedReason,
+      blockedReason: compositionBlockedReason,
+      onAction: handlePrimaryAction,
     });
+  }, [
+    loadingStatus,
+    handlePrimaryAction,
+    onPrimaryActionChange,
+    primaryProgressPercent,
+    primaryActionLabel,
+    completedSegments.length,
+    statusSummary?.completedClipCount,
+    compositionStageRunning,
+    compositionBlockedReason,
+    isInitialCompositionLoading,
+    taskId,
+  ]);
+
+  useEffect(() => {
+    if (!onPrimaryActionChange) {
+      return;
+    }
 
     return () => {
       onPrimaryActionChange(null);
     };
-  }, [
-    latestComposition,
-    onPrimaryActionChange,
-    primaryActionLabel,
-    submitComposition,
-    submitting,
-    taskId,
-    timelineMaterials.length,
-  ]);
+  }, [onPrimaryActionChange]);
 
   if (!task) {
     return <div className="task-module-empty">完成片段生成后，这里会进行视频合成、字幕对齐与背景音乐编排。</div>;
+  }
+
+  if (isInitialCompositionLoading) {
+    return <div className="task-module-empty">合成结果加载中…</div>;
   }
 
   return (
     <div className="task-composition-module">
       {error ? <div className="error-box">{error}</div> : null}
 
-      <TaskStatusHintPanel
-        description="关注片段与字幕/配音素材是否齐全、Timeline 是否已入轨，以及合成接口与成片任务状态；缺轨或素材缺失是最常见的合成失败原因。"
-        items={compositionHintItems}
-      />
-
-      <section className="task-composition-av-settings">
-        <div className="task-composition-av-controls">
-          <div className="task-composition-av-group">
-            <strong>背景音乐</strong>
-            <div className="task-composition-bgm-row">
-              <label>是否加入</label>
-              <div className="task-composition-bgm-toggle" role="group" aria-label="是否加入背景音乐">
-                <button
-                  className={`task-composition-bgm-toggle-button ${!includeBackgroundMusic ? "active" : ""}`}
-                  type="button"
-                  onClick={() => setIncludeBackgroundMusic(false)}
-                >
-                  不加入
-                </button>
-                <button
-                  className={`task-composition-bgm-toggle-button ${includeBackgroundMusic ? "active" : ""}`}
-                  type="button"
-                  onClick={() => setIncludeBackgroundMusic(true)}
-                >
-                  加入
-                </button>
-              </div>
-              {includeBackgroundMusic ? (
-                <input
-                  value={backgroundMusicUrl}
-                  onChange={(event) => setBackgroundMusicUrl(event.target.value)}
-                  placeholder="本地路径或在线 mp3 地址"
-                />
-              ) : null}
-            </div>
-          </div>
-          <div className="task-composition-av-group">
-            <strong>字幕设置</strong>
-            <div className="task-subtitle-settings-grid">
-              <label className="task-subtitle-setting-field">
-                <span>样式</span>
-                <select
-                  value={subtitleStyle}
-                  onChange={(e) => setSubtitleStyle(e.target.value as typeof subtitleStyle)}
-                >
-                  <option value="clean">简洁白字</option>
-                  <option value="bold">加粗描边</option>
-                  <option value="outline">霓虹描边</option>
-                  <option value="shadow">底部阴影条</option>
-                </select>
-              </label>
-              <label className="task-subtitle-setting-field">
-                <span>出现方式</span>
-                <select
-                  value={subtitleDisplay}
-                  onChange={(e) => setSubtitleDisplay(e.target.value as typeof subtitleDisplay)}
-                >
-                  <option value="word_by_word">逐字显示</option>
-                  <option value="full_sentence">整句显示</option>
-                </select>
-              </label>
-              <label className="task-subtitle-setting-field">
-                <span>位置</span>
-                <select
-                  value={subtitlePosition}
-                  onChange={(e) => setSubtitlePosition(e.target.value as typeof subtitlePosition)}
-                >
-                  <option value="bottom">底部</option>
-                  <option value="center">居中</option>
-                  <option value="top">顶部</option>
-                </select>
-              </label>
-              <label className="task-subtitle-setting-field">
-                <span>每行字数</span>
-                <select value={subtitleMaxChars} onChange={(e) => setSubtitleMaxChars(Number(e.target.value))}>
-                  <option value={8}>8 字</option>
-                  <option value={10}>10 字</option>
-                  <option value={12}>12 字</option>
-                  <option value={14}>14 字</option>
-                  <option value={16}>16 字</option>
-                </select>
-              </label>
-              <label className="task-subtitle-setting-field">
-                <span>字号</span>
-                <select value={subtitleSizeRatio} onChange={(e) => setSubtitleSizeRatio(Number(e.target.value))}>
-                  <option value={0.022}>小</option>
-                  <option value={0.028}>中</option>
-                  <option value={0.035}>大</option>
-                  <option value={0.042}>特大</option>
-                </select>
-              </label>
-            </div>
-          </div>
-        </div>
-        <div className="task-subtitle-preview-col">
-          <div className="task-subtitle-preview-screen" data-position={subtitlePosition}>
-            {materials[previewSubtitleIndex]?.thumbnailUrl ? (
-              <Image
-                className="task-subtitle-preview-poster"
-                src={materials[previewSubtitleIndex].thumbnailUrl!}
-                alt=""
-                fill
-                unoptimized
-              />
-            ) : (
-              <div className="task-subtitle-preview-bg" />
-            )}
-            <button
-              className="task-subtitle-nav-btn task-subtitle-nav-prev"
-              type="button"
-              disabled={previewSubtitleIndex <= 0}
-              onClick={() => setPreviewSubtitleIndex((i) => Math.max(0, i - 1))}
-            >
-              ‹
-            </button>
-            <button
-              className="task-subtitle-nav-btn task-subtitle-nav-next"
-              type="button"
-              disabled={previewSubtitleIndex >= materials.length - 1}
-              onClick={() => setPreviewSubtitleIndex((i) => Math.min(materials.length - 1, i + 1))}
-            >
-              ›
-            </button>
-            <div
-              className={`task-subtitle-preview-text task-subtitle-preview-text--${subtitleStyle}`}
-              style={{ fontSize: `${Math.round(subtitleSizeRatio * 460)}px` }}
-            >
-              {(() => {
-                const raw = materials[previewSubtitleIndex]?.subtitleText;
-                if (!raw) return "字幕预览";
-                const phrases = splitTextIntoPhrases(raw, subtitleMaxChars);
-                return phrases[0] ?? raw;
-              })()}
-            </div>
-          </div>
-          <span className="task-subtitle-preview-hint">
-            仅查看字幕显示效果{materials.length > 0 ? `（${previewSubtitleIndex + 1}/${materials.length}）` : ""}
-          </span>
-        </div>
-      </section>
-
-      <section className="task-composition-auto-bar">
-        <button
-          className="btn-pill task-composition-auto-compose-button"
-          type="button"
-          disabled={submitting || !materials.some((item) => item.job?.status === "COMPLETED")}
-          onClick={() => void submitAutoCompose()}
-        >
-          {submitting ? "自动合成中..." : "一键自动合成（按脚本顺序）"}
-        </button>
-        <span className="task-composition-auto-hint">
-          自动将所有已完成片段按脚本镜头顺序排列并直接合成，无需手动编排。
-        </span>
-      </section>
-
-      <section className="task-composition-workbench">
-        <div className="task-composition-panel">
-          <div className="task-composition-panel-head">
-            <strong>素材池</strong>
-            <button
-              className="btn-pill small"
-              type="button"
-              disabled={!materials.some((item) => item.job?.status === "COMPLETED")}
-              onClick={autoArrangeTimeline}
-            >
-              一键按脚本排列
-            </button>
-          </div>
-          <div className="task-composition-card-list">
-            {materials.map((material) => {
-              const alreadyAdded = timeline.some((item) => item.segmentId === material.segmentId);
-              return (
-                <article key={material.segmentId} className="task-composition-material-card">
-                  <div className="task-composition-material-copy">
-                    <p className="task-composition-shot-title">{`片段 ${material.shotIndex}`}</p>
-                    <p>{`视频：${material.shotTitle} · ${material.durationSeconds} 秒`}</p>
-                    <p>{`音频：${material.narrationText || "暂无"} · ${material.durationSeconds} 秒`}</p>
-                    <p>{`字幕：${material.subtitleText || "暂无"} · ${material.subtitleText.length} 字`}</p>
-                  </div>
-                  <button
-                    className="btn-pill task-composition-join-button"
-                    type="button"
-                    disabled={alreadyAdded || material.job?.status !== "COMPLETED"}
-                    onClick={() => addToTimeline(material.segmentId, material.shotIndex)}
-                  >
-                    {alreadyAdded ? "已加入" : "加入 Timeline"}
-                  </button>
-                </article>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="task-composition-panel">
-          <div className="task-composition-panel-head">
-            <strong>编辑区</strong>
-          </div>
-          <div className="task-composition-card-list">
-            {timelineMaterials.length ? (
-              timelineMaterials.map(({ timelineItem, material }, index) => (
-                <article key={timelineItem.segmentId} className="task-composition-timeline-card">
-                  <div className="task-composition-order-badge">{index + 1}</div>
-                  <div className="task-composition-material-copy">
-                    <p className="task-composition-shot-title">{`片段 ${material!.shotIndex}`}</p>
-                    <p>{`视频标题：${material!.shotTitle}`}</p>
-                    <p>{`视频时长：${material!.durationSeconds} 秒`}</p>
-                  </div>
-                  <select
-                    className="task-composition-transition-select"
-                    value={timelineItem.transition}
-                    onChange={(event) =>
-                      updateTimelineTransition(timelineItem.segmentId, event.target.value as CompositionTransition)
-                    }
-                  >
-                    <option value="cut">衔接方式：硬转</option>
-                    <option value="fade">衔接方式：淡入淡出</option>
-                  </select>
-                  <div className="task-composition-timeline-actions">
-                    <button
-                      className="btn-secondary small"
-                      type="button"
-                      onClick={() => moveTimelineItem(timelineItem.segmentId, "up")}
-                    >
-                      上移
-                    </button>
-                    <button
-                      className="btn-secondary small"
-                      type="button"
-                      onClick={() => moveTimelineItem(timelineItem.segmentId, "down")}
-                    >
-                      下移
-                    </button>
-                    <button
-                      className="btn-secondary small"
-                      type="button"
-                      onClick={() => removeFromTimeline(timelineItem.segmentId)}
-                    >
-                      移除
-                    </button>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <div className="task-module-empty">已完成的片段会按脚本顺序自动排入；也可从左侧素材池手动加入。</div>
-            )}
-          </div>
-        </div>
-      </section>
+      {showSettings ? (
+        <CompositionSettingsPanel
+          includeBackgroundMusic={includeBackgroundMusic}
+          backgroundMusicUrl={backgroundMusicUrl}
+          backgroundMusicVolume={backgroundMusicVolume}
+          subtitleConfig={subtitleConfig}
+          subtitleAspectRatio={compositionPreviewAspectRatio}
+          onIncludeBackgroundMusicChange={() => undefined}
+          onBackgroundMusicUrlChange={() => undefined}
+          onBackgroundMusicVolumeChange={() => undefined}
+          onSubtitleConfigChange={() => undefined}
+        />
+      ) : null}
 
       <section className="task-clip-detail-card">
         <div className="task-clip-detail-head">
@@ -818,23 +541,27 @@ export function CompositionModule({
         </div>
         <div className="task-clip-detail-layout">
           <div className="task-clip-preview-panel">
-            <div className="task-clip-preview-stage">
-              {latestComposition?.outputVideoUrl ? (
+            <div
+              className="task-clip-preview-stage"
+              style={{ aspectRatio: toCssAspectRatio(compositionPreviewAspectRatio) }}
+            >
+              {previewComposition?.outputVideoUrl ? (
                 <>
                   <video
                     ref={previewVideoRef}
                     className="task-clip-preview-video"
-                    src={latestComposition.outputVideoUrl}
+                    src={previewComposition.outputVideoUrl}
                     preload="metadata"
                     playsInline
                     controls={isPlaying}
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
-                    onEnded={() => setIsPlaying(false)}
+                    {...previewTimecode.videoTimecodeProps}
                   />
+                  <div className="video-timecode-badge">{previewTimecode.timecodeLabel}</div>
                   {!isPlaying ? (
                     <button className="task-clip-preview-play" type="button" onClick={handlePlayPreview}>
-                      ▶
+                      <Play size={22} strokeWidth={2.5} />
                     </button>
                   ) : null}
                 </>
@@ -859,43 +586,103 @@ export function CompositionModule({
             </div>
             <div className="task-clip-params">
               <span>{`画面比例 ${task.parameters.video.aspectRatio}`}</span>
-              <span>{`片段数量 ${timelineMaterials.length}`}</span>
+              <span>{`片段数量 ${completedSegments.length}`}</span>
               <span>{`输出画质 ${task.parameters.video.mode}`}</span>
-              <span>{`转场方式 ${timeline.some((item) => item.transition === "fade") ? "含淡入淡出" : "硬转"}`}</span>
-              <span>{`字幕 ${latestComposition?.subtitleSrtUrl ? "已合成" : "未合成"}`}</span>
+              <span>{`转场方式 硬转（按脚本顺序自动排列）`}</span>
+              <span>{`字幕 ${latestComposition?.subtitleConfig?.enabled === false ? "已关闭" : latestComposition?.subtitleSrtUrl ? "已合成" : "未合成"}`}</span>
             </div>
             <div className="task-clip-params">
-              <span>{`分镜头音频 ${statusSummary?.narrationReady ? "已接入" : "未接入"}`}</span>
+              <span>{`合成音频 ${statusSummary?.narrationSourceLabel ?? (statusSummary?.narrationReady ? "片段原音已就绪" : "按片段原音优先")}`}</span>
               <span>{`背景音乐 ${includeBackgroundMusic && backgroundMusicUrl ? "已加入" : "未加入"}`}</span>
               <span>{`音频模式 多轨混音`}</span>
               <span>{`弱化淡出 已启用`}</span>
             </div>
             <div className="task-clip-params">
-              <span>{`生成时间 ${new Date(latestComposition?.updatedAt ?? task.updatedAt).toLocaleString("zh-CN")}`}</span>
-              <span>{`调用模型 ${task.parameters.video.mode === "pro" ? "kling-v3 + ffmpeg" : "kling-v3 + ffmpeg"}`}</span>
+              <span>{`生成时间 ${new Date(latestComposition?.updatedAt ?? previewComposition?.updatedAt ?? task.updatedAt).toLocaleString("zh-CN")}`}</span>
+              <span>{`调用模型 视频生成 + ffmpeg`}</span>
               <span>{`最终视频名称 ${task.title}`}</span>
             </div>
             <div className="task-clip-detail-actions">
               <button
                 className="btn-pill task-clip-action-button"
                 type="button"
-                disabled={!latestComposition?.outputVideoUrl}
+                disabled={!previewComposition?.outputVideoUrl}
                 onClick={handlePlayPreview}
               >
                 播放视频
               </button>
               <a
-                className={`btn-pill task-clip-action-button ${latestComposition?.outputVideoUrl ? "" : "is-disabled"}`}
-                href={latestComposition?.outputVideoUrl ?? undefined}
+                className={`btn-pill task-clip-action-button ${previewComposition?.outputVideoUrl ? "" : "is-disabled"}`}
+                href={previewComposition?.outputVideoUrl ?? undefined}
                 download={task.title}
                 onClick={(event) => {
-                  if (!latestComposition?.outputVideoUrl) {
+                  if (!previewComposition?.outputVideoUrl) {
                     event.preventDefault();
                   }
                 }}
               >
                 下载视频
               </a>
+              <button
+                className="btn-pill task-clip-action-button"
+                type="button"
+                disabled={Boolean(compositionBlockedReason) || compositionStageRunning}
+                title={compositionBlockedReason ?? undefined}
+                onClick={handlePrimaryAction}
+              >
+                {compositionStageRunning ? primaryActionLabel : "重新合成视频"}
+              </button>
+            </div>
+            <div className="task-clip-detail-copy">
+              <div className="task-clip-copy-head">
+                <p>成片镜头来源回看</p>
+                <button
+                  className="btn-secondary small task-clip-copy-toggle"
+                  type="button"
+                  aria-expanded={sourceReviewExpanded}
+                  onClick={() => setSourceReviewExpanded((current) => !current)}
+                >
+                  {sourceReviewExpanded ? "收起" : "展开"}
+                </button>
+              </div>
+              <div className={`task-clip-copy-body ${sourceReviewExpanded ? "is-expanded" : "is-collapsed"}`}>
+                <div className="task-clip-copy-body-inner">
+                  {materials
+                    .slice()
+                    .sort((left, right) => left.segmentIndex - right.segmentIndex)
+                    .map((item) => (
+                      <div key={item.segmentId} className="task-clip-source-item">
+                        <p>{`片段 ${item.segmentIndex}：${formatSourceSummary(item.sourceShots)}`}</p>
+                        <div className="task-clip-source-links">
+                          {item.sourceShots.map((sourceShot) => {
+                            const previewImageUrl =
+                              sourceShot.selectedVisualImageUrl ?? sourceShot.referenceImageUrl ?? null;
+                            return (
+                              <span key={sourceShot.shotId} className="task-clip-source-link-group">
+                                <Link
+                                  className="task-clip-source-link"
+                                  href={buildShotPlanHref(task.taskId, sourceShot.shotIndex)}
+                                >
+                                  {`镜头 ${sourceShot.shotIndex}`}
+                                </Link>
+                                {previewImageUrl ? (
+                                  <a
+                                    className="task-clip-source-link"
+                                    href={previewImageUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    参考图
+                                  </a>
+                                ) : null}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>

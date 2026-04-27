@@ -1,9 +1,25 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const navigationGroups = [
+import { GlobalSidebarAccountMenu } from "./global-sidebar-account-menu";
+import { isActivePath, shouldRenderGlobalSidebar, type SidebarUserSummary } from "./global-sidebar-config";
+
+type NavigationItem = {
+  label: string;
+  href: string;
+  child?: boolean;
+};
+
+type NavigationGroup = {
+  title: string;
+  items: NavigationItem[];
+  standalone: boolean;
+};
+
+const navigationGroups: NavigationGroup[] = [
   {
     title: "概览页",
     items: [{ label: "概览页", href: "/overview" }],
@@ -11,11 +27,17 @@ const navigationGroups = [
   },
   {
     title: "内容创作",
-    items: [{ label: "导演模式", href: "/studio/task-creation" }],
+    items: [
+      { label: "实拍素材成片", href: "/studio/task-creation/real-photo-video" },
+      { label: "AI 素材成片", href: "/studio/task-creation/ai-image-video" },
+      { label: "快速生成", href: "/studio/video-generation" },
+    ],
+    standalone: false,
   },
   {
     title: "模型定制",
     items: [{ label: "人物模型", href: "/models/character" }],
+    standalone: false,
   },
   {
     title: "素材管理",
@@ -24,15 +46,31 @@ const navigationGroups = [
       { label: "音色管理", href: "/assets/voice-management" },
       { label: "视频拆解", href: "/assets/video-materials" },
     ],
+    standalone: false,
   },
   {
-    title: "工程设置",
-    items: [{ label: "系统提示词", href: "/settings/constraint-prompts" }],
+    title: "系统设置",
+    items: [
+      { label: "参数设置", href: "/settings/parameter-settings" },
+      { label: "会员中心", href: "/settings/membership" },
+      { label: "账号管理", href: "/settings/account" },
+    ],
+    standalone: false,
   },
 ];
 
-export function GlobalSidebar() {
-  const pathname = usePathname();
+export function GlobalSidebar({ user }: { user: SidebarUserSummary | null }) {
+  const pathname = usePathname() ?? "/";
+  const [pendingNav, setPendingNav] = useState<{ href: string; fromPathname: string } | null>(null);
+  const activeHref =
+    navigationGroups
+      .flatMap((group) => group.items)
+      .filter((item) => isActivePath(pathname, item.href))
+      .sort((left, right) => right.href.length - left.href.length)[0]?.href ?? "";
+
+  if (!shouldRenderGlobalSidebar(pathname)) {
+    return null;
+  }
 
   return (
     <aside className="global-sidebar">
@@ -50,13 +88,21 @@ export function GlobalSidebar() {
             {group.standalone ? null : <p className="global-nav-title">{group.title}</p>}
             <div className="global-nav-items">
               {group.items.map((item) => {
-                const active = pathname === item.href || pathname.startsWith(item.href + "/");
+                const active = activeHref === item.href;
+                const pending = pendingNav?.href === item.href && pendingNav.fromPathname === pathname && !active;
 
                 return (
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`global-nav-link ${active ? "active" : ""} ${group.standalone ? "standalone" : ""}`}
+                    prefetch
+                    onClick={() => {
+                      if (!active) {
+                        setPendingNav({ href: item.href, fromPathname: pathname });
+                      }
+                    }}
+                    aria-busy={pending}
+                    className={`global-nav-link ${active ? "active" : ""} ${pending ? "pending" : ""} ${group.standalone ? "standalone" : ""}`}
                   >
                     <span className="global-nav-dot" />
                     <span>{item.label}</span>
@@ -67,6 +113,8 @@ export function GlobalSidebar() {
           </div>
         ))}
       </nav>
+
+      <GlobalSidebarAccountMenu user={user} />
     </aside>
   );
 }

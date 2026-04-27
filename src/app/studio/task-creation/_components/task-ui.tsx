@@ -76,7 +76,7 @@ export function TaskDraftEditors({
       key: "narrationScript",
       label: "口播/字幕草稿（兼容导出）",
       placeholder:
-        "支持“片段N：...”或“镜头N：...”格式，例如：\n片段1：先用 3 秒读稿把观众带入目的地。\n片段2：接着切入景观和玩法亮点。\n片段3：最后收束卖点与记忆点。",
+        "支持“片段N：...”或“镜头N：...”格式，例如：\n片段1：先用 4 秒左右读稿把观众带入目的地。\n片段2：接着切入景观和玩法亮点。\n片段3：最后收束卖点与记忆点。",
     },
   ];
 
@@ -128,15 +128,11 @@ export function TaskDraftEditors({
             </button>
           ))}
         </div>
-        <TaskDraftEditorCard
-          fieldKey={activeField.key}
+        <TaskDraftPromptPanel
           label={activeField.label}
           value={localDraftBundle[activeField.key]}
           placeholder={activeField.placeholder}
           saving={savingKey === activeField.key}
-          showHeader={false}
-          autoSave
-          onSave={(value) => onSave(activeField.key, value)}
           onChange={(value) => handleFieldChange(activeField.key, value)}
         />
       </div>
@@ -197,6 +193,121 @@ function TaskDraftEditorCard({
   );
 }
 
+type PromptDisplayBlock = {
+  id: string;
+  title: string;
+  content: string;
+};
+
+function TaskDraftPromptPanel({
+  label,
+  value,
+  placeholder,
+  saving,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+}) {
+  const blocks = parsePromptDisplayBlocks(value);
+  const displayLabel = label.replace("（兼容导出）", "");
+  const textLength = value.trim().length;
+
+  return (
+    <section className="composer-card task-editor-card plain task-prompt-panel-card">
+      <details className="task-shot-plan-panel task-prompt-display-panel">
+        <summary className="task-shot-plan-panel-summary">
+          <div className="task-shot-plan-panel-title">
+            <strong>{displayLabel}</strong>
+            <span>按片段/镜头拆成卡片展示，展开后更方便快速检查内容。</span>
+          </div>
+          <div className="task-shot-plan-panel-metrics">
+            <span>{blocks.length ? `${blocks.length} 条内容` : "暂无内容"}</span>
+            <span>{textLength ? `${textLength} 字` : "0 字"}</span>
+            <span>{saving ? "保存中..." : "自动保存"}</span>
+          </div>
+        </summary>
+        <div className="task-shot-plan-panel-body">
+          {blocks.length ? (
+            <div className="task-prompt-block-list">
+              {blocks.map((block) => (
+                <article key={block.id} className="task-prompt-block-card">
+                  <div className="task-shot-plan-shot-head">
+                    <strong>{block.title}</strong>
+                  </div>
+                  <p>{block.content}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="task-prompt-empty">暂无内容，展开“编辑原文”后可以手动补充。</div>
+          )}
+        </div>
+      </details>
+
+      <details className="task-prompt-edit-panel">
+        <summary>
+          <strong>编辑原文</strong>
+          <span>{saving ? "保存中..." : `${displayLabel} · 兼容导出格式`}</span>
+        </summary>
+        <div className="task-prompt-edit-body">
+          <textarea
+            className="prompt-box compact task-editor-textarea"
+            value={value}
+            placeholder={placeholder}
+            onChange={(event) => onChange(event.target.value)}
+          />
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function parsePromptDisplayBlocks(value: string): PromptDisplayBlock[] {
+  const text = value.trim();
+
+  if (!text) {
+    return [];
+  }
+
+  const markerPattern = /(^|\n)\s*(片段|镜头)\s*([0-9０-９]+)\s*[：:]\s*/g;
+  const matches = Array.from(text.matchAll(markerPattern));
+
+  if (!matches.length) {
+    return [
+      {
+        id: "raw",
+        title: "原文",
+        content: text,
+      },
+    ];
+  }
+
+  return matches.map((match, index) => {
+    const markerStart = match.index ?? 0;
+    const contentStart = markerStart + match[0].length;
+    const nextMarkerStart = index + 1 < matches.length ? (matches[index + 1].index ?? text.length) : text.length;
+    const label = match[2] ?? "片段";
+    const number = normalizePromptIndex(match[3] ?? `${index + 1}`) || index + 1;
+    const content = text.slice(contentStart, nextMarkerStart).trim();
+
+    return {
+      id: `${label}-${number}-${index}`,
+      title: `${label} ${number}`,
+      content: content || "（空内容）",
+    };
+  });
+}
+
+function normalizePromptIndex(value: string): number {
+  const normalized = value.replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10));
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 function TaskDraftEditorInner({
   label,
   value,
@@ -247,12 +358,13 @@ function TaskDraftEditorInner({
   );
 }
 
-export type TaskStatusHintTone = "neutral" | "success" | "danger" | "progress";
-
-export type TaskStatusHintItem = {
+export type TaskStepActionState = {
   label: string;
-  value: string;
-  tone: TaskStatusHintTone;
+  onAction: () => void;
+  isRunning?: boolean;
+  progressPercent?: number | null;
+  canRun?: boolean;
+  blockedReason?: string | null;
 };
 
 export function formatRuntimeDisplay(input: {
@@ -277,21 +389,46 @@ export function formatLocalServiceDisplay(input: {
   return `${input.serviceLabel} · ${input.available ? "可用" : (input.unavailableLabel ?? "缺失/异常")}`;
 }
 
-export function TaskStatusHintPanel({ description, items }: { description: string; items: TaskStatusHintItem[] }) {
+export function TaskNextStepButton({
+  state,
+  onBlocked,
+  className = "",
+}: {
+  state: TaskStepActionState;
+  onBlocked?: (reason: string) => void;
+  className?: string;
+}) {
+  const running = Boolean(state.isRunning);
+  const canRun = typeof state.canRun === "boolean" ? state.canRun : !state.blockedReason;
+  const blockedReason = state.blockedReason?.trim() || "请先完善当前步骤后再继续。";
+  const blocked = !running && !canRun;
+  const progressPercent =
+    typeof state.progressPercent === "number" && Number.isFinite(state.progressPercent)
+      ? Math.max(0, Math.min(100, Math.round(state.progressPercent)))
+      : null;
+  const buttonLabel = running && progressPercent !== null ? `${state.label} ${progressPercent}%` : state.label;
+
   return (
-    <div className="task-status-hint-box">
-      <div className="task-status-hint-head">
-        <strong>状态提示</strong>
-        <span>{description}</span>
-      </div>
-      <div className="task-status-hint-grid">
-        {items.map((item) => (
-          <div key={item.label} className={`task-status-hint-item ${item.tone}`}>
-            <span>{item.label}</span>
-            <strong>{item.value}</strong>
-          </div>
-        ))}
-      </div>
-    </div>
+    <button
+      className={`btn-primary task-next-step-button${blocked ? " is-blocked" : ""}${running ? " is-running" : ""}${className ? ` ${className}` : ""}`}
+      type="button"
+      disabled={running || blocked}
+      aria-disabled={running || blocked}
+      title={blocked ? blockedReason : undefined}
+      onClick={() => {
+        if (running) {
+          return;
+        }
+        if (blocked) {
+          onBlocked?.(blockedReason);
+          return;
+        }
+        state.onAction();
+      }}
+    >
+      <span className="task-next-step-button-text" aria-live={running ? "polite" : undefined}>
+        {buttonLabel}
+      </span>
+    </button>
   );
 }

@@ -1,0 +1,23 @@
+[Unit]
+Description=Travel Web (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/travel
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+EnvironmentFile=-/etc/travel/travel-web.env
+ExecStart=/bin/bash -lc 'npm run start -- --hostname "${HOST:-127.0.0.1}" --port "${PORT:-3000}"'
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=30
+KillMode=mixed
+User=www-data
+Group=www-data
+
+[Install]
+WantedBy=multi-user.target

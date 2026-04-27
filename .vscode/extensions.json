@@ -1,10 +1,17 @@
 {
   "recommendations": [
+    "openai.chatgpt",
     "pranaygp.vscode-css-peek",
     "naumovs.color-highlight",
     "usernamehw.errorlens",
     "ecmel.vscode-html-css",
     "esbenp.prettier-vscode",
-    "dbaeumer.vscode-eslint"
+    "dbaeumer.vscode-eslint",
+    "eamodio.gitlens",
+    "github.vscode-pull-request-github",
+    "humao.rest-client",
+    "qwtel.sqlite-viewer",
+    "ms-playwright.playwright",
+    "tamasfe.even-better-toml"
   ]
 }

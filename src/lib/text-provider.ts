@@ -1,7 +1,10 @@
 import {
   countNarrationCharacters,
+  getNarrationEmergencyTrimCharacters,
   inferCharacterFocus,
   getNarrationLengthGuidance,
+  getNarrationRepairTriggerCharacters,
+  isNarrationClearlyOverDuration,
   sanitizeNarrationText,
   summarizePrompt,
   trimNarrationToCharacterLimit,
@@ -18,16 +21,21 @@ type GenerateNarrationInput = {
 
 function clampNarrationTextLength(text: string, durationSeconds: number, fallback: string) {
   const guidance = getNarrationLengthGuidance(durationSeconds);
+  const repairTriggerCharacters = getNarrationRepairTriggerCharacters(durationSeconds);
+  const emergencyTrimCharacters = getNarrationEmergencyTrimCharacters(durationSeconds);
   const normalized = sanitizeNarrationText(text, { stripTerminalPunctuation: false });
   const fallbackNormalized = sanitizeNarrationText(fallback, { stripTerminalPunctuation: false });
 
   if (!normalized) return fallbackNormalized;
 
-  if (countNarrationCharacters(normalized) <= guidance.maxCharacters) {
+  if (
+    countNarrationCharacters(normalized) <= emergencyTrimCharacters &&
+    !isNarrationClearlyOverDuration(normalized, durationSeconds)
+  ) {
     return sanitizeNarrationText(normalized);
   }
 
-  return trimNarrationToCharacterLimit(normalized, guidance.maxCharacters);
+  return trimNarrationToCharacterLimit(normalized, Math.max(guidance.maxCharacters, repairTriggerCharacters));
 }
 
 export function buildUnifiedSubtitleAndNarrationText(text: string, durationSeconds: number, fallback: string) {

@@ -23,7 +23,7 @@ const platformStyles = [
 ];
 
 export const defaultVideoNegativePrompt =
-  "watermark, text overlay, deformed face, distorted hands, extra fingers, low resolution, blurry, overacted expression, static pose, empty scene, single adult, two adults one child, strong AI motion";
+  "watermark, text overlay, text in image, letters, numbers, words, signage text, collage, split screen, multi-panel, deformed face, distorted hands, extra fingers, low resolution, blurry, overacted expression, static pose, empty scene, single adult, two adults one child, strong AI motion, unrealistic proportions, physically impossible scene";
 
 export const klingGenerationProfile = {
   defaultDurationSeconds: 15,
