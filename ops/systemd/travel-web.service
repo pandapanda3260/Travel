@@ -1,6 +1,8 @@
 [Unit]
 Description=Travel Web (Next.js)
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,8 +14,6 @@ EnvironmentFile=-/etc/travel/travel-web.env
 ExecStart=/bin/bash -lc 'npm run start -- --hostname "${HOST:-127.0.0.1}" --port "${PORT:-3000}"'
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=30
 KillMode=mixed
 User=www-data
