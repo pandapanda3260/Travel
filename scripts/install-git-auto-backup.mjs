@@ -68,7 +68,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${escapeXml(label)}</string>
     <key>ProgramArguments</key>
     <array>
-${shellArray([nodeBin, path.join(projectRoot, "scripts/git-auto-backup.mjs")])}
+${shellArray(["/usr/bin/env", "node", path.join(projectRoot, "scripts/git-auto-backup.mjs")])}
     </array>
     <key>WorkingDirectory</key>
     <string>${escapeXml(projectRoot)}</string>
