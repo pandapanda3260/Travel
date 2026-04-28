@@ -8,6 +8,7 @@ import {
   deleteDirectorVideoGenerationSession,
   getDirectorVideoGenerationSession,
   insertUploadedDirectorVideoGenerationImageCandidate,
+  patchDirectorVideoGenerationSession,
   replaceDirectorVideoGenerationImageCandidate,
   replaceUploadedDirectorVideoGenerationImageCandidate,
   setDirectorVideoGenerationImageCandidates,
@@ -30,6 +31,40 @@ test("快速生成新会话默认出图数量为 10", () => {
     assert.equal(session.imageSettings.outputCount, 10);
     const saved = getDirectorVideoGenerationSession(session.sessionId);
     assert.equal(saved?.imageSettings.outputCount, 10);
+  } finally {
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
+
+test("快速生成文生图提示词不会自动填充图生视频提示词", () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+    originalPrompt: "生成一张酒店大堂海报",
+  });
+
+  try {
+    assert.equal(session.originalPrompt, "生成一张酒店大堂海报");
+    assert.equal(session.imagePrompt, "生成一张酒店大堂海报");
+    assert.equal(session.videoOriginalPrompt, "");
+    assert.equal(session.videoPrompt, "");
+
+    const withImagePrompt = patchDirectorVideoGenerationSession(session.sessionId, {
+      optimizedPrompt: "优化后的文生图提示词",
+      imagePrompt: "优化后的文生图提示词",
+      promptStatus: "success",
+    });
+
+    assert.ok(withImagePrompt);
+    assert.equal(withImagePrompt.videoOriginalPrompt, "");
+    assert.equal(withImagePrompt.videoOptimizedPrompt, "");
+    assert.equal(withImagePrompt.videoPrompt, "");
+    assert.equal(withImagePrompt.videoPromptStatus, "idle");
+
+    const saved = getDirectorVideoGenerationSession(session.sessionId);
+    assert.equal(saved?.videoOriginalPrompt, "");
+    assert.equal(saved?.videoOptimizedPrompt, "");
+    assert.equal(saved?.videoPrompt, "");
+    assert.equal(saved?.videoPromptStatus, "idle");
   } finally {
     deleteDirectorVideoGenerationSession(session.sessionId);
   }
