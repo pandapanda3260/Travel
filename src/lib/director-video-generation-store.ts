@@ -149,6 +149,18 @@ function getDefaultVideoSettings(): DirectorVideoGenerationSession["videoSetting
   };
 }
 
+function normalizePendingVideoPromptField(
+  value: string | null | undefined,
+  videoPromptStatus: DirectorVideoGenerationStepStatus,
+  imageSeedTexts: Set<string>,
+) {
+  const text = value ?? "";
+  if (videoPromptStatus === "idle" && imageSeedTexts.has(text.trim())) {
+    return "";
+  }
+  return text;
+}
+
 function normalizeSession(record: Partial<DirectorVideoGenerationSession>): DirectorVideoGenerationSession {
   const timestamp = nowIso();
   const normalizedImageCandidates = (record.imageCandidates ?? []).map((candidate) => ({
@@ -174,6 +186,27 @@ function normalizeSession(record: Partial<DirectorVideoGenerationSession>): Dire
     (record.imageStatus === "success" || record.imageStatus === "running") && imageAssetsMissing
       ? "failed"
       : (record.imageStatus ?? "idle");
+  const videoPromptStatus = record.videoPromptStatus ?? "idle";
+  const imageSeedTexts = new Set(
+    [record.originalPrompt, record.optimizedPrompt, record.imagePrompt]
+      .map((value) => value?.trim() ?? "")
+      .filter(Boolean),
+  );
+  const videoOriginalPrompt = normalizePendingVideoPromptField(
+    record.videoOriginalPrompt,
+    videoPromptStatus,
+    imageSeedTexts,
+  );
+  const videoOptimizedPrompt = normalizePendingVideoPromptField(
+    record.videoOptimizedPrompt,
+    videoPromptStatus,
+    imageSeedTexts,
+  );
+  const videoPrompt = normalizePendingVideoPromptField(
+    record.videoPrompt ?? record.videoOptimizedPrompt,
+    videoPromptStatus,
+    imageSeedTexts,
+  );
 
   return {
     sessionId: record.sessionId ?? "",
@@ -182,13 +215,13 @@ function normalizeSession(record: Partial<DirectorVideoGenerationSession>): Dire
     originalPrompt: record.originalPrompt ?? "",
     modificationInstruction: record.modificationInstruction ?? "",
     optimizedPrompt: record.optimizedPrompt ?? "",
-    videoOriginalPrompt: record.videoOriginalPrompt ?? "",
+    videoOriginalPrompt,
     videoModificationInstruction: record.videoModificationInstruction ?? "",
-    videoOptimizedPrompt: record.videoOptimizedPrompt ?? "",
+    videoOptimizedPrompt,
     imagePrompt: record.imagePrompt ?? record.optimizedPrompt ?? record.originalPrompt ?? "",
-    videoPrompt: record.videoPrompt ?? record.videoOptimizedPrompt ?? "",
+    videoPrompt,
     promptStatus: record.promptStatus ?? "idle",
-    videoPromptStatus: record.videoPromptStatus ?? "idle",
+    videoPromptStatus,
     imageStatus: repairedImageStatus,
     videoStatus: record.videoStatus ?? "idle",
     promptError: normalizeDirectorVideoGenerationStoredError(record.promptError, "提示词优化失败"),

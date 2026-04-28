@@ -70,6 +70,58 @@ test("快速生成文生图提示词不会自动填充图生视频提示词", ()
   }
 });
 
+test("快速生成会清理旧会话中待处理的图生视频自动拷贝提示词", () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+    originalPrompt: "生成一张酒店大堂海报",
+  });
+
+  try {
+    const withLegacyVideoPrompt = patchDirectorVideoGenerationSession(session.sessionId, {
+      videoOriginalPrompt: "生成一张酒店大堂海报",
+      videoOptimizedPrompt: "生成一张酒店大堂海报",
+      videoPrompt: "生成一张酒店大堂海报",
+      videoPromptStatus: "idle",
+    });
+
+    assert.ok(withLegacyVideoPrompt);
+
+    const saved = getDirectorVideoGenerationSession(session.sessionId);
+    assert.equal(saved?.videoOriginalPrompt, "");
+    assert.equal(saved?.videoOptimizedPrompt, "");
+    assert.equal(saved?.videoPrompt, "");
+    assert.equal(saved?.videoPromptStatus, "idle");
+  } finally {
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
+
+test("快速生成会保留已优化成功的图生视频提示词", () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+    originalPrompt: "生成一张酒店大堂海报",
+  });
+
+  try {
+    const withVideoPrompt = patchDirectorVideoGenerationSession(session.sessionId, {
+      videoOriginalPrompt: "生成一张酒店大堂海报",
+      videoOptimizedPrompt: "生成一张酒店大堂海报",
+      videoPrompt: "生成一张酒店大堂海报",
+      videoPromptStatus: "success",
+    });
+
+    assert.ok(withVideoPrompt);
+
+    const saved = getDirectorVideoGenerationSession(session.sessionId);
+    assert.equal(saved?.videoOriginalPrompt, "生成一张酒店大堂海报");
+    assert.equal(saved?.videoOptimizedPrompt, "生成一张酒店大堂海报");
+    assert.equal(saved?.videoPrompt, "生成一张酒店大堂海报");
+    assert.equal(saved?.videoPromptStatus, "success");
+  } finally {
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
+
 test("快速生成读取会话时过滤缺失的图片候选并提示重新生成", async () => {
   const session = createDirectorVideoGenerationSession({
     ownerUserId: createTestOwnerId(),
