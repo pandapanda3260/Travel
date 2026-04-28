@@ -66,8 +66,8 @@ const TRAFFIC_OR_TAXI_NEGATED_PATTERNS = [
 ] as const;
 
 const TEXT_OR_LAYOUT_CRITICAL_PATTERNS = [
-  /(出现|有|存在|带有|含有).*(文字|字母|数字|logo|水印|标牌文字|招牌文字|字幕|text|letters|words|numbers|watermark|caption|subtitle)/i,
-  /(文字|字母|数字|logo|水印|标牌文字|招牌文字|字幕|text|letters|words|numbers|watermark|caption|subtitle).*(残留|露出|可见|明显|清晰|错误|出现在画面)/i,
+  /(出现|有|存在|带有|含有).*(文字|汉字|中文字|英文|字母|数字|文本|标识|logo|水印|标牌文字|招牌文字|字幕|text|letters|words|numbers|watermark|caption|subtitle)/i,
+  /(文字|汉字|中文字|英文|字母|数字|文本|标识|logo|水印|标牌文字|招牌文字|字幕|text|letters|words|numbers|watermark|caption|subtitle).*(残留|露出|可见|明显|清晰|错误|出现在画面)/i,
   /(拼图|拼贴|分屏|多画面|多图拼接|网格|并排对比|collage|split screen|multi-panel|grid|diptych|triptych)/i,
 ] as const;
 
@@ -81,9 +81,11 @@ const TEXT_OR_LAYOUT_NEGATED_PATTERNS = [
 
 const ORIENTATION_CRITICAL_PATTERNS = [
   /(横图|横版|横向画面|横向内容|landscape|horizontal).*(塞进|放进|挤进|出现在|误塞到).*(竖图|竖版|9:16|portrait)/i,
+  /(横图|横版|横向画面|横向内容|横版构图|16:9|landscape|horizontal).*(不符合|不满足|未满足|违背|偏离|不适合).*(竖图|竖版|竖版构图|9:16|portrait)/i,
+  /(不符合|不满足|未满足|违背|偏离|不适合).*(竖图|竖版|竖版构图|9:16|portrait).*(横图|横版|横向|横版构图|16:9|landscape|horizontal)/i,
   /(竖版|竖图|9:16|portrait).*(却|但是|然而|结果).*(横图|横版|横向|sideways|rotated)/i,
   /(画面|主体|建筑|楼体|地平线|场景).*(横着|侧着|歪着|旋转90度|转了90度|被旋转|sideways|turnedsideways|rotated90)/i,
-  /横向内容塞进竖版|竖版画布里是横图|横图塞进竖图|内容方向错误|构图方向错误|画面整体横着|整体侧着/i,
+  /图片实际是横版|实际为横版|实际是横图|实际为横图|横向内容塞进竖版|竖版画布里是横图|横图塞进竖图|内容方向错误|构图方向错误|画面整体横着|整体侧着/i,
 ] as const;
 
 const ORIENTATION_NEGATED_PATTERNS = [

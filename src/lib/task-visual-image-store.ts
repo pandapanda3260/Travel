@@ -100,6 +100,13 @@ type PersistedImageAsset = ImageGenerationResult & {
   qualityCheck?: TaskVisualImageQualityCheck;
 };
 
+type ImageDimensionQualityInput = {
+  size: string;
+  width: number | null | undefined;
+  height: number | null | undefined;
+  checkedAt: string | null;
+};
+
 const COLLECTION = "task-visual-image-shots";
 const legacyJsonPath = joinRuntimeDataPath("task-visual-image-shots.json");
 
@@ -297,6 +304,92 @@ function parseRequestedSize(size: string) {
     return { width: 1024, height: 1024 };
   }
   return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+export function buildImageDimensionQualityCheck(
+  input: ImageDimensionQualityInput,
+): TaskVisualImageQualityCheck | null {
+  const width = Number(input.width ?? 0);
+  const height = Number(input.height ?? 0);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null;
+  }
+
+  const requestedSize = parseRequestedSize(input.size);
+  const requestedRatio = requestedSize.width / Math.max(requestedSize.height, 1);
+  const actualRatio = width / height;
+  const requestedOrientation =
+    requestedSize.width === requestedSize.height ? "square" : requestedSize.width > requestedSize.height ? "landscape" : "portrait";
+  const actualOrientation = width === height ? "square" : width > height ? "landscape" : "portrait";
+  const aspectDelta = Math.abs(actualRatio - requestedRatio);
+  const base = {
+    checkedAt: input.checkedAt,
+  };
+
+  if (requestedOrientation === "portrait" && actualOrientation === "landscape") {
+    return {
+      ...base,
+      status: "failed",
+      retrySuggested: true,
+      issues: [`目标画幅为竖版，但图片实际尺寸为横版 ${width}x${height}`],
+      summary: "图片方向与目标竖版画幅相反，建议重生成",
+      scorePenalty: 55,
+    };
+  }
+
+  if (requestedOrientation === "landscape" && actualOrientation === "portrait") {
+    return {
+      ...base,
+      status: "failed",
+      retrySuggested: true,
+      issues: [`目标画幅为横版，但图片实际尺寸为竖版 ${width}x${height}`],
+      summary: "图片方向与目标横版画幅相反，建议重生成",
+      scorePenalty: 55,
+    };
+  }
+
+  if (aspectDelta > 0.22) {
+    return {
+      ...base,
+      status: "warning",
+      retrySuggested: false,
+      issues: [`图片比例 ${width}x${height} 与目标画幅 ${input.size} 偏差较大`],
+      summary: "图片比例与目标画幅不完全一致，请复核裁切效果",
+      scorePenalty: 18,
+    };
+  }
+
+  return null;
+}
+
+function mergeTaskVisualImageQualityChecks(
+  baseCheck: TaskVisualImageQualityCheck | undefined,
+  dimensionCheck: TaskVisualImageQualityCheck | null,
+) {
+  if (!dimensionCheck) {
+    return baseCheck;
+  }
+  if (!baseCheck) {
+    return dimensionCheck;
+  }
+
+  const statusOrder: Record<TaskVisualImageQualityStatus, number> = {
+    unchecked: 0,
+    passed: 1,
+    warning: 2,
+    failed: 3,
+  };
+  const status =
+    statusOrder[dimensionCheck.status] > statusOrder[baseCheck.status] ? dimensionCheck.status : baseCheck.status;
+
+  return {
+    status,
+    retrySuggested: baseCheck.retrySuggested || dimensionCheck.retrySuggested || status === "failed",
+    issues: [...baseCheck.issues, ...dimensionCheck.issues],
+    summary: [baseCheck.summary, dimensionCheck.summary].filter(Boolean).join("；"),
+    scorePenalty: Math.max(baseCheck.scorePenalty, dimensionCheck.scorePenalty),
+    checkedAt: baseCheck.checkedAt ?? dimensionCheck.checkedAt,
+  } satisfies TaskVisualImageQualityCheck;
 }
 
 function getPromptProfile(prompt: string) {
@@ -588,6 +681,15 @@ export async function generateTaskVisualImageShot(input: {
       const pixels =
         dimensions.width != null && dimensions.height != null ? dimensions.width * dimensions.height : null;
       const bytesPerPixel = pixels ? Math.round((byteSize / pixels) * 1000) / 1000 : null;
+      const qualityCheck = mergeTaskVisualImageQualityChecks(
+        asset.qualityCheck,
+        buildImageDimensionQualityCheck({
+          size: input.task.parameters.image.size,
+          width: dimensions.width,
+          height: dimensions.height,
+          checkedAt: asset.qualityCheck?.checkedAt ?? now,
+        }),
+      );
       const baseCandidate = {
         candidateId,
         imageUrl: `/generated-images/${input.task.taskId}/task-visual-shots/${shotDirName}/${candidateId}.${extension}`,
@@ -597,15 +699,15 @@ export async function generateTaskVisualImageShot(input: {
         byteSize,
         bytesPerPixel,
         source: "generated" as const,
-        qualityStatus: asset.qualityCheck?.status ?? "unchecked",
-        qualityIssues: asset.qualityCheck?.issues ?? [],
-        qualitySummary: asset.qualityCheck?.summary ?? null,
-        qualityCheckedAt: asset.qualityCheck?.checkedAt ?? null,
+        qualityStatus: qualityCheck?.status ?? "unchecked",
+        qualityIssues: qualityCheck?.issues ?? [],
+        qualitySummary: qualityCheck?.summary ?? null,
+        qualityCheckedAt: qualityCheck?.checkedAt ?? null,
       };
 
       return {
         ...baseCandidate,
-        ...scoreCandidate(input.prompt, input.task.parameters.image.size, baseCandidate, asset.qualityCheck),
+        ...scoreCandidate(input.prompt, input.task.parameters.image.size, baseCandidate, qualityCheck),
       } satisfies TaskVisualImageCandidate;
     }),
   );

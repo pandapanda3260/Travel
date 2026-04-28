@@ -14,6 +14,7 @@ import {
   trimNarrationToCharacterLimit,
 } from "./narration";
 import { buildIndexedBlockText, parseIndexedTextBlocks, type IndexedTextBlock } from "./indexed-text-blocks";
+import { clampSeedanceSegmentDurationSeconds } from "./video-duration-constraints";
 import { isSeedanceProvider } from "./video-provider-config";
 import {
   computeVideoTaskStoryShotCount,
@@ -411,18 +412,18 @@ function getSegmentDurationSeconds(parameters: VideoTaskParameterBundle["video"]
     if (segmentShots.length > 0) {
       const sumDuration = segmentShots.reduce((sum, s) => sum + (s.durationSeconds || 0), 0);
       if (sumDuration > 0) {
-        return isSeedanceProvider() ? Math.max(4, Math.min(10, Math.round(sumDuration))) : sumDuration;
+        return isSeedanceProvider() ? clampSeedanceSegmentDurationSeconds(sumDuration) : sumDuration;
       }
     }
   }
 
   if (parameters.segmentMode === "hybrid_intro_plus_montage" && segmentIndex === 1) {
     const raw = Math.max(1, parameters.introSegmentDurationSeconds ?? Math.min(3, parameters.durationSeconds));
-    return isSeedanceProvider() ? Math.max(4, Math.min(10, raw)) : raw;
+    return isSeedanceProvider() ? clampSeedanceSegmentDurationSeconds(raw) : raw;
   }
 
   const raw = Math.max(1, parameters.durationSeconds);
-  return isSeedanceProvider() ? Math.max(4, Math.min(10, raw)) : raw;
+  return isSeedanceProvider() ? clampSeedanceSegmentDurationSeconds(raw) : raw;
 }
 
 function buildSegmentShotGroupsFromShotPlan(shotPlanItems: ShotPlanItem[]): Array<{ segmentIndex: number; shotIndexes: number[] }> | null {

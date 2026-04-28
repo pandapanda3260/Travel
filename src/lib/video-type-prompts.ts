@@ -65,9 +65,9 @@ const AGENCY_GUIDE_VOICEOVER_CATEGORY: Partial<Record<VideoTypePromptStage, stri
 		"- 普通景点全景、建筑外观、夜景、环境空镜、菜品特写、设施展示镜头，一律优先纯景色表达。",
 		"",
 		"字幕规划（subtitlePlan）专属规则：",
-		"- 本类型的字幕以片段为单位，每个片段通常只有 1~2 条字幕。",
+		"- 本类型的字幕以片段为单位，每个片段只输出 1 条字幕，不要拆成多条。",
 		"- 开篇片段：1 条字幕覆盖整个片段，字幕要有钩子感。",
-		"- 行程片段：2~3 个镜头的片段可以用 1 条字幕覆盖所有镜头（当语义连贯时），也可以拆成 2 条字幕分别覆盖前后镜头。",
+		"- 行程片段：即使包含 2~3 个镜头，也必须用 1 条字幕覆盖该片段内所有镜头。",
 		"- 收尾片段：1 条字幕覆盖整个片段，要有收束感或行动引导。",
 		"- 纯景色过渡镜头（detail / transition）可以不配字幕，让画面自己说话。",
 		"- 字幕内容必须口语自然、可直接朗读，同时要考虑后续 TTS 配音的流畅度和时间匹配。",
@@ -95,9 +95,9 @@ const AGENCY_GUIDE_VOICEOVER_CATEGORY: Partial<Record<VideoTypePromptStage, stri
 	shot_plan_subtitle: [
 		"",
 		"【旅行社-攻略-空镜旁白 字幕规划规则】",
-		"本类型的 subtitlePlan 以片段为单位组织；优先让一条字幕覆盖一个完整片段，必要时再拆成 2 条，不要拆得过碎。",
+		"本类型的 subtitlePlan 以片段为单位组织；每个片段只输出 1 条字幕，覆盖该片段完整时长，不要拆成多条。",
 		"开篇片段通常 1 条字幕覆盖全段，要有钩子感；收尾片段通常 1 条字幕覆盖全段，要有收束感或行动引导。",
-		"2~3 个镜头的行程片段，只有在前后画面语义明显断开时才拆成 2 条字幕；否则优先保持一段连贯口播。",
+		"2~3 个镜头的行程片段，也必须保持一段连贯口播；字幕文本按 coveredShotIndexes 的画面顺序自然串联。",
 		"纯景色过渡镜头可以不配字幕；字幕内容必须顺着 coveredShotIndexes 对应画面自然推进，不能提前剧透后一个镜头。",
 	].join("\n"),
 
@@ -201,7 +201,7 @@ function buildScenicVoiceoverPromptCategory(input: {
 			`- ${input.narrationRule}`,
 			"",
 			"字幕规划：",
-			"- subtitlePlan 以片段为单位组织，优先一段一条字幕，必要时再拆成 2 条。",
+			"- subtitlePlan 以片段为单位组织，每个片段只输出 1 条字幕，覆盖该片段完整时长。",
 			"- 强画面细节镜头允许不配字幕，让空间质感自己说话。",
 		].join("\n"),
 		shot_plan_visual: [
@@ -220,7 +220,7 @@ function buildScenicVoiceoverPromptCategory(input: {
 		shot_plan_subtitle: [
 			"",
 			`【${input.title} 字幕规划规则】`,
-			"subtitlePlan 以片段为单位组织；优先让一条字幕覆盖完整片段，必要时再拆成 2 条。",
+			"subtitlePlan 以片段为单位组织；每个片段只输出 1 条字幕，覆盖该片段完整时长，不要拆成多条。",
 			"字幕必须顺着 coveredShotIndexes 对应的空间或体验自然推进，不能跨镜头乱讲。",
 		].join("\n"),
 		prompt_generation: [
@@ -310,7 +310,7 @@ function buildRoamingVoiceoverPromptCategory(input: {
 		shot_plan_subtitle: [
 			"",
 			`【${input.title} 字幕规划规则】`,
-			"subtitlePlan 以片段为单位组织；优先一段一条字幕，必要时再拆成 2 条。",
+			"subtitlePlan 以片段为单位组织；每个片段只输出 1 条字幕，覆盖该片段完整时长，不要拆成多条。",
 			"字幕必须贴着人物漫游路径和画面推进顺序，不要出现口播站桩式句法。",
 		].join("\n"),
 		prompt_generation: [

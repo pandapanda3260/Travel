@@ -34,7 +34,7 @@ const IMAGE_POSITIVE_SUFFIX =
 const IMAGE_NEGATIVE_PROMPT = [
   "text, letters, numbers, words, watermark, logo, signage text, caption, subtitle",
   "collage, split screen, multi-panel, grid, side by side, montage, diptych, triptych, multiple frames, border, picture frame",
-  "rotated scene, rotated 90 degrees, sideways composition, turned sideways, horizontal scene squeezed into portrait frame, landscape content inside portrait canvas, vertical scene squeezed into landscape frame",
+  "rotated scene, rotated 90 degrees, sideways composition, turned sideways, tilted horizon, horizontal scene squeezed into portrait frame, landscape content inside portrait canvas, landscape photo rotated into portrait frame, vertical scene squeezed into landscape frame",
   "cartoon, anime, illustration, painting, sketch, drawing, CG render, 3D render, digital art, comic, manga",
   "deformed face, distorted hands, extra fingers, extra limbs, extra arms, extra hands, extra legs, extra feet, third hand, third arm, missing limbs, fused fingers, mutated hands, duplicate limbs, broken anatomy, malformed body",
   "extra people, wrong number of people, duplicate person, clone",
@@ -58,8 +58,8 @@ function buildOrientationGuardClause(size: string, includeOrientationLabel = tru
 
   if (!width || !height) {
     return includeOrientationLabel
-      ? "竖构图9:16，portrait orientation，主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度"
-      : "主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度";
+      ? "竖构图9:16，portrait orientation，画面内容必须天然竖向拍摄和竖向观看，主体与地平线保持正常方向，不要横图内容塞进竖版画布，不要把横版照片旋转90度，不要画面横着或侧着"
+      : "画面内容必须天然竖向拍摄和竖向观看，主体与地平线保持正常方向，不要横图内容塞进竖版画布，不要把横版照片旋转90度，不要画面横着或侧着";
   }
 
   if (width === height) {
@@ -70,13 +70,13 @@ function buildOrientationGuardClause(size: string, includeOrientationLabel = tru
 
   if (width > height) {
     return includeOrientationLabel
-      ? "横构图16:9，landscape orientation，主体必须以横版完整呈现，不要把竖图内容硬塞进横版画布，不要画面侧着或旋转90度"
-      : "主体必须以横版完整呈现，不要把竖图内容硬塞进横版画布，不要画面侧着或旋转90度";
+      ? "横构图16:9，landscape orientation，画面内容必须天然横向拍摄和横向观看，主体与地平线保持正常方向，不要把竖图内容硬塞进横版画布，不要把竖版照片旋转90度，不要画面侧着"
+      : "画面内容必须天然横向拍摄和横向观看，主体与地平线保持正常方向，不要把竖图内容硬塞进横版画布，不要把竖版照片旋转90度，不要画面侧着";
   }
 
   return includeOrientationLabel
-    ? "竖构图9:16，portrait orientation，主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度"
-    : "主体必须以竖版完整呈现，不要横图内容塞进竖版画布，不要画面横着或旋转90度";
+    ? "竖构图9:16，portrait orientation，画面内容必须天然竖向拍摄和竖向观看，主体与地平线保持正常方向，不要横图内容塞进竖版画布，不要把横版照片旋转90度，不要画面横着或侧着"
+    : "画面内容必须天然竖向拍摄和竖向观看，主体与地平线保持正常方向，不要横图内容塞进竖版画布，不要把横版照片旋转90度，不要画面横着或侧着";
 }
 
 const IMAGE_TEXT_AND_LAYOUT_GUARD_CLAUSE =

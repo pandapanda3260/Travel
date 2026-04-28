@@ -43,7 +43,8 @@ test("送图模型前会统一补竖版构图和无文字硬约束", () => {
   const prompt = applyImagePromptHardRequirements("海边酒店夜景，大堂暖光，真实摄影风格", "1600x2848");
 
   assert.match(prompt, /竖构图9:16|portrait orientation/u);
-  assert.match(prompt, /不要横图内容塞进竖版画布|不要画面横着或旋转90度/u);
+  assert.match(prompt, /天然竖向拍摄和竖向观看/u);
+  assert.match(prompt, /不要横图内容塞进竖版画布|不要把横版照片旋转90度/u);
   assert.match(prompt, /no text, no letters, no words, no numbers, no watermark/u);
 });
 

@@ -1,5 +1,6 @@
 import { isSeedanceProvider } from "./video-provider-config";
 import { getTaskCreationExpectedDurationDefaults } from "./task-creation-parameters";
+import { clampSeedanceSegmentDurationSeconds } from "./video-duration-constraints";
 import {
   computeVideoTaskStoryShotCount,
   getVideoTaskTypeProfile,
@@ -233,7 +234,9 @@ export function deriveVideoTaskStructure(input: {
 }) {
   const profile = getVideoTaskTypeProfile(input.videoType);
   const requestedSegmentCount = Math.max(1, Math.round(input.requestedSegmentCount || 1));
-  const requestedDurationSeconds = Math.max(1, Math.round(input.requestedDurationSeconds || 1));
+  const requestedDurationSeconds = isSeedanceProvider()
+    ? clampSeedanceSegmentDurationSeconds(input.requestedDurationSeconds)
+    : Math.max(1, Math.round(input.requestedDurationSeconds || 1));
   const requestedStoryShotsPerSegment = Math.max(
     1,
     Math.round(input.requestedStoryShotsPerSegment ?? profile.recommendedShotsPerSegment),

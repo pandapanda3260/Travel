@@ -28,6 +28,7 @@ import {
   normalizeSubtitleCueTiming,
   splitSegmentWordTimelineBySubtitleEntries,
 } from "./subtitle-display";
+import { normalizeSubtitlePlanSource } from "./subtitle-plan-source";
 import { countSubtitleDisplayCharacters, splitTextIntoPhrases, wrapSubtitleText } from "./subtitle-text-utils";
 import { buildUnifiedSubtitleAndNarrationText } from "./text-provider";
 import { deriveVideoTaskStructure } from "./video-task-structure";
@@ -38,6 +39,7 @@ import { appendMainCharacterAppearancePrompt } from "./main-character-appearance
 import { buildTaskClipShotPayloads } from "./task-clip-store";
 import { resolveTaskClipCompletionState } from "./task-clip-completion";
 import { resolveDirectMaterialClipPlan } from "./video-material-direct-clip";
+import { validateShotPlan } from "./video-task-planner";
 import { normalizeMediaSourceInput } from "./media-source-input";
 import { resolveLocalMediaSource } from "./media-source-resolver";
 import {
@@ -307,6 +309,80 @@ function buildTestVideoTaskRecord(): VideoTaskRecord {
   };
 }
 
+test("validateShotPlan 会校验镜头计划时间轴、枚举和片段归属", () => {
+  const parameters = buildTestParameterBundle();
+  const source = {
+    productInfoId: null,
+    productInfoTitle: null,
+    productInfoSnapshot: "海景酒店套餐亮点",
+    userPrompt: "强调松弛感与度假氛围",
+    videoMaterialId: null,
+    videoMaterialName: null,
+    videoTemplatePrompt: "",
+  };
+  const validPlan: ShotPlan = {
+    ...buildTestShotPlan(),
+    totalDurationSeconds: 10,
+    shots: buildTestShotPlan().shots.map((shot, index) => {
+      const timeRanges = [
+        [0, 2],
+        [2, 5],
+        [5, 8],
+        [8, 10],
+      ] as const;
+      const [startAtSeconds, endAtSeconds] = timeRanges[index] ?? [0, 0];
+      const functionTags = ["吸引", "信息", "情绪", "转化"] as const;
+
+      return {
+        ...shot,
+        startAtSeconds,
+        endAtSeconds,
+        functionTag: functionTags[index] ?? "信息",
+        sellingPointType: index === 1 ? "服务" : "体验",
+        hasVoice: index === 0 || index >= 2,
+        hasSubtitle: index === 0 || index >= 2,
+        narrationHint: index === 1 ? "" : index === 3 ? "收住行动理由" : shot.narrationHint,
+      };
+    }),
+  };
+  const invalidPlan: ShotPlan = {
+    ...validPlan,
+    totalDurationSeconds: 9.5,
+    shots: validPlan.shots.map((shot, index) => {
+      if (index === 0) {
+        return {
+          ...shot,
+          endAtSeconds: 2.4,
+        };
+      }
+      if (index === 1) {
+        return {
+          ...shot,
+          startAtSeconds: 3,
+        };
+      }
+      if (index === 2) {
+        return {
+          ...shot,
+          purpose: "offer",
+          functionTag: "成交",
+          segmentId: "segment-9",
+        };
+      }
+      return shot;
+    }),
+  };
+
+  const errors = validateShotPlan(invalidPlan, source, parameters);
+
+  assert.equal(errors.some((error) => error.includes("totalDurationSeconds 必须精确等于")), true);
+  assert.equal(errors.some((error) => error.includes("endAtSeconds 必须等于")), true);
+  assert.equal(errors.some((error) => error.includes("startAtSeconds 必须等于")), true);
+  assert.equal(errors.some((error) => error.includes("purpose 必须是")), true);
+  assert.equal(errors.some((error) => error.includes("functionTag 必须是")), true);
+  assert.equal(errors.some((error) => error.includes("segmentIndex 必须与 segmentId")), true);
+});
+
 test("hydrateTaskCreationParameterState 为图片、视频、音频参数补齐默认值", () => {
   const hydrated = hydrateTaskCreationParameterState({
     taskTitle: "  酒店度假视频  ",
@@ -519,7 +595,7 @@ test("resolveDirectMaterialClipPlan 只在同一实拍视频且时间范围完�
   );
 });
 
-test("hydrateTaskCreationParameterState 保留有效的图片、视频、音频参数选择", () => {
+test("hydrateTaskCreationParameterState 保留有效参数并把 10 秒旧片段时长收口到 7 秒", () => {
   const hydrated = hydrateTaskCreationParameterState({
     imageSize: "2848x1600",
     imageGuidanceScale: 8.5,
@@ -579,7 +655,7 @@ test("hydrateTaskCreationParameterState 保留有效的图片、视频、音频�
   assert.equal(hydrated.videoEnableTailFrame, false);
   assert.equal(hydrated.videoExpectedDurationRange, "35_60");
   assert.equal(hydrated.videoSegmentCount, 8);
-  assert.equal(hydrated.videoDurationSeconds, 10);
+  assert.equal(hydrated.videoDurationSeconds, 7);
   assert.equal(hydrated.videoAspectRatio, "16:9");
   assert.equal(hydrated.videoCfgScale, 0.7);
   assert.equal(hydrated.videoCameraControl, "forward_up");
@@ -846,6 +922,26 @@ test("prompt_generation 提示词会按输出维度分别约束数量和时长�
   assert.doesNotMatch(prompt, /imageToVideoPrompt 每行必须标注时长/u);
 });
 
+test("视频拆解提示词保持结构化模块并保留既有 JSON 字段", () => {
+  const prompts = listConstraintPrompts();
+  const analysisPrompt = prompts.find((stage) => stage.key === "video_analysis")?.promptText ?? "";
+  const scriptPrompt = prompts.find((stage) => stage.key === "video_script_generation")?.promptText ?? "";
+
+  assert.match(analysisPrompt, /Role：/u);
+  assert.match(analysisPrompt, /OutputFormat：/u);
+  assert.match(analysisPrompt, /"视频级信息"/u);
+  assert.match(analysisPrompt, /"镜头序列"/u);
+  assert.match(analysisPrompt, /未确认信息已写“未知”/u);
+
+  assert.match(scriptPrompt, /Role：/u);
+  assert.match(scriptPrompt, /videoTemplatePrompt 最高约束/u);
+  assert.match(scriptPrompt, /"contentScript"/u);
+  assert.match(scriptPrompt, /"videoTemplatePrompt"/u);
+  assert.match(scriptPrompt, /"reversePrompt"/u);
+  assert.match(scriptPrompt, /"subtitle"/u);
+  assert.match(scriptPrompt, /禁止写入：/u);
+});
+
 test("旁白运行链路会拼接视频类型 narration stage 提示词", () => {
   const typePrompt = buildVideoTypePromptBlock("agency_guide_voiceover", "narration");
   const promptPattern = new RegExp(escapeRegex(typePrompt));
@@ -860,6 +956,43 @@ test("分视频类型提示词为视觉/人物/字幕子步骤提供独立 stage
   assert.match(getVideoTypeCategoryPrompt("agency_guide_voiceover", "shot_plan_visual"), /视觉设计规则/u);
   assert.match(getVideoTypeCategoryPrompt("agency_guide_voiceover", "shot_plan_subject"), /人物与主体规则/u);
   assert.match(getVideoTypeCategoryPrompt("agency_guide_voiceover", "shot_plan_subtitle"), /字幕规划规则/u);
+});
+
+test("片段级旁白类型的字幕提示词与运行时归一化都保持每片段一条字幕", () => {
+  const subtitlePrompt = getVideoTypeCategoryPrompt("agency_guide_voiceover", "shot_plan_subtitle");
+  const normalized = normalizeSubtitlePlanSource(
+    {
+      ...buildTestShotPlan(),
+      subtitlePlan: [
+        {
+          segmentIndex: 1,
+          segmentId: "segment-1",
+          subtitles: [
+            {
+              text: "先看开场亮点",
+              startAtSeconds: 0,
+              durationSeconds: 2,
+              charCount: 7,
+              coveredShotIndexes: [1],
+            },
+            {
+              text: "再补体验细节",
+              startAtSeconds: 2,
+              durationSeconds: 3,
+              charCount: 7,
+              coveredShotIndexes: [2],
+            },
+          ],
+        },
+      ],
+    },
+    "agency_guide_voiceover",
+  );
+
+  assert.match(subtitlePrompt, /每个片段只输出 1 条字幕/u);
+  assert.doesNotMatch(subtitlePrompt, /拆成 2 条/u);
+  assert.equal(normalized.subtitlePlan?.[0]?.subtitles.length, 1);
+  assert.match(normalized.subtitlePlan?.[0]?.subtitles[0]?.text ?? "", /先看开场亮点，再补体验细节/u);
 });
 
 test("攻略类片段归属与时长规则只保留在视频分类 shot_plan 提示词中", () => {
@@ -1217,7 +1350,7 @@ test("deriveVideoTaskStructure 会把长时长攻略类片段默认拉回 4~7 �
   });
 
   assert.equal(structured.usedTravelGuideAutoStructure, true);
-  assert.equal(structured.durationSeconds, 6);
+  assert.equal(structured.durationSeconds, 7);
   assert.equal(structured.introSegmentDurationSeconds, 5);
   assert.equal(structured.segmentCount >= 6, true);
 });

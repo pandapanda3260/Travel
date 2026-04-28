@@ -1,6 +1,10 @@
 import { defaultVideoNegativePrompt } from "./prompt";
 import { normalizeMediaSourceInput } from "./media-source-input";
 import {
+  clampSeedanceSegmentDurationSeconds,
+  seedanceSegmentDurationOptions,
+} from "./video-duration-constraints";
+import {
   computeVideoTaskStoryShotCount,
   DEFAULT_VIDEO_TASK_VIDEO_TYPE,
   getVideoTaskTypeProfile,
@@ -66,7 +70,7 @@ export const videoExpectedDurationOptions = [
 ] as const;
 
 export const videoSegmentCountOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
-export const videoDurationOptions = [4, 5, 6, 7, 10] as const;
+export const videoDurationOptions = seedanceSegmentDurationOptions;
 export const videoAspectRatioOptions = ["16:9", "9:16", "1:1"] as const;
 export const videoCfgScaleOptions = [0.3, 0.5, 0.7, 1] as const;
 
@@ -369,11 +373,10 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
   )
     ? (draft.videoSegmentCount as (typeof videoSegmentCountOptions)[number])
     : typeDurationDefaults.videoSegmentCount;
-  const videoDurationSeconds = videoDurationOptions.includes(
-    draft.videoDurationSeconds as (typeof videoDurationOptions)[number],
-  )
-    ? (draft.videoDurationSeconds as (typeof videoDurationOptions)[number])
-    : typeDurationDefaults.videoDurationSeconds;
+  const videoDurationSeconds = clampSeedanceSegmentDurationSeconds(
+    draft.videoDurationSeconds,
+    typeDurationDefaults.videoDurationSeconds,
+  );
   const inferredDurationRange = inferTaskCreationExpectedDurationRange({
     videoType,
     videoSegmentCount,

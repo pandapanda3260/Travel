@@ -115,6 +115,54 @@ function getPlannedStoryShotDurationSeconds(parameters: VideoTaskParameterBundle
   );
 }
 
+function roundToTimePrecision(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function parseOptionalTimeNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function timesMatch(left: number, right: number) {
+  return Math.abs(left - right) <= 0.01;
+}
+
+function hasMaxTwoDecimalPlaces(value: number) {
+  return Math.abs(value - roundToTimePrecision(value)) <= 1e-9;
+}
+
+function buildFallbackShotDurations(totalDurationSeconds: number, shotCount: number) {
+  const safeShotCount = Math.max(1, shotCount);
+  if (safeShotCount === 1) {
+    return [roundToTimePrecision(totalDurationSeconds)];
+  }
+
+  const baseDuration = totalDurationSeconds / safeShotCount;
+  const multipliers = [0.9, 1.08, 0.96, 1.12, 1, 0.94];
+  const weightedDurations = Array.from(
+    { length: safeShotCount },
+    (_, index) => Math.max(0.8, baseDuration * multipliers[index % multipliers.length]),
+  );
+  const weightedTotal = weightedDurations.reduce((sum, duration) => sum + duration, 0);
+  const scaledDurations = weightedDurations.map((duration) =>
+    roundToTimePrecision((duration / weightedTotal) * totalDurationSeconds),
+  );
+  const diff = roundToTimePrecision(totalDurationSeconds - scaledDurations.reduce((sum, duration) => sum + duration, 0));
+  const lastIndex = scaledDurations.length - 1;
+  scaledDurations[lastIndex] = roundToTimePrecision(scaledDurations[lastIndex] + diff);
+
+  if (scaledDurations.every((duration) => timesMatch(duration, scaledDurations[0] ?? duration))) {
+    scaledDurations[0] = roundToTimePrecision(Math.max(0.8, scaledDurations[0] - 0.1));
+    scaledDurations[lastIndex] = roundToTimePrecision(scaledDurations[lastIndex] + 0.1);
+  }
+
+  return scaledDurations;
+}
+
 function getPlannedNarrationSegmentDurationSeconds(parameters: VideoTaskParameterBundle, segmentIndex?: number | null) {
   if (parameters.video.segmentMode === "hybrid_intro_plus_montage" && (segmentIndex ?? 1) === 1) {
     return Math.max(1, parameters.video.introSegmentDurationSeconds ?? Math.min(3, parameters.video.durationSeconds));
@@ -416,27 +464,41 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
     source.videoTemplatePrompt.trim().slice(0, 20) ||
     "目的地";
   const shotCount = getPlannedStoryShotCount(parameters);
-  const shotDuration = getPlannedStoryShotDurationSeconds(parameters);
+  const totalDurationSeconds = getPlannedTotalDurationSeconds(parameters);
+  const shotDurations = buildFallbackShotDurations(totalDurationSeconds, shotCount);
+  const segmentCount = Math.max(1, parameters.video.segmentCount || 1);
+  const shotsPerSegment = Math.max(1, parameters.video.storyShotsPerSegment || Math.ceil(shotCount / segmentCount));
   const commercialPlan = buildCommercialStrategyPlan({ source, videoType: parameters.video.videoType });
   const fallbackCommercialPhases = commercialPlan.beatPlan.map((beat) => beat.phase);
   const montageLike =
     parameters.video.segmentMode === "multi_shot_montage" ||
     parameters.video.segmentMode === "hybrid_intro_plus_montage";
+  let nextStartAtSeconds = 0;
   const shots: ShotPlanItem[] = Array.from({ length: shotCount }, (_, i) => {
     const shotIndex = i + 1;
     const isFirst = i === 0;
     const isLast = i === shotCount - 1;
+    const durationSeconds = shotDurations[i] ?? getPlannedStoryShotDurationSeconds(parameters);
+    const startAtSeconds = roundToTimePrecision(nextStartAtSeconds);
+    const endAtSeconds = roundToTimePrecision(startAtSeconds + durationSeconds);
+    nextStartAtSeconds = endAtSeconds;
+    const segmentIndex = Math.min(segmentCount, Math.floor(i / shotsPerSegment) + 1);
     const shouldVoice = profile.hasVoice
       ? !montageLike || shotCount <= 3 || isFirst || isLast || shotIndex % 2 === 1
       : false;
     const purpose = isFirst ? "hook" : isLast ? "closing" : shotIndex % 2 === 0 ? "detail" : "experience";
+    const functionTag = isFirst ? "吸引" : isLast ? "转化" : purpose === "detail" ? "信息" : "情绪";
     const commercialPhase =
       fallbackCommercialPhases[Math.min(i, fallbackCommercialPhases.length - 1)] ??
       (isFirst ? "attention_hook" : isLast ? "action_close" : "evidence_proof");
 
     return {
       shotIndex,
+      segmentIndex,
+      segmentId: `segment-${segmentIndex}`,
       purpose,
+      functionTag,
+      sellingPointType: purpose === "detail" ? "服务" : "体验",
       location: subject,
       hasCharacters: false,
       characters: [],
@@ -448,7 +510,9 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
       action: isFirst ? "全景展示" : isLast ? "氛围收束" : "细节展示",
       emotion: isFirst ? "吸引好奇" : isLast ? "留下印象" : "沉浸体验",
       cameraMovement: "auto",
-      durationSeconds: shotDuration,
+      startAtSeconds,
+      endAtSeconds,
+      durationSeconds,
       sceneDescription: isFirst
         ? `${subject}的全景画面，突出核心吸引力`
         : isLast
@@ -473,7 +537,7 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
   return {
     shots,
     globalStyle: "真实旅行记录感，写实摄影风格",
-    totalDurationSeconds: getPlannedTotalDurationSeconds(parameters),
+    totalDurationSeconds,
     validationErrors: [],
   };
 }
@@ -538,8 +602,8 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
       durationSeconds: Math.max(0.8, Number(raw.durationSeconds) || getPlannedStoryShotDurationSeconds(parameters)),
       sceneDescription: raw.sceneDescription ?? "",
       narrationHint: raw.narrationHint ?? "",
-      startAtSeconds: Number(raw.startAtSeconds) || undefined,
-      endAtSeconds: Number(raw.endAtSeconds) || undefined,
+      startAtSeconds: parseOptionalTimeNumber(raw.startAtSeconds),
+      endAtSeconds: parseOptionalTimeNumber(raw.endAtSeconds),
       functionTag: typeof raw.functionTag === "string" ? raw.functionTag : undefined,
       sellingPointType: typeof raw.sellingPointType === "string" ? raw.sellingPointType : undefined,
       commercialPhase:
@@ -671,22 +735,183 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
 // Step 2: Validation
 // ---------------------------------------------------------------------------
 
+const SHOT_PLAN_ALLOWED_PURPOSES = new Set(["hook", "experience", "detail", "transition", "closing"]);
+const SHOT_PLAN_ALLOWED_FUNCTION_TAGS = new Set(["吸引", "信息", "情绪", "信任", "转化"]);
+const SHOT_PLAN_SEGMENT_ID_PATTERN = /^segment-(\d+)$/;
+
 /** 规则说明见 `system-rules-payload.ts`（与「系统规则」页同步维护）。 */
-function validateShotPlan(plan: ShotPlan, source: VideoTaskSource, parameters: VideoTaskParameterBundle): string[] {
+export function validateShotPlan(
+  plan: ShotPlan,
+  source: VideoTaskSource,
+  parameters: VideoTaskParameterBundle,
+): string[] {
   const errors: string[] = [];
   const expected = getPlannedStoryShotCount(parameters);
   const constraints = parameters.constraints;
   const profile = getVideoTaskTypeProfile(parameters.video.videoType);
+  const sortedShots = [...plan.shots].sort((a, b) => a.shotIndex - b.shotIndex);
 
   if (plan.shots.length !== expected) {
     errors.push(`镜头数量应为 ${expected}，实际为 ${plan.shots.length}`);
   }
 
-  for (const shot of plan.shots) {
-    if (shot.durationSeconds <= 0) {
-      errors.push(`镜头 ${shot.shotIndex} 时长必须大于 0 秒`);
+  if (!Number.isFinite(Number(plan.totalDurationSeconds)) || Number(plan.totalDurationSeconds) <= 0) {
+    errors.push("totalDurationSeconds 必须是大于 0 的数字");
+  } else if (!hasMaxTwoDecimalPlaces(Number(plan.totalDurationSeconds))) {
+    errors.push("totalDurationSeconds 最多保留 2 位小数");
+  }
+
+  sortedShots.forEach((shot, index) => {
+    const expectedShotIndex = index + 1;
+    if (shot.shotIndex !== expectedShotIndex) {
+      errors.push(`shotIndex 必须从 1 连续递增：第 ${expectedShotIndex} 个镜头实际为 ${shot.shotIndex}`);
+    }
+  });
+
+  let expectedStartAtSeconds = 0;
+  let durationTotal = 0;
+  const normalizedDurations: number[] = [];
+  const segmentIndexes: number[] = [];
+  const closedSegmentIndexes = new Set<number>();
+  const reportedReopenedSegmentIndexes = new Set<number>();
+  let previousSegmentIndex: number | null = null;
+
+  for (const shot of sortedShots) {
+    const durationSeconds = Number(shot.durationSeconds);
+    const startAtSeconds = Number(shot.startAtSeconds);
+    const endAtSeconds = Number(shot.endAtSeconds);
+    const shotLabel = `镜头 ${shot.shotIndex}`;
+
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      errors.push(`${shotLabel} durationSeconds 必须是大于 0 的数字`);
+    } else {
+      if (!hasMaxTwoDecimalPlaces(durationSeconds)) {
+        errors.push(`${shotLabel} durationSeconds 最多保留 2 位小数`);
+      }
+      durationTotal += durationSeconds;
+      normalizedDurations.push(roundToTimePrecision(durationSeconds));
     }
 
+    if (!Number.isFinite(startAtSeconds)) {
+      errors.push(`${shotLabel} startAtSeconds 必须是数字`);
+    } else {
+      if (!hasMaxTwoDecimalPlaces(startAtSeconds)) {
+        errors.push(`${shotLabel} startAtSeconds 最多保留 2 位小数`);
+      }
+      if (shot.shotIndex === 1 && !timesMatch(startAtSeconds, 0)) {
+        errors.push("第一个 shot.startAtSeconds 必须为 0");
+      }
+      if (!timesMatch(startAtSeconds, expectedStartAtSeconds)) {
+        errors.push(`${shotLabel} startAtSeconds 必须等于上一个镜头的 endAtSeconds`);
+      }
+    }
+
+    if (!Number.isFinite(endAtSeconds)) {
+      errors.push(`${shotLabel} endAtSeconds 必须是数字`);
+    } else {
+      if (!hasMaxTwoDecimalPlaces(endAtSeconds)) {
+        errors.push(`${shotLabel} endAtSeconds 最多保留 2 位小数`);
+      }
+      if (Number.isFinite(startAtSeconds) && Number.isFinite(durationSeconds)) {
+        const expectedEndAtSeconds = roundToTimePrecision(startAtSeconds + durationSeconds);
+        if (!timesMatch(endAtSeconds, expectedEndAtSeconds)) {
+          errors.push(`${shotLabel} endAtSeconds 必须等于 startAtSeconds + durationSeconds`);
+        }
+      }
+      expectedStartAtSeconds = endAtSeconds;
+    }
+
+    if (!SHOT_PLAN_ALLOWED_PURPOSES.has(String(shot.purpose ?? "").trim())) {
+      errors.push(`${shotLabel} purpose 必须是 hook / experience / detail / transition / closing 之一`);
+    }
+
+    if (!shot.functionTag?.trim()) {
+      errors.push(`${shotLabel} 缺少 functionTag`);
+    } else if (!SHOT_PLAN_ALLOWED_FUNCTION_TAGS.has(shot.functionTag.trim())) {
+      errors.push(`${shotLabel} functionTag 必须是 吸引 / 信息 / 情绪 / 信任 / 转化 之一`);
+    }
+
+    if (!shot.sellingPointType?.trim()) {
+      errors.push(`${shotLabel} 缺少 sellingPointType`);
+    }
+
+    if (shot.segmentId || shot.segmentIndex != null) {
+      const segmentId = String(shot.segmentId ?? "").trim();
+      const segmentIndex = Number(shot.segmentIndex);
+      const matchedSegmentId = segmentId.match(SHOT_PLAN_SEGMENT_ID_PATTERN);
+
+      if (!matchedSegmentId) {
+        errors.push(`${shotLabel} segmentId 必须符合 segment-N 格式`);
+      }
+      if (!Number.isInteger(segmentIndex) || segmentIndex < 1) {
+        errors.push(`${shotLabel} segmentIndex 必须是从 1 开始的整数`);
+      } else {
+        segmentIndexes.push(segmentIndex);
+        if (matchedSegmentId && Number(matchedSegmentId[1]) !== segmentIndex) {
+          errors.push(`${shotLabel} segmentIndex 必须与 segmentId 的数字保持一致`);
+        }
+        if (previousSegmentIndex != null && previousSegmentIndex !== segmentIndex) {
+          closedSegmentIndexes.add(previousSegmentIndex);
+        }
+        if (
+          previousSegmentIndex !== segmentIndex &&
+          closedSegmentIndexes.has(segmentIndex) &&
+          !reportedReopenedSegmentIndexes.has(segmentIndex)
+        ) {
+          errors.push(`片段 ${segmentIndex} 的镜头必须连续排列，不能被其他片段打断后再次出现`);
+          reportedReopenedSegmentIndexes.add(segmentIndex);
+        }
+        previousSegmentIndex = segmentIndex;
+      }
+    }
+
+    if (!shot.hasCharacters && shot.characters.length > 0) {
+      errors.push(`${shotLabel} hasCharacters=false 时 characters 必须为空数组`);
+    }
+
+    if (!shot.hasTalent && shot.talentCaptureMode && shot.talentCaptureMode !== "none") {
+      errors.push(`${shotLabel} hasTalent=false 时 talentCaptureMode 必须为空或 none`);
+    }
+
+    if (shot.requiresLipSync && (!shot.hasTalent || !shot.hasVoice)) {
+      errors.push(`${shotLabel} requiresLipSync=true 时必须同时 hasTalent=true 且 hasVoice=true`);
+    }
+
+    if (!shot.hasVoice && !shot.hasSubtitle && shot.narrationHint?.trim()) {
+      errors.push(`${shotLabel} hasVoice=false 且 hasSubtitle=false 时 narrationHint 必须为空`);
+    }
+
+    if (shot.narrationHint?.trim() && countNarrationCharacters(shot.narrationHint) > 15) {
+      errors.push(`${shotLabel} narrationHint 必须小于等于 15 个汉字`);
+    }
+  }
+
+  const roundedDurationTotal = roundToTimePrecision(durationTotal);
+  if (Number.isFinite(Number(plan.totalDurationSeconds)) && !timesMatch(Number(plan.totalDurationSeconds), roundedDurationTotal)) {
+    errors.push("totalDurationSeconds 必须精确等于所有 shots.durationSeconds 之和");
+  }
+
+  if (
+    normalizedDurations.length > 1 &&
+    normalizedDurations.every((duration) => timesMatch(duration, normalizedDurations[0] ?? duration))
+  ) {
+    errors.push("durationSeconds 禁止全部相同，必须根据内容差异化设计");
+  }
+
+  if (segmentIndexes.length > 0) {
+    const uniqueSegmentIndexes = [...new Set(segmentIndexes)].sort((a, b) => a - b);
+    if (uniqueSegmentIndexes[0] !== 1) {
+      errors.push("segmentIndex 必须从 1 开始");
+    }
+    uniqueSegmentIndexes.forEach((segmentIndex, index) => {
+      const expectedSegmentIndex = index + 1;
+      if (segmentIndex !== expectedSegmentIndex) {
+        errors.push(`segmentIndex 必须连续递增：缺少 segment-${expectedSegmentIndex}`);
+      }
+    });
+  }
+
+  for (const shot of plan.shots) {
     if (!shot.sceneDescription?.trim()) {
       errors.push(`镜头 ${shot.shotIndex} 缺少 sceneDescription`);
     }

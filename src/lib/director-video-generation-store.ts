@@ -13,6 +13,7 @@ import {
   joinRuntimePublicStoragePath,
   resolveRuntimeAssetUrlToPath,
 } from "./runtime-storage";
+import { clampSeedanceSegmentDurationSeconds } from "./video-duration-constraints";
 
 export type DirectorVideoGenerationStepStatus = "idle" | "running" | "success" | "failed";
 
@@ -239,7 +240,7 @@ function normalizeSession(record: Partial<DirectorVideoGenerationSession>): Dire
     videoSettings: {
       ...getDefaultVideoSettings(),
       ...(record.videoSettings ?? {}),
-      durationSeconds: Math.max(4, Math.min(10, Number(record.videoSettings?.durationSeconds ?? 5))),
+      durationSeconds: clampSeedanceSegmentDurationSeconds(record.videoSettings?.durationSeconds),
       ratio: ["16:9", "9:16", "1:1"].includes(record.videoSettings?.ratio ?? "")
         ? (record.videoSettings?.ratio as "16:9" | "9:16" | "1:1")
         : "9:16",
@@ -338,9 +339,8 @@ export function patchDirectorVideoGenerationSession(
     videoSettings: {
       ...current.videoSettings,
       ...(patch.videoSettings ?? {}),
-      durationSeconds: Math.max(
-        4,
-        Math.min(10, Number(patch.videoSettings?.durationSeconds ?? current.videoSettings.durationSeconds)),
+      durationSeconds: clampSeedanceSegmentDurationSeconds(
+        patch.videoSettings?.durationSeconds ?? current.videoSettings.durationSeconds,
       ),
       ratio: ["16:9", "9:16", "1:1"].includes(patch.videoSettings?.ratio ?? current.videoSettings.ratio)
         ? ((patch.videoSettings?.ratio ?? current.videoSettings.ratio) as "16:9" | "9:16" | "1:1")

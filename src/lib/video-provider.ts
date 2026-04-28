@@ -8,6 +8,7 @@ import { getLipSyncProviderRuntime, getProviderRuntime, type LiveVideoProvider }
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
 import { defaultModelPollTimeoutMs, defaultModelRequestTimeoutMs, fetchWithTimeout } from "./timeout";
+import { clampSeedanceSegmentDurationSeconds } from "./video-duration-constraints";
 
 type SubmittedLiveVideoJob = {
   jobId: string;
@@ -889,7 +890,7 @@ async function submitSeedanceVideoJobOnce(
         body: JSON.stringify({
           model: getProviderRuntime("seedance").modelId,
           content: contentArray,
-          duration: Math.max(4, Math.min(10, input.durationSeconds)),
+          duration: clampSeedanceSegmentDurationSeconds(input.durationSeconds),
           ratio: input.ratio,
           ...(!input.imageUrls?.length ? { resolution: input.resolution ?? "1080p" } : {}),
           generate_audio: input.generateAudio ?? false,

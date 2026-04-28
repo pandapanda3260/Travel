@@ -8,7 +8,7 @@ import {
   hasCriticalTrafficOrTaxiMismatch,
   normalizeTaskVisualImageQualityResult,
 } from "./task-visual-image-quality-check";
-import { pickRecommendedTaskVisualImageCandidate } from "./task-visual-image-store";
+import { buildImageDimensionQualityCheck, pickRecommendedTaskVisualImageCandidate } from "./task-visual-image-store";
 
 test("右舵或日式出租车问题会被强制收口为失败并建议重生", () => {
   const result = normalizeTaskVisualImageQualityResult({
@@ -87,6 +87,24 @@ test("横向内容塞进竖版或画面整体横着会被强制收口为失败",
   assert.equal(result.scorePenalty >= 55, true);
 });
 
+test("横版构图不符合竖版要求的常见描述会被识别为方向错误", () => {
+  assert.equal(
+    hasCriticalOrientationMismatch({
+      issues: ["图片实际是横版构图，不符合竖版 9:16 要求"],
+      summary: "",
+    }),
+    true,
+  );
+
+  assert.equal(
+    hasCriticalOrientationMismatch({
+      issues: [],
+      summary: "画面为横向 16:9，偏离 portrait 竖图构图要求",
+    }),
+    true,
+  );
+});
+
 test("出现文字水印或拼图会被强制收口为失败", () => {
   assert.equal(
     hasCriticalTextOrLayoutMismatch({
@@ -107,6 +125,38 @@ test("出现文字水印或拼图会被强制收口为失败", () => {
   assert.equal(result.status, "failed");
   assert.equal(result.retrySuggested, true);
   assert.equal(result.scorePenalty >= 55, true);
+});
+
+test("中文字、英文标识和文本残留会被识别为文字类硬失败", () => {
+  assert.equal(
+    hasCriticalTextOrLayoutMismatch({
+      issues: ["画面中有中文字和英文标识残留"],
+      summary: "",
+    }),
+    true,
+  );
+
+  assert.equal(
+    hasCriticalTextOrLayoutMismatch({
+      issues: [],
+      summary: "建筑外墙存在清晰文本，不符合无文字要求",
+    }),
+    true,
+  );
+});
+
+test("图片实际宽高与目标竖版相反时会被运行时尺寸兜底标记失败", () => {
+  const check = buildImageDimensionQualityCheck({
+    size: "1600x2848",
+    width: 1920,
+    height: 1080,
+    checkedAt: "2026-04-29T00:00:00.000Z",
+  });
+
+  assert.equal(check?.status, "failed");
+  assert.equal(check?.retrySuggested, true);
+  assert.equal(check?.scorePenalty, 55);
+  assert.match(check?.issues.join("，") ?? "", /目标画幅为竖版.*实际尺寸为横版/u);
 });
 
 test("确认无文字且竖版构图正确的说明不会被误判", () => {

@@ -56,6 +56,7 @@ import {
 import { getLipSyncProviderRuntime, getProviderRuntime } from "../../../../../lib/video-provider-config";
 import { submitLiveImageToVideoJob, submitSeedanceVideoJob } from "../../../../../lib/video-provider";
 import type { SeedanceGenerationInput } from "../../../../../lib/video-provider";
+import { clampSeedanceSegmentDurationSeconds } from "../../../../../lib/video-duration-constraints";
 import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
 import { clearTaskCompositionOutputs } from "../../../../../lib/video-task-output-reset";
 import { syncTaskVisualImageSelectionState } from "../../../../../lib/task-visual-image-stage";
@@ -471,14 +472,8 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
         throw new Error(`片段 ${shotIndex} 没有可用的参考图片，请先在视觉图片步骤中生成并选定图片。`);
       }
 
-      const segmentDuration = Math.max(
-        4,
-        Math.min(
-          10,
-          Math.round(
-            shotDefinition.durationSeconds || narrationClip.durationSeconds || task.parameters.video.durationSeconds,
-          ),
-        ),
+      const segmentDuration = clampSeedanceSegmentDurationSeconds(
+        shotDefinition.durationSeconds || narrationClip.durationSeconds || task.parameters.video.durationSeconds,
       );
 
       const seedancePrompt = buildSeedanceSegmentPrompt({
