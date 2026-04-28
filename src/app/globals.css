@@ -16600,7 +16600,14 @@ button.setting-select.active::after {
 .director-video-image-download-button {
   right: 8px;
   bottom: 8px;
+  width: 24px;
+  height: 24px;
   text-decoration: none;
+}
+
+.director-video-image-download-button svg {
+  width: 13px;
+  height: 13px;
 }
 
 .director-video-image-trigger:disabled {
