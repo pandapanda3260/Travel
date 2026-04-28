@@ -87,12 +87,12 @@ const stageLabel: Record<string, string> = {
 };
 
 const phaseTabs: PhaseTab[] = [
-  { id: "material_prep", title: "素材准备", phases: ["素材准备"] },
   { id: "task_creation", title: "任务创建", phases: ["任务创建"] },
   { id: "video_types", title: "分视频类型提示词", phases: [] },
   { id: "subtitle_audio", title: "字幕音频", phases: ["字幕音频"] },
   { id: "image_generation", title: "图片生成", phases: ["图片生成"] },
   { id: "clip_generation", title: "片段生成", phases: ["片段生成"] },
+  { id: "material_prep", title: "素材准备", phases: ["素材准备"] },
   { id: "video_analysis", title: "视频拆解", phases: ["视频拆解"] },
 ];
 
@@ -107,7 +107,7 @@ export default function AdminPromptsContent() {
   const [payload, setPayload] = useState<ConstraintPromptsPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activePhase, setActivePhase] = useState<string>("video_types");
+  const [activePhase, setActivePhase] = useState<string>("task_creation");
   const [collapsedPrompts, setCollapsedPrompts] = useState<Set<string>>(new Set());
 
   const load = useCallback(() => {
