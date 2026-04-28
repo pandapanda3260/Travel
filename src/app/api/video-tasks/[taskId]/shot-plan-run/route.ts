@@ -12,6 +12,7 @@ import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard
 import {
   getDefaultTaskCreationParameterState,
   hydrateTaskCreationParameterState,
+  normalizeCompositionBackgroundMusicVolume,
 } from "../../../../../lib/task-creation-parameters";
 import { normalizeNullableMediaSourceInput } from "../../../../../lib/media-source-input";
 import { generateVideoTaskDraftBundle } from "../../../../../lib/video-task-planner";
@@ -119,6 +120,9 @@ function buildTaskCreationFallbackParameters(
     audioEnableSubtitle: task.parameters.audio.enableSubtitle,
     compositionIncludeBackgroundMusic: task.parameters.composition.includeBackgroundMusic,
     compositionBackgroundMusicUrl: task.parameters.composition.backgroundMusicUrl ?? "",
+    compositionBackgroundMusicVolume: normalizeCompositionBackgroundMusicVolume(
+      task.parameters.composition.backgroundMusicVolume,
+    ),
     compositionSubtitleConfig: task.parameters.composition.subtitleConfig,
     constraintPreset: defaults.constraintPreset,
     constraintCustomRules: task.parameters.constraints.customRules.join("\n"),

@@ -124,7 +124,7 @@ type ModelUsageBillingPolicy = {
   enforceSufficientBalance: boolean;
   minimumBalancePoints: number;
   dailyUserPointLimit: number | null;
-  strictModeSource: "env" | "production" | "config" | "off";
+  strictModeSource: "env" | "config" | "off";
 };
 
 function roundCurrency(value: number) {
@@ -240,19 +240,16 @@ function resolveModelUsageBillingPolicy(config: ModelBillingConfigRecord): Model
   const requirePricingEnv = readBooleanEnv("USAGE_BILLING_REQUIRE_PRICING");
   const enforceBalanceEnv = readBooleanEnv("USAGE_BILLING_ENFORCE_BALANCE");
   const dailyUserPointLimitEnv = readPositiveNumberEnv("USAGE_BILLING_DAILY_USER_POINT_LIMIT");
-  const productionStrict = process.env.NODE_ENV === "production";
-  const configuredStrictMode = strictEnv ?? config.strictModeEnabled;
-  const strictModeEnabled = configuredStrictMode || productionStrict;
-  const strictModeSource =
-    strictEnv !== null ? "env" : productionStrict ? "production" : config.strictModeEnabled ? "config" : "off";
+  const strictModeEnabled = strictEnv ?? config.strictModeEnabled;
+  const strictModeSource = strictEnv !== null ? "env" : config.strictModeEnabled ? "config" : "off";
   const configuredRequirePricing = requirePricingEnv ?? config.requirePricingRule;
   const configuredEnforceBalance = enforceBalanceEnv ?? config.enforceSufficientBalance;
 
   return {
     billingEnabled: config.billingEnabled,
     strictModeEnabled,
-    requirePricingRule: configuredRequirePricing || strictModeEnabled,
-    enforceSufficientBalance: configuredEnforceBalance || strictModeEnabled,
+    requirePricingRule: configuredRequirePricing,
+    enforceSufficientBalance: configuredEnforceBalance,
     minimumBalancePoints: Math.max(0, Number(config.minimumBalancePoints ?? 0) || 0),
     dailyUserPointLimit: dailyUserPointLimitEnv ?? config.dailyUserPointLimit ?? null,
     strictModeSource,

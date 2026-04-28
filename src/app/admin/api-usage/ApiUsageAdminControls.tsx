@@ -215,7 +215,7 @@ export function ApiUsageAdminControls({ initialSnapshot }: { initialSnapshot: Ap
         <div className="panel-header compact">
           <div>
             <h3>计费风控配置</h3>
-            <p className="admin-panel-desc">生产部署建议保持严格模式、定价必填和余额拦截开启。</p>
+            <p className="admin-panel-desc">可按业务需要单独开启或关闭严格模式、定价必填、余额拦截和每日限额。</p>
           </div>
         </div>
         <div className="admin-billing-form-grid">

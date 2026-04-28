@@ -15,6 +15,7 @@ import { getVideoTaskStatusIndex, type VideoTaskRecord } from "../../../../lib/v
 import { useVideoTimecode } from "../../../_components/use-video-timecode";
 
 import type { ClipPipelineSummary } from "./pipeline-flow";
+import { parseApiResponse } from "./api-response";
 import { type TaskStepActionState } from "./task-ui";
 
 type ClipJob = {
@@ -413,7 +414,7 @@ export function ClipGenerationModule({
         cache: "no-store",
         signal: controller.signal,
       });
-      const data = (await response.json()) as ClipModuleResponse;
+      const data = await parseApiResponse<ClipModuleResponse>(response);
       if (!response.ok) {
         throw new Error(data.error ?? "片段结果加载失败");
       }
@@ -657,7 +658,7 @@ export function ClipGenerationModule({
         },
         body: JSON.stringify(body),
       });
-      const data = (await response.json()) as ClipModuleResponse;
+      const data = await parseApiResponse<ClipModuleResponse>(response);
       if (!response.ok) {
         throw new Error(data.error ?? "片段生成失败");
       }

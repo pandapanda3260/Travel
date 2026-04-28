@@ -10,6 +10,8 @@ import {
   type VideoTaskVideoType,
 } from "../../../../lib/video-task-schema";
 
+import { parseApiResponse } from "./api-response";
+
 type HotelAssetPanelResponse = {
   assets?: TaskHotelAssetRecord[];
   runtime?: {
@@ -242,7 +244,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
         const response = await fetch(`/api/video-tasks/${taskId}/hotel-assets`, {
           cache: "no-store",
         });
-        const data = (await response.json()) as HotelAssetPanelResponse;
+        const data = await parseApiResponse<HotelAssetPanelResponse>(response);
         if (!response.ok) {
           throw new Error(data.error ?? "酒店素材加载失败");
         }
@@ -292,7 +294,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
     const response = await fetch(`/api/video-tasks/${taskId}/hotel-assets`, {
       cache: "no-store",
     });
-    const data = (await response.json()) as HotelAssetPanelResponse;
+    const data = await parseApiResponse<HotelAssetPanelResponse>(response);
     if (!response.ok) {
       throw new Error(data.error ?? "酒店素材刷新失败");
     }
@@ -348,7 +350,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
         },
         body: JSON.stringify(payload),
       });
-      const data = (await response.json()) as HotelAssetPanelResponse;
+      const data = await parseApiResponse<HotelAssetPanelResponse>(response);
       if (!response.ok) {
         throw new Error(data.error ?? fallbackMessage);
       }
@@ -538,7 +540,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
           method: "POST",
           body: formData,
         });
-        const data = (await response.json()) as HotelAssetPanelResponse;
+        const data = await parseApiResponse<HotelAssetPanelResponse>(response);
         if (!response.ok) {
           throw new Error(data.error ?? `上传 ${file.name} 失败`);
         }
@@ -631,7 +633,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
       const response = await fetch(`/api/video-tasks/${taskId}/hotel-assets?assetId=${encodeURIComponent(assetId)}`, {
         method: "DELETE",
       });
-      const data = (await response.json()) as HotelAssetPanelResponse;
+      const data = await parseApiResponse<HotelAssetPanelResponse>(response);
       if (!response.ok) {
         throw new Error(data.error ?? "酒店素材删除失败");
       }
@@ -671,7 +673,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
           prompt: draft.userNote.trim(),
         }),
       });
-      const data = (await response.json()) as HotelAssetPanelResponse;
+      const data = await parseApiResponse<HotelAssetPanelResponse>(response);
       if (!response.ok) {
         throw new Error(data.error ?? "AI 优化图片失败");
       }

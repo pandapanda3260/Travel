@@ -17,6 +17,7 @@ import {
 } from "../../../../lib/video-task-schema";
 
 import type { VisualPipelineSummary } from "./pipeline-flow";
+import { parseApiResponse } from "./api-response";
 import { type TaskStepActionState } from "./task-ui";
 import { useStreamProgress } from "./use-stream-progress";
 
@@ -142,7 +143,7 @@ export function VisualImageModule({
       setError(null);
 
       const response = await fetch(`/api/video-tasks/${taskId}/visual-images`, { cache: "no-store" });
-      const data = (await response.json()) as VisualImageResponse;
+      const data = await parseApiResponse<VisualImageResponse>(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "视觉图片加载失败");
@@ -343,7 +344,7 @@ export function VisualImageModule({
         },
         body: JSON.stringify(body),
       });
-      const data = (await response.json()) as VisualImageResponse;
+      const data = await parseApiResponse<VisualImageResponse>(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "视觉图片操作失败");
@@ -367,7 +368,8 @@ export function VisualImageModule({
       if (
         capturedMaterialFirst &&
         materialBackedShotCount > 0 &&
-        (pendingMaterialBackedCount > 0 || shouldShowRerun)
+        pendingMaterialBackedCount > 0 &&
+        !shouldShowRerun
       ) {
         await submitAction({
           action: "sync_captured_material_shots",
@@ -551,12 +553,12 @@ export function VisualImageModule({
         method: "POST",
         body: formData,
       });
-      const data = (await response.json()) as {
+      const data = await parseApiResponse<{
         shots?: VisualImageShot[];
         task?: Record<string, unknown>;
         runtime?: { providerLabel?: string; modelId?: string; liveEnabled?: boolean };
         error?: string;
-      };
+      }>(response);
 
       if (!response.ok) {
         throw new Error(data.error ?? "上传图片失败");
@@ -662,10 +664,10 @@ export function VisualImageModule({
           segments,
         }),
       });
-      const data = (await response.json().catch(() => null)) as {
+      const data = await parseApiResponse<{
         error?: string;
         task?: VideoTaskRecord | null;
-      } | null;
+      }>(response);
       if (!response.ok) {
         throw new Error(data?.error ?? "调整镜头顺序失败");
       }

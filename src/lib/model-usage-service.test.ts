@@ -101,24 +101,34 @@ test("strict usage preflight blocks estimated usage when balance is insufficient
   const { authStore, modelUsageService } = await loadModules();
   const userId = "user-insufficient-balance";
   createAuthUser(authStore, userId);
+  const previousEnforceBalance = process.env.USAGE_BILLING_ENFORCE_BALANCE;
+  process.env.USAGE_BILLING_ENFORCE_BALANCE = "true";
 
-  assert.throws(
-    () =>
-      modelUsageService.runWithModelUsageContext({ userId }, () =>
-        modelUsageService.assertModelUsagePreflight({
-          serviceName: "image.generate",
-          pricingKey: "doubao.seedream.5.0",
-          estimatedMetrics: {
-            imageCount: 1,
-            requestCount: 1,
-          },
-        }),
-      ),
-    (error) => {
-      assertBillingError(error, "INSUFFICIENT_POINTS_BALANCE");
-      return true;
-    },
-  );
+  try {
+    assert.throws(
+      () =>
+        modelUsageService.runWithModelUsageContext({ userId }, () =>
+          modelUsageService.assertModelUsagePreflight({
+            serviceName: "image.generate",
+            pricingKey: "doubao.seedream.5.0",
+            estimatedMetrics: {
+              imageCount: 1,
+              requestCount: 1,
+            },
+          }),
+        ),
+      (error) => {
+        assertBillingError(error, "INSUFFICIENT_POINTS_BALANCE");
+        return true;
+      },
+    );
+  } finally {
+    if (previousEnforceBalance === undefined) {
+      delete process.env.USAGE_BILLING_ENFORCE_BALANCE;
+    } else {
+      process.env.USAGE_BILLING_ENFORCE_BALANCE = previousEnforceBalance;
+    }
+  }
 });
 
 test("recordModelUsage writes charged usage and point deduction", async () => {
@@ -277,6 +287,64 @@ test("strict usage preflight blocks estimated usage beyond the daily user limit"
       delete process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
     } else {
       process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = previousDailyLimit;
+    }
+  }
+});
+
+test("production mode does not force strict preflight when billing switches are disabled", async () => {
+  const { modelUsageService } = await loadModules();
+  const env = process.env as Record<string, string | undefined>;
+  const previousNodeEnv = env.NODE_ENV;
+  const previousStrict = process.env.USAGE_BILLING_STRICT_MODE;
+  const previousRequirePricing = process.env.USAGE_BILLING_REQUIRE_PRICING;
+  const previousEnforceBalance = process.env.USAGE_BILLING_ENFORCE_BALANCE;
+  const previousDailyLimit = process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
+
+  env.NODE_ENV = "production";
+  env.USAGE_BILLING_STRICT_MODE = "false";
+  env.USAGE_BILLING_REQUIRE_PRICING = "false";
+  env.USAGE_BILLING_ENFORCE_BALANCE = "false";
+  delete env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
+
+  try {
+    const policy = modelUsageService.getModelUsageBillingPolicy();
+    assert.equal(policy.strictModeEnabled, false);
+    assert.equal(policy.requirePricingRule, false);
+    assert.equal(policy.enforceSufficientBalance, false);
+    assert.equal(policy.dailyUserPointLimit, null);
+    assert.equal(policy.strictModeSource, "env");
+
+    assert.doesNotThrow(() =>
+      modelUsageService.assertModelUsagePreflight({
+        serviceName: "image.generate",
+        pricingKey: null,
+      }),
+    );
+  } finally {
+    if (previousNodeEnv === undefined) {
+      delete env.NODE_ENV;
+    } else {
+      env.NODE_ENV = previousNodeEnv;
+    }
+    if (previousStrict === undefined) {
+      delete env.USAGE_BILLING_STRICT_MODE;
+    } else {
+      env.USAGE_BILLING_STRICT_MODE = previousStrict;
+    }
+    if (previousRequirePricing === undefined) {
+      delete env.USAGE_BILLING_REQUIRE_PRICING;
+    } else {
+      env.USAGE_BILLING_REQUIRE_PRICING = previousRequirePricing;
+    }
+    if (previousEnforceBalance === undefined) {
+      delete env.USAGE_BILLING_ENFORCE_BALANCE;
+    } else {
+      env.USAGE_BILLING_ENFORCE_BALANCE = previousEnforceBalance;
+    }
+    if (previousDailyLimit === undefined) {
+      delete env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
+    } else {
+      env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = previousDailyLimit;
     }
   }
 });

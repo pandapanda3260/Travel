@@ -15,6 +15,7 @@ import { isTaskStageProgressRunning, type TaskStageProgressSnapshot } from "../.
 import type { VideoTaskRecord } from "../../../../lib/video-task-schema";
 import { useVideoTimecode } from "../../../_components/use-video-timecode";
 
+import { parseApiResponse } from "./api-response";
 import { type TaskStepActionState } from "./task-ui";
 import { useStreamProgress } from "./use-stream-progress";
 import { CompositionSettingsPanel } from "./composition-settings-panel";
@@ -124,24 +125,6 @@ type TimelineSegmentSummary = {
   shotTitle: string;
   durationSeconds: number;
 };
-
-async function parseApiResponse<T>(response: Response): Promise<T> {
-  const rawText = await response.text();
-  if (!rawText) {
-    throw new Error(`接口返回为空，状态码 ${response.status}`);
-  }
-
-  try {
-    return JSON.parse(rawText) as T;
-  } catch {
-    const normalizedText = rawText.trim().slice(0, 180);
-    throw new Error(
-      response.ok
-        ? `接口返回了非 JSON 内容：${normalizedText}`
-        : `接口请求失败，状态码 ${response.status}：${normalizedText}`,
-    );
-  }
-}
 
 function toCssAspectRatio(aspectRatio: "16:9" | "9:16" | "1:1" | null | undefined) {
   switch (aspectRatio) {

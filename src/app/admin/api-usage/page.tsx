@@ -40,12 +40,10 @@ function getStatusTone(status: "charged" | "unpriced" | "skipped") {
   }
 }
 
-function formatStrictModeSource(source: "env" | "production" | "config" | "off") {
+function formatStrictModeSource(source: "env" | "config" | "off") {
   switch (source) {
     case "env":
       return "环境变量";
-    case "production":
-      return "生产默认";
     case "config":
       return "后台配置";
     default:
