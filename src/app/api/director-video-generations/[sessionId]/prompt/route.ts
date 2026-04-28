@@ -130,18 +130,22 @@ export async function POST(request: NextRequest, context: RouteContext) {
   } catch (error) {
     const { sessionId } = await context.params;
     const message = formatDirectorVideoGenerationError(error, "提示词优化失败");
-    patchDirectorVideoGenerationSession(
-      sessionId,
-      promptTarget === "video"
-        ? {
-            videoPromptStatus: "failed",
-            videoPromptError: message,
-          }
-        : {
-            promptStatus: "failed",
-            promptError: message,
-          },
-    );
+    try {
+      patchDirectorVideoGenerationSession(
+        sessionId,
+        promptTarget === "video"
+          ? {
+              videoPromptStatus: "failed",
+              videoPromptError: message,
+            }
+          : {
+              promptStatus: "failed",
+              promptError: message,
+            },
+      );
+    } catch (patchError) {
+      console.error("[director-video-generation] failed to persist prompt failure", patchError);
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

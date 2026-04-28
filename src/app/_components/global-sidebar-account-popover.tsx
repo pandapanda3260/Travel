@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, LogOut, PencilLine, Settings2, ShieldCheck, Sparkles, X } from "lucide-react";
+import { BarChart3, Check, LogOut, PencilLine, Settings2, ShieldCheck, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -13,6 +13,7 @@ const userPanelGroups = [
     title: "账号与安全",
     items: [
       { label: "会员中心", href: "/settings/membership", icon: Sparkles },
+      { label: "用量账单", href: "/settings/usage", icon: BarChart3 },
       { label: "账号管理", href: "/settings/account", icon: ShieldCheck },
       { label: "参数设置", href: "/settings/parameter-settings", icon: Settings2 },
     ],
@@ -242,8 +243,8 @@ export function GlobalSidebarAccountPopover({
           <span>当前剩余积分</span>
           <strong>{formatPoints(user.availablePoints)}</strong>
         </div>
-        <Link href="/settings/membership#points-records" className="sidebar-account-points-link" onClick={onClose}>
-          积分账单
+        <Link href="/settings/usage" className="sidebar-account-points-link" onClick={onClose}>
+          用量账单
         </Link>
       </div>
 

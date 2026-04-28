@@ -24,6 +24,7 @@ let modulesPromise: Promise<{
   authSecurity: any;
   authService: any;
   authStore: any;
+  directorVideoGenerationStore: any;
   productArchiveStore: any;
   requestAuthGuards: any;
   runtimeAssetResponse: any;
@@ -38,6 +39,7 @@ function loadModules() {
       import("./auth-security.js"),
       import("./auth-service.js"),
       import("./auth-store.js"),
+      import("./director-video-generation-store.js"),
       import("./product-archive-store.js"),
       import("./request-auth-guards.js"),
       import("./runtime-asset-response.js"),
@@ -48,6 +50,7 @@ function loadModules() {
       authSecurity,
       authService,
       authStore,
+      directorVideoGenerationStore,
       productArchiveStore,
       requestAuthGuards,
       runtimeAssetResponse,
@@ -58,6 +61,7 @@ function loadModules() {
       authSecurity,
       authService,
       authStore,
+      directorVideoGenerationStore,
       productArchiveStore,
       requestAuthGuards,
       runtimeAssetResponse,
@@ -408,6 +412,49 @@ test("runtime asset response enforces task ownership and marks task assets as pr
   assert.equal(allowedResponse.headers.get("cache-control"), "private, no-store");
   assert.equal(allowedResponse.headers.get("vary"), "Cookie");
   assert.equal(allowedResponse.headers.get("x-content-type-options"), "nosniff");
+});
+
+test("runtime asset response authorizes director quick generation assets by session ownership", async () => {
+  const { authConfig, authSecurity, authStore, directorVideoGenerationStore, runtimeAssetResponse } = await loadModules();
+  const owner = createAuthenticatedUserSession(authStore, authSecurity, "director-owner");
+  const other = createAuthenticatedUserSession(authStore, authSecurity, "director-other");
+  const generationSession = directorVideoGenerationStore.createDirectorVideoGenerationSession({
+    ownerUserId: owner.userId,
+    title: "快速生成",
+  });
+  writeRuntimeAsset(
+    `generated-images/${generationSession.sessionId}/video-generation/preview.txt`,
+    "director-session-image",
+  );
+
+  const forbiddenResponse = runtimeAssetResponse.serveRuntimeAssetRequest(
+    buildRequest(`http://127.0.0.1:3000/generated-images/${generationSession.sessionId}/video-generation/preview.txt`, {
+      headers: {
+        cookie: `${authConfig.USER_SESSION_COOKIE}=${other.token}`,
+      },
+    }),
+    "generated-images",
+    [generationSession.sessionId, "video-generation", "preview.txt"],
+  );
+  assert.equal(forbiddenResponse.status, 403);
+  assert.deepEqual(await forbiddenResponse.json(), {
+    code: "DIRECTOR_VIDEO_GENERATION_FORBIDDEN",
+    error: "无权访问该快速生成产物",
+  });
+
+  const allowedResponse = runtimeAssetResponse.serveRuntimeAssetRequest(
+    buildRequest(`http://127.0.0.1:3000/generated-images/${generationSession.sessionId}/video-generation/preview.txt`, {
+      headers: {
+        cookie: `${authConfig.USER_SESSION_COOKIE}=${owner.token}`,
+      },
+    }),
+    "generated-images",
+    [generationSession.sessionId, "video-generation", "preview.txt"],
+  );
+  assert.equal(allowedResponse.status, 200);
+  assert.equal(await allowedResponse.text(), "director-session-image");
+  assert.equal(allowedResponse.headers.get("cache-control"), "private, no-store");
+  assert.equal(allowedResponse.headers.get("vary"), "Cookie");
 });
 
 test("runtime asset response enforces product archive file ownership", async () => {

@@ -3,7 +3,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import type { KlingGenerationSettings } from "./prompt";
 import type { VideoJobRecord } from "./video-job-store";
 import { loadOptionalEnvFile } from "./env-file";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
 import { getLipSyncProviderRuntime, getProviderRuntime, type LiveVideoProvider } from "./video-provider-config";
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
@@ -230,6 +230,16 @@ export async function submitLiveVideoJob(
     throw new Error("未配置 KLING_API_TOKEN（或 KLING_ACCESS_KEY / KLING_SECRET_KEY），无法调用 Kling 文生视频 API");
   }
 
+  const pricingKey = "kling.text2video";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "video.generate",
+    estimatedMetrics: {
+      videoSeconds: Math.max(0, generationSettings.durationSeconds),
+      requestCount: 1,
+    },
+  });
+
   const { response, payload } = await withRetry(async () => {
     const res = await fetchWithTimeout(
       `${getKlingApiBase()}/v1/videos/text2video`,
@@ -276,7 +286,7 @@ export async function submitLiveVideoJob(
   }
 
   recordModelUsage({
-    pricingKey: "kling.text2video",
+    pricingKey,
     serviceName: "video.generate",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,
@@ -311,6 +321,16 @@ export async function submitLiveImageToVideoJob(
   if (!apiToken) {
     throw new Error("未配置 KLING_API_TOKEN，或未配置 KLING_ACCESS_KEY / KLING_SECRET_KEY，无法调用 Kling 官方 API");
   }
+
+  const pricingKey = "kling.image2video";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "video.generate",
+    estimatedMetrics: {
+      videoSeconds: Math.max(0, generationSettings.durationSeconds),
+      requestCount: 1,
+    },
+  });
 
   const payload = await withRetry(async () => {
     const res = await fetchWithTimeout(
@@ -367,7 +387,7 @@ export async function submitLiveImageToVideoJob(
   }
 
   recordModelUsage({
-    pricingKey: "kling.image2video",
+    pricingKey,
     serviceName: "video.generate",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,
@@ -410,6 +430,15 @@ export async function submitLipSyncJob(input: {
     throw new Error("未配置 Kling 鉴权信息，无法调用口型同步 API");
   }
 
+  const pricingKey = "kling.lip_sync";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "video.lip_sync",
+    estimatedMetrics: {
+      requestCount: 1,
+    },
+  });
+
   const payload = await withRetry(async () => {
     const res = await fetchWithTimeout(
       `${getKlingApiBase()}/v1/videos/lip-sync`,
@@ -448,7 +477,7 @@ export async function submitLipSyncJob(input: {
   }
 
   recordModelUsage({
-    pricingKey: "kling.lip_sync",
+    pricingKey,
     serviceName: "video.lip_sync",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,
@@ -900,6 +929,16 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
     throw new Error("未配置 ARK_API_KEY，无法调用 Seedance 2.0 API");
   }
 
+  const pricingKey = "doubao.seedance.2.0";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "video.generate",
+    estimatedMetrics: {
+      videoSeconds: Math.max(0, input.durationSeconds),
+      requestCount: 1,
+    },
+  });
+
   const promptVariants = dedupeSeedancePromptVariants([
     input.prompt,
     sanitizeSeedancePromptForModeration(input.prompt),
@@ -962,7 +1001,7 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
 
   const imageCount = input.imageUrls?.length ?? 0;
   recordModelUsage({
-    pricingKey: "doubao.seedance.2.0",
+    pricingKey,
     serviceName: "video.generate",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

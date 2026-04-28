@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 
 import { getAsrRuntime } from "./asr-provider-config";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
 
 export type AsrResult = {
   text: string;
@@ -49,6 +49,15 @@ export async function transcribeAudioFile(audioFilePath: string, format: string 
   const audioBase64 = audioBuffer.toString("base64");
   const requestId = crypto.randomUUID();
   const apiBase = normalizeApiBase(runtime.apiBase);
+  const pricingKey = "doubao.asr.file.2.0";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "audio.asr",
+    estimatedMetrics: {
+      audioSeconds: estimateAudioSeconds(audioFilePath, format),
+      requestCount: 1,
+    },
+  });
 
   const response = await fetch(`${apiBase}/api/v3/auc/bigmodel/recognize/flash`, {
     method: "POST",
@@ -94,7 +103,7 @@ export async function transcribeAudioFile(audioFilePath: string, format: string 
   }
 
   recordModelUsage({
-    pricingKey: "doubao.asr.file.2.0",
+    pricingKey,
     serviceName: "audio.asr",
     provider: runtime.providerLabel,
     modelId: runtime.resourceId,

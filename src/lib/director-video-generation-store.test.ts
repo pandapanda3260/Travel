@@ -7,7 +7,9 @@ import {
   deleteDirectorVideoGenerationImageCandidate,
   deleteDirectorVideoGenerationSession,
   getDirectorVideoGenerationSession,
+  insertUploadedDirectorVideoGenerationImageCandidate,
   replaceDirectorVideoGenerationImageCandidate,
+  replaceUploadedDirectorVideoGenerationImageCandidate,
   setDirectorVideoGenerationImageCandidates,
 } from "./director-video-generation-store";
 import { resolveRuntimeAssetUrlToPath } from "./runtime-storage";
@@ -18,6 +20,20 @@ const ONE_PIXEL_PNG_BASE64 =
 function createTestOwnerId() {
   return `director-video-store-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+test("快速生成新会话默认出图数量为 10", () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+  });
+
+  try {
+    assert.equal(session.imageSettings.outputCount, 10);
+    const saved = getDirectorVideoGenerationSession(session.sessionId);
+    assert.equal(saved?.imageSettings.outputCount, 10);
+  } finally {
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
 
 test("快速生成读取会话时过滤缺失的图片候选并提示重新生成", async () => {
   const session = createDirectorVideoGenerationSession({
@@ -143,6 +159,92 @@ test("快速生成单张重生失败时保留原图片候选", async () => {
     assert.equal(current?.imageCandidates[0]?.imageUrl, candidate.imageUrl);
   } finally {
     globalThis.fetch = originalFetch;
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
+
+test("快速生成上传图片会置顶并在批量重生时保留用户上传图", async () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+  });
+
+  try {
+    const withGeneratedImages = await setDirectorVideoGenerationImageCandidates({
+      session,
+      assets: [
+        { url: null, b64Json: ONE_PIXEL_PNG_BASE64 },
+        { url: null, b64Json: ONE_PIXEL_PNG_BASE64 },
+      ],
+    });
+    const [oldGeneratedCandidate] = withGeneratedImages.imageCandidates;
+    assert.ok(oldGeneratedCandidate);
+    const oldGeneratedPath = resolveRuntimeAssetUrlToPath(oldGeneratedCandidate.imageUrl);
+    assert.equal(existsSync(oldGeneratedPath), true);
+
+    const withUploadedImage = await insertUploadedDirectorVideoGenerationImageCandidate({
+      session: withGeneratedImages,
+      bytes: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+    const [uploadedCandidate] = withUploadedImage.imageCandidates;
+    assert.ok(uploadedCandidate);
+    const uploadedPath = resolveRuntimeAssetUrlToPath(uploadedCandidate.imageUrl);
+
+    assert.equal(uploadedCandidate.source, "uploaded");
+    assert.equal(withUploadedImage.selectedImageCandidateId, uploadedCandidate.candidateId);
+    assert.equal(existsSync(uploadedPath), true);
+
+    const withRegeneratedImages = await setDirectorVideoGenerationImageCandidates({
+      session: withUploadedImage,
+      assets: [{ url: null, b64Json: ONE_PIXEL_PNG_BASE64 }],
+    });
+
+    assert.equal(withRegeneratedImages.imageCandidates.length, 2);
+    assert.equal(withRegeneratedImages.imageCandidates[0]?.candidateId, uploadedCandidate.candidateId);
+    assert.equal(withRegeneratedImages.imageCandidates[0]?.source, "uploaded");
+    assert.equal(withRegeneratedImages.imageCandidates[1]?.source, "generated");
+    assert.equal(withRegeneratedImages.selectedImageCandidateId, uploadedCandidate.candidateId);
+    assert.equal(existsSync(uploadedPath), true);
+    assert.equal(existsSync(oldGeneratedPath), false);
+  } finally {
+    deleteDirectorVideoGenerationSession(session.sessionId);
+  }
+});
+
+test("快速生成重新上传会保留候选 ID 和选择状态", async () => {
+  const session = createDirectorVideoGenerationSession({
+    ownerUserId: createTestOwnerId(),
+  });
+
+  try {
+    const withUploadedImage = await insertUploadedDirectorVideoGenerationImageCandidate({
+      session,
+      bytes: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+    const [uploadedCandidate] = withUploadedImage.imageCandidates;
+    assert.ok(uploadedCandidate);
+    const uploadedPath = resolveRuntimeAssetUrlToPath(uploadedCandidate.imageUrl);
+    assert.equal(existsSync(uploadedPath), true);
+
+    const withReuploadedImage = await replaceUploadedDirectorVideoGenerationImageCandidate({
+      session: withUploadedImage,
+      candidateId: uploadedCandidate.candidateId,
+      bytes: Buffer.from(ONE_PIXEL_PNG_BASE64, "base64"),
+      contentType: "image/png",
+    });
+
+    assert.ok(withReuploadedImage);
+    const [reuploadedCandidate] = withReuploadedImage.imageCandidates;
+    assert.ok(reuploadedCandidate);
+    assert.equal(withReuploadedImage.imageCandidates.length, 1);
+    assert.equal(reuploadedCandidate.candidateId, uploadedCandidate.candidateId);
+    assert.equal(reuploadedCandidate.source, "uploaded");
+    assert.notEqual(reuploadedCandidate.imageUrl, uploadedCandidate.imageUrl);
+    assert.equal(withReuploadedImage.selectedImageCandidateId, uploadedCandidate.candidateId);
+    assert.equal(existsSync(uploadedPath), false);
+    assert.equal(existsSync(resolveRuntimeAssetUrlToPath(reuploadedCandidate.imageUrl)), true);
+  } finally {
     deleteDirectorVideoGenerationSession(session.sessionId);
   }
 });

@@ -1,5 +1,5 @@
 import { getEnvConfigDisplayName, loadOptionalEnvFile, parseBoolean } from "./env-file";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 
 export type DirectorPromptOptimizerRuntime = {
   liveEnabled: boolean;
@@ -130,6 +130,12 @@ export async function optimizeDirectorVideoPrompt(input: {
           : "请在保留原意的前提下增强画面细节、构图和图片生成稳定性。"),
   ].join("\n");
 
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "llm.chat",
+  });
+
   const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
     method: "POST",
     headers: {
@@ -164,7 +170,7 @@ export async function optimizeDirectorVideoPrompt(input: {
   }
 
   recordModelUsage({
-    pricingKey: null,
+    pricingKey,
     serviceName: "llm.chat",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

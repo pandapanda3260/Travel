@@ -2,7 +2,7 @@ import sharp from "sharp";
 
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { getImageCleaningRuntime } from "./image-provider-config";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 import { withRetry } from "./retry";
 
 const supportedImageSizes = [
@@ -88,6 +88,16 @@ export async function cleanVideoMaterialImage(input: {
     };
   }
 
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "image.clean",
+    estimatedMetrics: {
+      imageCount: 1,
+      requestCount: 1,
+    },
+  });
+
   const response = await withRetry(async () => {
     const requestResponse = await fetch(`${normalizeApiBase(runtime.apiBase)}/images/generations`, {
       method: "POST",
@@ -141,7 +151,7 @@ export async function cleanVideoMaterialImage(input: {
   const metadata = await detectResultMetadata(response);
 
   recordModelUsage({
-    pricingKey: runtime.modelId.includes("seedream-5-0-lite") ? "doubao.seedream.5.0.lite" : null,
+    pricingKey,
     serviceName: "image.clean",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

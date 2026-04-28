@@ -1,6 +1,6 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { loadOptionalEnvFile, parseBoolean } from "./env-file";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 
 type ProductArchiveVisionRuntime = {
   liveEnabled: boolean;
@@ -180,6 +180,11 @@ export async function extractProductArchiveFromImageDataUrl(imageDataUrl: string
   }
 
   const systemContent = getEffectiveConstraintPrompt("product_vision");
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "vision.product_archive",
+  });
 
   const response = await fetch(`${normalizeApiBase(runtime.apiBase)}/chat/completions`, {
     method: "POST",
@@ -232,7 +237,7 @@ export async function extractProductArchiveFromImageDataUrl(imageDataUrl: string
   }
 
   recordModelUsage({
-    pricingKey: runtime.modelId.includes("vision-pro") ? "doubao.vision.1.5.pro.32k" : null,
+    pricingKey,
     serviceName: "vision.product_archive",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

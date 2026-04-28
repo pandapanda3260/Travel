@@ -178,7 +178,7 @@ export function getVisionRuntime(): OpenAIProviderRuntime {
   };
 }
 
-/** GPT-5.4 generation runtime (content script / prompt / subtitle) */
+/** GPT-5.5 generation runtime (content script / prompt / subtitle) */
 export function getGenerationRuntime(): OpenAIProviderRuntime {
   const localConfigFileName = "openai.env.local";
   const configFileName = getEnvConfigDisplayName(localConfigFileName);
@@ -204,7 +204,7 @@ export function getGenerationRuntime(): OpenAIProviderRuntime {
     process.env.OPENAI_VISION_CHAT_ENDPOINT ??
     localConfig.OPENAI_VISION_CHAT_ENDPOINT ??
     "/v1/chat/completions";
-  const modelId = process.env.OPENAI_GENERATION_MODEL ?? localConfig.OPENAI_GENERATION_MODEL ?? "gpt-5.4";
+  const modelId = process.env.OPENAI_GENERATION_MODEL ?? localConfig.OPENAI_GENERATION_MODEL ?? "gpt-5.5";
   const liveEnabled = parseBoolean(
     process.env.OPENAI_GENERATION_LIVE_ENABLED ?? localConfig.OPENAI_GENERATION_LIVE_ENABLED,
     false,

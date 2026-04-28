@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../lib/auth-session";
+import { formatDirectorVideoGenerationError } from "../../../../lib/director-video-generation-errors";
 import {
   deleteDirectorVideoGenerationSession,
   getDirectorVideoGenerationSession,
@@ -42,43 +43,61 @@ function requireOwnedSession(request: NextRequest, sessionId: string) {
 }
 
 export async function GET(request: NextRequest, context: RouteContext) {
-  const { sessionId } = await context.params;
-  const access = requireOwnedSession(request, sessionId);
-  if ("response" in access) {
-    return access.response;
-  }
+  try {
+    const { sessionId } = await context.params;
+    const access = requireOwnedSession(request, sessionId);
+    if ("response" in access) {
+      return access.response;
+    }
 
-  return NextResponse.json({
-    session: access.generationSession,
-    videoJob: access.generationSession.videoJobId ? getVideoJob(access.generationSession.videoJobId) : null,
-  });
+    return NextResponse.json({
+      session: access.generationSession,
+      videoJob: access.generationSession.videoJobId ? getVideoJob(access.generationSession.videoJobId) : null,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: formatDirectorVideoGenerationError(error, "快速生成会话加载失败") },
+      { status: 500 },
+    );
+  }
 }
 
 export async function PATCH(request: NextRequest, context: RouteContext) {
-  const { sessionId } = await context.params;
-  const access = requireOwnedSession(request, sessionId);
-  if ("response" in access) {
-    return access.response;
+  try {
+    const { sessionId } = await context.params;
+    const access = requireOwnedSession(request, sessionId);
+    if ("response" in access) {
+      return access.response;
+    }
+
+    const body = (await request.json().catch(() => ({}))) as Parameters<
+      typeof patchDirectorVideoGenerationSession
+    >[1];
+    const nextSession = patchDirectorVideoGenerationSession(sessionId, body);
+
+    return NextResponse.json({
+      session: nextSession,
+      videoJob: nextSession?.videoJobId ? getVideoJob(nextSession.videoJobId) : null,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: formatDirectorVideoGenerationError(error, "快速生成会话保存失败") },
+      { status: 500 },
+    );
   }
-
-  const body = (await request.json().catch(() => ({}))) as Parameters<
-    typeof patchDirectorVideoGenerationSession
-  >[1];
-  const nextSession = patchDirectorVideoGenerationSession(sessionId, body);
-
-  return NextResponse.json({
-    session: nextSession,
-    videoJob: nextSession?.videoJobId ? getVideoJob(nextSession.videoJobId) : null,
-  });
 }
 
 export async function DELETE(request: NextRequest, context: RouteContext) {
-  const { sessionId } = await context.params;
-  const access = requireOwnedSession(request, sessionId);
-  if ("response" in access) {
-    return access.response;
-  }
+  try {
+    const { sessionId } = await context.params;
+    const access = requireOwnedSession(request, sessionId);
+    if ("response" in access) {
+      return access.response;
+    }
 
-  deleteDirectorVideoGenerationSession(sessionId);
-  return NextResponse.json({ ok: true });
+    deleteDirectorVideoGenerationSession(sessionId);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json({ error: formatDirectorVideoGenerationError(error, "删除失败") }, { status: 500 });
+  }
 }

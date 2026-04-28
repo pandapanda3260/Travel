@@ -1,13 +1,15 @@
 "use client";
 
-import { Download, Play, RotateCw, X } from "lucide-react";
+import { Download, Play, RotateCw, Upload, X } from "lucide-react";
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PageBrandTitle } from "../../_components/page-brand-title";
 import { useVideoTimecode } from "../../_components/use-video-timecode";
 import { ModuleTitle, TaskNextStepButton, type TaskStepActionState } from "../task-creation/_components/task-ui";
+import { readDirectorVideoGenerationResponse } from "../../../lib/director-video-generation-client-response";
 import { formatDirectorVideoGenerationError } from "../../../lib/director-video-generation-errors";
+import { estimateDirectorVideoGenerationProgressPercent } from "../../../lib/director-video-generation-progress";
 
 type StepStatus = "idle" | "running" | "success" | "failed";
 
@@ -17,6 +19,7 @@ type ImageCandidate = {
   width: number | null;
   height: number | null;
   byteSize: number;
+  source: "generated" | "uploaded";
   createdAt: string;
 };
 
@@ -78,6 +81,8 @@ type SessionResponse = {
   error?: string;
 };
 
+const NO_MODIFICATION_PROMPT_PLACEHOLDER = "输入修改要求（如没有修改要求，系统将会按原提示词直接生成）";
+
 const statusLabelMap: Record<StepStatus, string> = {
   idle: "待处理",
   running: "进行中",
@@ -99,34 +104,16 @@ function isVideoJobRunning(job: VideoJob | null) {
   return job?.status === "QUEUED" || job?.status === "IN_PROGRESS";
 }
 
-function getElapsedMs(timestamp: string | null | undefined, nowMs: number) {
-  if (!timestamp) {
-    return 0;
-  }
-  const value = new Date(timestamp).getTime();
-  return Number.isFinite(value) && value > 0 ? Math.max(0, nowMs - value) : 0;
-}
-
-function getTimedStageRatio(elapsedMs: number, estimateMs: number, cap = 0.96) {
-  return Math.min(Math.max(0, elapsedMs) / Math.max(1_000, estimateMs), cap);
-}
-
-function getVideoJobEstimateMs(durationSeconds: number) {
-  return 18_000 + Math.max(0, durationSeconds) * 3_600;
-}
-
-function getVideoGenerationProgressPercent(job: VideoJob | null, nowMs: number, durationSeconds: number) {
-  if (!job) {
-    return 0;
-  }
-  const elapsedMs = getElapsedMs(job.status === "IN_PROGRESS" ? job.updatedAt : job.submittedAt, nowMs);
-  if (job.status === "QUEUED") {
-    return Math.round((0.04 + 0.08 * getTimedStageRatio(elapsedMs, 8_000)) * 100);
-  }
-  if (job.status === "IN_PROGRESS") {
-    return Math.round((0.14 + 0.58 * getTimedStageRatio(elapsedMs, getVideoJobEstimateMs(durationSeconds))) * 100);
-  }
-  return 0;
+function resolveGenerationPrompt(input: {
+  originalPrompt: string;
+  modificationInstruction: string;
+  optimizedPrompt: string;
+  resultPrompt: string;
+}) {
+  const originalPrompt = input.originalPrompt.trim();
+  const modificationInstruction = input.modificationInstruction.trim();
+  const resultPrompt = input.resultPrompt.trim() || input.optimizedPrompt.trim();
+  return modificationInstruction ? resultPrompt || originalPrompt : originalPrompt || resultPrompt;
 }
 
 function toCssAspectRatio(aspectRatio: "16:9" | "9:16" | "1:1" | null | undefined) {
@@ -240,7 +227,7 @@ function PromptOptimizationModule({
         <textarea
           className="prompt-box director-video-textarea director-video-modification-textarea"
           value={modificationValue}
-          placeholder="输入修改要求"
+          placeholder={NO_MODIFICATION_PROMPT_PLACEHOLDER}
           onChange={(event) => onModificationChange(event.target.value)}
         />
       </label>
@@ -268,18 +255,25 @@ export default function DirectorVideoGenerationPage() {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [videoJob, setVideoJob] = useState<VideoJob | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyAction, setBusyAction] = useState<
-    "create" | "imagePrompt" | "videoPrompt" | "image" | "video" | "select" | "delete" | null
-  >(null);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [promptBusyState, setPromptBusyState] = useState({ image: false, video: false });
+  const [isGeneratingImages, setIsGeneratingImages] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isSubmittingVideo, setIsSubmittingVideo] = useState(false);
+  const [selectingCandidateId, setSelectingCandidateId] = useState<string | null>(null);
   const [candidateBusyState, setCandidateBusyState] = useState<{
     candidateId: string;
-    action: "delete" | "regenerate";
+    action: "delete" | "regenerate" | "reupload";
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadReplaceCandidateId, setUploadReplaceCandidateId] = useState<string | null>(null);
   const [previewCandidateId, setPreviewCandidateId] = useState("");
   const [failedImageCandidateIds, setFailedImageCandidateIds] = useState<Set<string>>(() => new Set());
   const [videoProgressClockMs, setVideoProgressClockMs] = useState(() => Date.now());
+  const [videoProgressFloor, setVideoProgressFloor] = useState<{ jobId: string; percent: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const imageUploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.sessionId === activeSessionId) ?? sessions[0] ?? null,
@@ -298,7 +292,20 @@ export default function DirectorVideoGenerationPage() {
     );
   }, [activeSession, failedImageCandidateIds]);
   const imageGenerationPrompt = activeSession
-    ? activeSession.imagePrompt.trim() || activeSession.optimizedPrompt.trim() || activeSession.originalPrompt.trim()
+    ? resolveGenerationPrompt({
+        originalPrompt: activeSession.originalPrompt,
+        modificationInstruction: activeSession.modificationInstruction,
+        optimizedPrompt: activeSession.optimizedPrompt,
+        resultPrompt: activeSession.imagePrompt,
+      })
+    : "";
+  const videoGenerationPrompt = activeSession
+    ? resolveGenerationPrompt({
+        originalPrompt: activeSession.videoOriginalPrompt,
+        modificationInstruction: activeSession.videoModificationInstruction,
+        optimizedPrompt: activeSession.videoOptimizedPrompt,
+        resultPrompt: activeSession.videoPrompt,
+      })
     : "";
   const previewCandidateIndex = useMemo(() => {
     if (!activeSession || !previewCandidateId) {
@@ -321,7 +328,7 @@ export default function DirectorVideoGenerationPage() {
   const videoDownloadFileName = getVideoDownloadFileName(activeSession?.title, videoJob?.jobId);
   const videoTimecode = useVideoTimecode(playableVideoUrl);
   const activePreviewTimecode = useVideoTimecode(playableVideoUrl);
-  const activeVideoPromptLength = activeSession?.videoPrompt.trim().length ?? 0;
+  const activeVideoPromptLength = videoGenerationPrompt.length;
   const activeVideoParameters = useMemo(
     () =>
       activeSession
@@ -344,11 +351,12 @@ export default function DirectorVideoGenerationPage() {
         : [],
     [activeSession, activeVideoPromptLength, playableVideoUrl],
   );
+  const imageListMutationRunning = isGeneratingImages || isUploadingImage || Boolean(candidateBusyState);
   const videoJobRunning = isVideoJobRunning(videoJob);
-  const videoActionRunning = busyAction === "video" || videoJobRunning || activeSession?.videoStatus === "running";
+  const videoActionRunning = isSubmittingVideo || videoJobRunning || activeSession?.videoStatus === "running";
   const videoActionBlockedReason = !selectedImage
     ? "请先选择图片。"
-    : !activeSession?.videoPrompt.trim()
+    : !videoGenerationPrompt
       ? "请先填写视频提示词。"
       : null;
   const videoActionLabel = videoActionRunning
@@ -356,15 +364,26 @@ export default function DirectorVideoGenerationPage() {
       ? "片段生成中（1/1）"
       : videoJob?.status === "QUEUED"
         ? "排队处理中（1/1）"
-        : busyAction === "video"
+        : isSubmittingVideo
           ? "生成中..."
           : "正在生成视频片段..."
     : activeSession?.videoJobId
       ? "重新生成视频"
       : "生成视频";
-  const videoActionProgressPercent = videoActionRunning
-    ? getVideoGenerationProgressPercent(videoJob, videoProgressClockMs, activeSession?.videoSettings.durationSeconds ?? 5)
+  const estimatedVideoActionProgressPercent = videoActionRunning
+    ? estimateDirectorVideoGenerationProgressPercent(
+        videoJob,
+        videoProgressClockMs,
+        activeSession?.videoSettings.durationSeconds ?? 5,
+      )
     : null;
+  const videoActionProgressPercent =
+    videoActionRunning && videoJob && estimatedVideoActionProgressPercent !== null
+      ? Math.max(
+          videoProgressFloor?.jobId === videoJob.jobId ? videoProgressFloor.percent : 0,
+          estimatedVideoActionProgressPercent,
+        )
+      : null;
   const videoActionState: TaskStepActionState = {
     label: videoActionLabel,
     isRunning: videoActionRunning,
@@ -405,7 +424,7 @@ export default function DirectorVideoGenerationPage() {
     setError(null);
     try {
       const response = await fetch("/api/director-video-generations", { cache: "no-store" });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "快速生成记录加载失败");
       if (!response.ok) {
         throw new Error(data.error ?? "快速生成记录加载失败");
       }
@@ -415,17 +434,9 @@ export default function DirectorVideoGenerationPage() {
         setActiveSessionId((current) => current || loadedSessions[0]!.sessionId);
         return;
       }
-      const createResponse = await fetch("/api/director-video-generations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "快速生成" }),
-      });
-      const createData = (await createResponse.json()) as SessionResponse;
-      if (!createResponse.ok || !createData.session) {
-        throw new Error(createData.error ?? "快速生成会话创建失败");
-      }
-      setSessions([createData.session]);
-      setActiveSessionId(createData.session.sessionId);
+      setSessions([]);
+      setActiveSessionId("");
+      setVideoJob(null);
     } catch (loadError) {
       setError(formatDirectorVideoGenerationError(loadError, "快速生成记录加载失败"));
     } finally {
@@ -467,6 +478,27 @@ export default function DirectorVideoGenerationPage() {
   }, [videoActionRunning]);
 
   useEffect(() => {
+    if (!videoActionRunning || !videoJob || estimatedVideoActionProgressPercent === null) {
+      setVideoProgressFloor(null);
+      return;
+    }
+
+    setVideoProgressFloor((current) => {
+      const nextPercent =
+        current?.jobId === videoJob.jobId
+          ? Math.max(current.percent, estimatedVideoActionProgressPercent)
+          : estimatedVideoActionProgressPercent;
+      if (current?.jobId === videoJob.jobId && current.percent === nextPercent) {
+        return current;
+      }
+      return {
+        jobId: videoJob.jobId,
+        percent: nextPercent,
+      };
+    });
+  }, [estimatedVideoActionProgressPercent, videoActionRunning, videoJob]);
+
+  useEffect(() => {
     videoRef.current?.pause();
   }, [playableVideoUrl]);
 
@@ -480,7 +512,7 @@ export default function DirectorVideoGenerationPage() {
       const response = await fetch(`/api/director-video-generations/${activeSession.sessionId}/video`, {
         cache: "no-store",
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "视频状态加载失败");
       if (cancelled) return;
       if (response.ok) {
         if (data.session) upsertSession(data.session);
@@ -499,7 +531,7 @@ export default function DirectorVideoGenerationPage() {
     }
     const timer = window.setInterval(() => {
       void fetch(`/api/director-video-generations/${activeSession.sessionId}/video`, { cache: "no-store" })
-        .then((response) => response.json() as Promise<SessionResponse>)
+        .then((response) => readDirectorVideoGenerationResponse<SessionResponse>(response, "视频状态刷新失败"))
         .then((data) => {
           if (data.session) upsertSession(data.session);
           setVideoJob(data.videoJob ?? null);
@@ -517,7 +549,7 @@ export default function DirectorVideoGenerationPage() {
   }
 
   async function createSession() {
-    setBusyAction("create");
+    setIsCreatingSession(true);
     setError(null);
     try {
       const response = await fetch("/api/director-video-generations", {
@@ -525,7 +557,7 @@ export default function DirectorVideoGenerationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: "快速生成" }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "快速生成会话创建失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "快速生成会话创建失败");
       }
@@ -534,16 +566,16 @@ export default function DirectorVideoGenerationPage() {
     } catch (createError) {
       setError(formatDirectorVideoGenerationError(createError, "快速生成会话创建失败"));
     } finally {
-      setBusyAction(null);
+      setIsCreatingSession(false);
     }
   }
 
   async function deleteSession(sessionId: string) {
-    setBusyAction("delete");
+    setDeletingSessionId(sessionId);
     setError(null);
     try {
       const response = await fetch(`/api/director-video-generations/${sessionId}`, { method: "DELETE" });
-      const data = (await response.json().catch(() => ({}))) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "删除失败");
       if (!response.ok) {
         throw new Error(data.error ?? "删除失败");
       }
@@ -556,13 +588,13 @@ export default function DirectorVideoGenerationPage() {
     } catch (deleteError) {
       setError(formatDirectorVideoGenerationError(deleteError, "删除失败"));
     } finally {
-      setBusyAction(null);
+      setDeletingSessionId(null);
     }
   }
 
   async function optimizePrompt(target: "image" | "video") {
     if (!activeSession) return;
-    setBusyAction(target === "video" ? "videoPrompt" : "imagePrompt");
+    setPromptBusyState((current) => ({ ...current, [target]: true }));
     setError(null);
     const originalPrompt = target === "video" ? activeSession.videoOriginalPrompt : activeSession.originalPrompt;
     const modificationInstruction =
@@ -577,7 +609,7 @@ export default function DirectorVideoGenerationPage() {
           modificationInstruction,
         }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "提示词优化失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "提示词优化失败");
       }
@@ -585,7 +617,7 @@ export default function DirectorVideoGenerationPage() {
     } catch (promptError) {
       setError(formatDirectorVideoGenerationError(promptError, "提示词优化失败"));
     } finally {
-      setBusyAction(null);
+      setPromptBusyState((current) => ({ ...current, [target]: false }));
     }
   }
 
@@ -603,7 +635,7 @@ export default function DirectorVideoGenerationPage() {
 
   async function generateImages() {
     if (!activeSession) return;
-    setBusyAction("image");
+    setIsGeneratingImages(true);
     setError(null);
     try {
       const response = await fetch(`/api/director-video-generations/${activeSession.sessionId}/images`, {
@@ -612,10 +644,12 @@ export default function DirectorVideoGenerationPage() {
         body: JSON.stringify({
           action: "generate",
           imagePrompt: imageGenerationPrompt,
+          originalPrompt: activeSession.originalPrompt,
+          modificationInstruction: activeSession.modificationInstruction,
           imageSettings: activeSession.imageSettings,
         }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "图片生成失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "图片生成失败");
       }
@@ -625,7 +659,7 @@ export default function DirectorVideoGenerationPage() {
     } catch (imageError) {
       setError(formatDirectorVideoGenerationError(imageError, "图片生成失败"));
     } finally {
-      setBusyAction(null);
+      setIsGeneratingImages(false);
     }
   }
 
@@ -655,8 +689,81 @@ export default function DirectorVideoGenerationPage() {
       });
   }
 
+  function triggerImageUpload(candidateId?: string) {
+    if (imageListMutationRunning) {
+      return;
+    }
+    setUploadReplaceCandidateId(candidateId ?? null);
+    if (imageUploadInputRef.current) {
+      imageUploadInputRef.current.value = "";
+      imageUploadInputRef.current.click();
+    }
+  }
+
+  async function handleImageUploadChange(event: ChangeEvent<HTMLInputElement>) {
+    if (!activeSession) {
+      return;
+    }
+    const file = event.target.files?.[0] ?? null;
+    const replaceCandidateId = uploadReplaceCandidateId;
+    setUploadReplaceCandidateId(null);
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    if (replaceCandidateId) {
+      setCandidateBusyState({ candidateId: replaceCandidateId, action: "reupload" });
+    } else {
+      setIsUploadingImage(true);
+    }
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("action", replaceCandidateId ? "reupload" : "upload");
+      if (replaceCandidateId) {
+        formData.append("candidateId", replaceCandidateId);
+      }
+      formData.append("file", file);
+
+      const response = await fetch(`/api/director-video-generations/${activeSession.sessionId}/images`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "上传图片失败");
+      if (!response.ok || !data.session) {
+        throw new Error(data.error ?? "上传图片失败");
+      }
+
+      upsertSession(data.session);
+      setVideoJob(null);
+      setFailedImageCandidateIds((current) => {
+        const next = new Set(current);
+        if (replaceCandidateId) {
+          next.delete(replaceCandidateId);
+        }
+        if (data.session?.selectedImageCandidateId) {
+          next.delete(data.session.selectedImageCandidateId);
+        }
+        return next;
+      });
+      if (!replaceCandidateId) {
+        setPreviewCandidateId(data.session.selectedImageCandidateId ?? "");
+      }
+    } catch (uploadError) {
+      setError(formatDirectorVideoGenerationError(uploadError, "上传图片失败"));
+    } finally {
+      if (replaceCandidateId) {
+        setCandidateBusyState(null);
+      } else {
+        setIsUploadingImage(false);
+      }
+    }
+  }
+
   async function deleteImageCandidate(candidateId: string) {
-    if (!activeSession) return;
+    if (!activeSession || imageListMutationRunning) return;
     setCandidateBusyState({ candidateId, action: "delete" });
     setError(null);
     try {
@@ -665,7 +772,7 @@ export default function DirectorVideoGenerationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "delete", candidateId }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "删除图片失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "删除图片失败");
       }
@@ -680,7 +787,7 @@ export default function DirectorVideoGenerationPage() {
   }
 
   async function regenerateImageCandidate(candidateId: string) {
-    if (!activeSession) return;
+    if (!activeSession || imageListMutationRunning) return;
     setCandidateBusyState({ candidateId, action: "regenerate" });
     setError(null);
     try {
@@ -691,10 +798,12 @@ export default function DirectorVideoGenerationPage() {
           action: "regenerate",
           candidateId,
           imagePrompt: imageGenerationPrompt,
+          originalPrompt: activeSession.originalPrompt,
+          modificationInstruction: activeSession.modificationInstruction,
           imageSettings: activeSession.imageSettings,
         }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "重新生成图片失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "重新生成图片失败");
       }
@@ -709,7 +818,7 @@ export default function DirectorVideoGenerationPage() {
 
   async function selectImage(candidateId: string) {
     if (!activeSession) return;
-    setBusyAction("select");
+    setSelectingCandidateId(candidateId);
     setError(null);
     try {
       const response = await fetch(`/api/director-video-generations/${activeSession.sessionId}/images`, {
@@ -717,7 +826,7 @@ export default function DirectorVideoGenerationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "select", candidateId }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "选图失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "选图失败");
       }
@@ -726,7 +835,7 @@ export default function DirectorVideoGenerationPage() {
     } catch (selectError) {
       setError(formatDirectorVideoGenerationError(selectError, "选图失败"));
     } finally {
-      setBusyAction(null);
+      setSelectingCandidateId(null);
     }
   }
 
@@ -743,7 +852,7 @@ export default function DirectorVideoGenerationPage() {
 
   async function generateVideo() {
     if (!activeSession) return;
-    setBusyAction("video");
+    setIsSubmittingVideo(true);
     setError(null);
     try {
       const response = await fetch(`/api/director-video-generations/${activeSession.sessionId}/video`, {
@@ -751,11 +860,13 @@ export default function DirectorVideoGenerationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "generate",
-          videoPrompt: activeSession.videoPrompt,
+          videoPrompt: videoGenerationPrompt,
+          videoOriginalPrompt: activeSession.videoOriginalPrompt,
+          videoModificationInstruction: activeSession.videoModificationInstruction,
           videoSettings: activeSession.videoSettings,
         }),
       });
-      const data = (await response.json()) as SessionResponse;
+      const data = await readDirectorVideoGenerationResponse<SessionResponse>(response, "快速生成失败");
       if (!response.ok || !data.session) {
         throw new Error(data.error ?? "快速生成失败");
       }
@@ -764,7 +875,7 @@ export default function DirectorVideoGenerationPage() {
     } catch (videoError) {
       setError(formatDirectorVideoGenerationError(videoError, "快速生成失败"));
     } finally {
-      setBusyAction(null);
+      setIsSubmittingVideo(false);
     }
   }
 
@@ -780,18 +891,21 @@ export default function DirectorVideoGenerationPage() {
           <section className="notice-bar task-workbench-note">
             <div className="task-workbench-note-main">
               <strong>快速生成流水线</strong>
-              <span>GPT-5.5 · Seedream 4.5 · Seedance 2.0</span>
             </div>
-            <button className="task-workbench-create-btn" type="button" disabled={busyAction === "create"} onClick={() => void createSession()}>
-              <span className="task-workbench-create-btn-text">{busyAction === "create" ? "创建中..." : "新建生成"}</span>
+            <button className="task-workbench-create-btn" type="button" disabled={isCreatingSession} onClick={() => void createSession()}>
+              <span className="task-workbench-create-btn-text">{isCreatingSession ? "创建中..." : "新建生成"}</span>
             </button>
           </section>
         </section>
 
         {error ? <div className="error-box">{error}</div> : null}
-        {loading || !activeSession ? (
+        {loading ? (
           <section className="composer-card voice-section-card">
             <div className="task-module-empty">快速生成加载中...</div>
+          </section>
+        ) : !activeSession ? (
+          <section className="composer-card voice-section-card">
+            <div className="task-module-empty">暂无快速生成记录</div>
           </section>
         ) : (
           <>
@@ -883,7 +997,7 @@ export default function DirectorVideoGenerationPage() {
                                 <button
                                   className="btn-pill btn-pill-danger"
                                   type="button"
-                                  disabled={busyAction === "delete" || sessions.length <= 1}
+                                  disabled={Boolean(deletingSessionId)}
                                   onClick={() => void deleteSession(session.sessionId)}
                                 >
                                   删除
@@ -965,8 +1079,8 @@ export default function DirectorVideoGenerationPage() {
                     resultValue={activeSession.imagePrompt}
                     status={activeSession.promptStatus}
                     error={activeSession.promptError}
-                    busy={busyAction === "imagePrompt"}
-                    disabled={Boolean(busyAction) && busyAction !== "imagePrompt"}
+                    busy={promptBusyState.image}
+                    disabled={false}
                     onOriginalChange={(value) => updateActiveSession({ originalPrompt: value })}
                     onModificationChange={(value) => updateActiveSession({ modificationInstruction: value })}
                     onResultChange={(value) => updateActiveSession({ optimizedPrompt: value, imagePrompt: value })}
@@ -979,8 +1093,8 @@ export default function DirectorVideoGenerationPage() {
                     resultValue={activeSession.videoPrompt}
                     status={activeSession.videoPromptStatus}
                     error={activeSession.videoPromptError}
-                    busy={busyAction === "videoPrompt"}
-                    disabled={Boolean(busyAction) && busyAction !== "videoPrompt"}
+                    busy={promptBusyState.video}
+                    disabled={false}
                     onOriginalChange={(value) => updateActiveSession({ videoOriginalPrompt: value })}
                     onModificationChange={(value) => updateActiveSession({ videoModificationInstruction: value })}
                     onResultChange={(value) => updateActiveSession({ videoOptimizedPrompt: value, videoPrompt: value })}
@@ -1078,29 +1192,50 @@ export default function DirectorVideoGenerationPage() {
                 </div>
                 {activeSession.imageError ? <p className="director-video-inline-error">{activeSession.imageError}</p> : null}
                 <div className="director-video-image-action-row">
+                  <input
+                    ref={imageUploadInputRef}
+                    className="director-video-upload-input"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    onChange={(event) => void handleImageUploadChange(event)}
+                  />
                   <div className="director-video-actions">
                     <button
                       className="btn-primary"
                       type="button"
-                      disabled={busyAction === "image" || !imageGenerationPrompt}
+                      disabled={isGeneratingImages || imageListMutationRunning || !imageGenerationPrompt}
                       onClick={() => void generateImages()}
                     >
-                      {busyAction === "image" ? "生成中..." : activeSession.imageCandidates.length ? "重新批量生成" : "生成图片"}
+                      {isGeneratingImages ? "生成中..." : activeSession.imageCandidates.length ? "重新批量生成" : "生成图片"}
                     </button>
                   </div>
-                  {activeSession.imageCandidates.length ? (
+                  <div className="director-video-image-secondary-actions">
                     <button
-                      className="btn-secondary director-video-download-all"
+                      className="btn-secondary director-video-upload-button"
                       type="button"
-                      disabled={activeSession.imageCandidates.every((candidate) =>
-                        failedImageCandidateIds.has(candidate.candidateId),
-                      )}
-                      onClick={downloadAllImages}
+                      disabled={imageListMutationRunning}
+                      onClick={() => triggerImageUpload()}
                     >
-                      <Download size={14} aria-hidden="true" />
-                      <span>下载全部</span>
+                      <Upload size={14} aria-hidden="true" />
+                      <span>{isUploadingImage ? "上传中..." : "上传图片"}</span>
                     </button>
-                  ) : null}
+                    {activeSession.imageCandidates.length ? (
+                      <button
+                        className="btn-secondary director-video-download-all"
+                        type="button"
+                        disabled={
+                          imageListMutationRunning ||
+                          activeSession.imageCandidates.every((candidate) =>
+                            failedImageCandidateIds.has(candidate.candidateId),
+                          )
+                        }
+                        onClick={downloadAllImages}
+                      >
+                        <Download size={14} aria-hidden="true" />
+                        <span>下载全部</span>
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 {activeSession.imageCandidates.length ? (
                   <div className="director-video-image-grid">
@@ -1108,12 +1243,15 @@ export default function DirectorVideoGenerationPage() {
                       const selected = candidate.candidateId === activeSession.selectedImageCandidateId;
                       const unavailable = failedImageCandidateIds.has(candidate.candidateId);
                       const candidateBusy = candidateBusyState?.candidateId === candidate.candidateId;
+                      const uploaded = candidate.source === "uploaded";
+                      const candidateRegenerating = candidateBusy && candidateBusyState?.action === "regenerate";
+                      const candidateReuploading = candidateBusy && candidateBusyState?.action === "reupload";
                       return (
                         <article
                           key={candidate.candidateId}
                           className={`director-video-image-card${selected ? " selected" : ""}${
                             unavailable ? " unavailable" : ""
-                          }`}
+                          }${uploaded ? " uploaded" : ""}`}
                         >
                           <div className="director-video-image-media">
                             <button
@@ -1148,22 +1286,36 @@ export default function DirectorVideoGenerationPage() {
                                 <button
                                   className="director-video-image-overlay-button director-video-image-overlay-regenerate"
                                   type="button"
-                                  disabled={candidateBusy || !imageGenerationPrompt}
-                                  onClick={() => void regenerateImageCandidate(candidate.candidateId)}
+                                  disabled={
+                                    imageListMutationRunning ||
+                                    (!uploaded && !imageGenerationPrompt)
+                                  }
+                                  onClick={() =>
+                                    uploaded
+                                      ? triggerImageUpload(candidate.candidateId)
+                                      : void regenerateImageCandidate(candidate.candidateId)
+                                  }
                                 >
-                                  <RotateCw size={9} aria-hidden="true" />
+                                  {uploaded ? (
+                                    <Upload size={9} aria-hidden="true" />
+                                  ) : (
+                                    <RotateCw size={9} aria-hidden="true" />
+                                  )}
                                   <span>
-                                    {candidateBusyState?.candidateId === candidate.candidateId &&
-                                    candidateBusyState.action === "regenerate"
-                                      ? "生成中"
-                                      : "重新生成"}
+                                    {uploaded
+                                      ? candidateReuploading
+                                        ? "上传中"
+                                        : "重新上传"
+                                      : candidateRegenerating
+                                        ? "生成中"
+                                        : "重新生成"}
                                   </span>
                                 </button>
                                 <button
                                   className="director-video-image-icon-button director-video-image-delete-button"
                                   type="button"
                                   aria-label="删除图片"
-                                  disabled={candidateBusy}
+                                  disabled={imageListMutationRunning}
                                   onClick={() => void deleteImageCandidate(candidate.candidateId)}
                                 >
                                   <X size={11} aria-hidden="true" strokeWidth={2.4} />
@@ -1176,6 +1328,9 @@ export default function DirectorVideoGenerationPage() {
                                 >
                                   <Download size={9} aria-hidden="true" />
                                 </a>
+                                {uploaded ? (
+                                  <span className="director-video-image-source-badge">用户上传</span>
+                                ) : null}
                               </>
                             ) : null}
                           </div>
@@ -1183,7 +1338,7 @@ export default function DirectorVideoGenerationPage() {
                             <button
                               className="btn-pill"
                               type="button"
-                              disabled={busyAction === "select" || selected || unavailable || candidateBusy}
+                              disabled={Boolean(selectingCandidateId) || imageListMutationRunning || selected || unavailable || candidateBusy}
                               onClick={() => void selectImage(candidate.candidateId)}
                             >
                               {unavailable ? "图片不可用" : selected ? "已选择" : "选择这一张"}
@@ -1404,14 +1559,14 @@ export default function DirectorVideoGenerationPage() {
                 <button
                   className="btn-primary small image-preview-select-button"
                   type="button"
-                  disabled={previewCandidateUnavailable || previewIsSelected || busyAction === "select"}
+                  disabled={previewCandidateUnavailable || previewIsSelected || Boolean(selectingCandidateId) || imageListMutationRunning}
                   onClick={() => void selectImage(previewCandidate.candidateId)}
                 >
                   {previewCandidateUnavailable
                     ? "图片不可用"
                     : previewIsSelected
                       ? "已选择这一张"
-                      : busyAction === "select"
+                      : selectingCandidateId === previewCandidate.candidateId
                         ? "选择中..."
                         : "选择这一张"}
                 </button>

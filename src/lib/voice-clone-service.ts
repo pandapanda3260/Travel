@@ -1,6 +1,6 @@
 import { withAdminProviderCallTracking } from "./admin-data-flow-tracking";
 import { getVoiceManagementRuntime } from "./voice-management-config";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
 import { callSpeechOpenApi } from "./volc-speech-openapi";
 
 export const supportedCloneFormats = ["wav", "mp3", "ogg", "m4a", "aac", "pcm"] as const;
@@ -203,6 +203,16 @@ export async function uploadVoiceClone(input: VoiceCloneUploadInput) {
     );
   }
 
+  const pricingKey = "doubao.voice.clone.2.0";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "voice.clone",
+    estimatedMetrics: {
+      characterCount: Array.from(input.transcript).length,
+      requestCount: 1,
+    },
+  });
+
   const response = await withAdminProviderCallTracking(
     {
       enabled: runtime.cloneEnabled,
@@ -266,7 +276,7 @@ export async function uploadVoiceClone(input: VoiceCloneUploadInput) {
   }
 
   recordModelUsage({
-    pricingKey: "doubao.voice.clone.2.0",
+    pricingKey,
     serviceName: "voice.clone",
     provider: "火山引擎 · 声音复刻",
     modelId: runtime.cloneResourceId,

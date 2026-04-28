@@ -315,23 +315,29 @@ export function AccountPageClient() {
 
   return (
     <main className="shell">
-      <section className="content auth-dashboard-page">
-        <section className="header-panel">
+      <section className="content auth-dashboard-page settings-console-page account-console-page">
+        <section className="header-panel settings-console-header account-console-header">
           <header className="topbar">
             <div className="topbar-main compact">
               <PageBrandTitle pageName="Account Management" />
             </div>
           </header>
 
-          <section className="account-summary-strip">
+          <section className="account-summary-strip account-summary-strip-refined">
+            <span className="account-summary-avatar" aria-hidden="true">
+              {(overview.user.nickname || "U").slice(0, 1).toUpperCase()}
+            </span>
             <div className="account-summary-main">
               <strong>{overview.user.nickname}</strong>
-              <span>{overview.user.maskedPhone ?? "待补手机号"}</span>
+              <span>
+                {overview.user.maskedPhone ?? "待补手机号"} · {overview.user.certificationLabel ?? "未认证"}
+              </span>
             </div>
             <div className="account-summary-chips">
               <span className="account-summary-chip">{formatUserStatus(overview.user.status)}</span>
               <span className="account-summary-chip">{loginMethodText}</span>
               <span className="account-summary-chip">{overview.sessions.length} 台设备</span>
+              <span className="account-summary-chip">L{overview.user.planLevel ?? 1}</span>
             </div>
           </section>
         </section>
@@ -345,7 +351,7 @@ export function AccountPageClient() {
           </div>
         ) : null}
 
-        <section className="auth-stat-grid">
+        <section className="auth-stat-grid settings-metric-grid account-metric-grid">
           <article className="auth-stat-card panel">
             <span>手机号</span>
             <strong>{overview.user.maskedPhone ?? "待补"}</strong>
@@ -372,7 +378,7 @@ export function AccountPageClient() {
           </article>
         </section>
 
-        <section className="auth-dashboard-grid">
+        <section className="auth-dashboard-grid account-action-grid">
           <article className="panel auth-dashboard-card">
             <div className="panel-header compact">
               <h3>基础资料</h3>
@@ -574,7 +580,7 @@ export function AccountPageClient() {
           </article>
         </section>
 
-        <section className="auth-dashboard-grid auth-dashboard-grid-secondary">
+        <section className="auth-dashboard-grid auth-dashboard-grid-secondary account-activity-grid">
           <article className="panel auth-dashboard-card">
             <div className="panel-header compact">
               <h3>设备与登录态</h3>

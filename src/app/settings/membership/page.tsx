@@ -91,8 +91,8 @@ export default async function MembershipPage() {
 
   return (
     <main className="shell">
-      <section className="content member-center-page">
-        <section className="header-panel member-header-panel">
+      <section className="content member-center-page settings-console-page">
+        <section className="header-panel member-header-panel settings-console-header">
           <header className="topbar">
             <div className="topbar-main compact">
               <PageBrandTitle pageName="Membership Center" />
@@ -100,9 +100,10 @@ export default async function MembershipPage() {
           </header>
         </section>
 
-        <section className="member-hero panel">
+        <section className="member-hero panel settings-console-hero membership-hero">
           <div className="member-hero-main">
             <div className="member-hero-copy-stack">
+              <span className="settings-section-kicker">当前会员</span>
               <h2>
                 {level.levelCode} {level.name}
               </h2>
@@ -118,7 +119,7 @@ export default async function MembershipPage() {
             </div>
           </div>
 
-          <div className="member-stat-grid">
+          <div className="member-stat-grid settings-metric-grid">
             <article className="member-stat-card">
               <span>当前成长值</span>
               <strong>{profile.effectiveGrowthValue}</strong>
@@ -142,7 +143,7 @@ export default async function MembershipPage() {
           </div>
         </section>
 
-        <section className="member-card-grid">
+        <section className="member-card-grid settings-section-grid">
           <article className="panel member-surface">
             <div className="panel-header compact">
               <h3>当前权益</h3>
@@ -200,7 +201,7 @@ export default async function MembershipPage() {
           </article>
         </section>
 
-        <section className="member-card-grid">
+        <section className="member-card-grid settings-section-grid">
           <article className="panel member-surface">
             <div className="panel-header compact">
               <h3>成长流水</h3>
@@ -250,7 +251,7 @@ export default async function MembershipPage() {
           </article>
         </section>
 
-        <section className="member-card-grid">
+        <section className="member-card-grid settings-section-grid">
           <article className="panel member-surface">
             <div className="panel-header compact">
               <h3>等级与补发</h3>

@@ -25,6 +25,8 @@ type RouteContext = {
 type VideoRequest = {
   action?: "generate";
   videoPrompt?: string;
+  videoOriginalPrompt?: string;
+  videoModificationInstruction?: string;
   videoSettings?: {
     durationSeconds?: number;
     ratio?: "16:9" | "9:16" | "1:1";
@@ -135,9 +137,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (!prompt) {
       return NextResponse.json({ error: "请先填写视频提示词" }, { status: 400 });
     }
+    const videoOriginalPrompt = String(body.videoOriginalPrompt ?? access.generationSession.videoOriginalPrompt ?? "").trim();
+    const videoModificationInstruction = String(
+      body.videoModificationInstruction ?? access.generationSession.videoModificationInstruction ?? "",
+    ).trim();
 
     const preparedSession =
       patchDirectorVideoGenerationSession(sessionId, {
+        videoOriginalPrompt,
+        videoModificationInstruction,
         videoPrompt: prompt,
         videoSettings: body.videoSettings ?? {},
         videoStatus: "running",
@@ -252,10 +260,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
   } catch (error) {
     const { sessionId } = await context.params;
     const message = formatDirectorVideoGenerationError(error, "视频生成失败");
-    patchDirectorVideoGenerationSession(sessionId, {
-      videoStatus: "failed",
-      videoError: message,
-    });
+    try {
+      patchDirectorVideoGenerationSession(sessionId, {
+        videoStatus: "failed",
+        videoError: message,
+      });
+    } catch (patchError) {
+      console.error("[director-video-generation] failed to persist video failure", patchError);
+    }
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireUserApiSession, userApiUnauthorizedResponse } from "./auth-session";
+import { getDirectorVideoGenerationSession } from "./director-video-generation-store";
 import { getProductArchive } from "./product-archive-store";
 import { isPathWithinDirectory, joinRuntimePublicStoragePath } from "./runtime-storage";
 import { getVideoMaterial } from "./video-material-store";
@@ -86,6 +87,23 @@ function authorizeTaskScopedAsset(request: NextRequest, normalizedParts: string[
 
   const task = getVideoTask(taskId);
   if (!task) {
+    const generationSession = getDirectorVideoGenerationSession(taskId);
+    if (generationSession) {
+      if (generationSession.ownerUserId !== session.userId) {
+        return {
+          response: NextResponse.json(
+            { error: "无权访问该快速生成产物", code: "DIRECTOR_VIDEO_GENERATION_FORBIDDEN" },
+            { status: 403 },
+          ),
+        } as const;
+      }
+
+      return {
+        cacheControl: "private, no-store",
+        varyCookie: true,
+      } as const;
+    }
+
     return {
       response: NextResponse.json({ error: "视频任务不存在" }, { status: 404 }),
     } as const;

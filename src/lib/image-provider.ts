@@ -1,7 +1,7 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { getImageGenerationRuntime, type ImageGenerationRuntime } from "./image-provider-config";
 import { createMockImageResults } from "./mock-aigc-assets";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
 
@@ -310,6 +310,15 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
   const enhancedPrompt = enhancePromptWithDetailPreset(hardenedPrompt, input.guidanceScale);
   const sanitizedPrompt = sanitizeImagePromptForModeration(enhancedPrompt);
   const outputCount = Math.max(1, Math.min(10, input.outputCount ?? 4));
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "image.generate",
+    estimatedMetrics: {
+      imageCount: outputCount,
+      requestCount: 1,
+    },
+  });
   const requestBatch = (prompt: string) =>
     Promise.all(
       Array.from({ length: outputCount }, () =>
@@ -329,7 +338,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
   try {
     const results = await requestBatch(sanitizedPrompt);
     recordModelUsage({
-      pricingKey: runtime.modelId.includes("seedream-5-0-lite") ? "doubao.seedream.5.0.lite" : null,
+      pricingKey,
       serviceName: "image.generate",
       provider: runtime.providerLabel,
       modelId: runtime.modelId,
@@ -351,7 +360,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
     try {
       const results = await requestBatch(saferPrompt);
       recordModelUsage({
-        pricingKey: runtime.modelId.includes("seedream-5-0-lite") ? "doubao.seedream.5.0.lite" : null,
+        pricingKey,
         serviceName: "image.generate",
         provider: runtime.providerLabel,
         modelId: runtime.modelId,

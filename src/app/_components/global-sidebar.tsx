@@ -53,6 +53,7 @@ const navigationGroups: NavigationGroup[] = [
     items: [
       { label: "参数设置", href: "/settings/parameter-settings" },
       { label: "会员中心", href: "/settings/membership" },
+      { label: "用量账单", href: "/settings/usage" },
       { label: "账号管理", href: "/settings/account" },
     ],
     standalone: false,

@@ -47,6 +47,12 @@ const interruptedErrorPatterns = [
   /\bother side closed\b/i,
 ];
 
+const jsonParseErrorPatterns = [
+  /^unexpected end of json input$/i,
+  /^unexpected token .+ is not valid json$/i,
+  /^unexpected token .+ in json at position \d+$/i,
+];
+
 export function isDirectorVideoGenerationInterruptedError(error: unknown) {
   const hints = collectErrorHints(error).filter(Boolean);
   return hints.some((hint) => interruptedErrorPatterns.some((pattern) => pattern.test(hint)));
@@ -56,7 +62,11 @@ export function formatDirectorVideoGenerationError(error: unknown, fallback: str
   if (isDirectorVideoGenerationInterruptedError(error)) {
     return `${fallback}：请求连接被中断，请稍后重试。`;
   }
-  return getPrimaryErrorMessage(error) ?? fallback;
+  const message = getPrimaryErrorMessage(error);
+  if (message && jsonParseErrorPatterns.some((pattern) => pattern.test(message))) {
+    return `${fallback}：服务端返回数据格式异常，请稍后重试。`;
+  }
+  return message ?? fallback;
 }
 
 export function normalizeDirectorVideoGenerationStoredError(message: string | null | undefined, fallback: string) {

@@ -23,7 +23,7 @@ export type DirectorVideoGenerationImageCandidate = {
   width: number | null;
   height: number | null;
   byteSize: number;
-  source: "generated";
+  source: "generated" | "uploaded";
   createdAt: string;
 };
 
@@ -135,7 +135,7 @@ function getDefaultImageSettings(): DirectorVideoGenerationSession["imageSetting
     guidanceScale: 7.5,
     watermark: false,
     seed: null,
-    outputCount: 4,
+    outputCount: 10,
   };
 }
 
@@ -158,7 +158,7 @@ function normalizeSession(record: Partial<DirectorVideoGenerationSession>): Dire
     width: candidate.width ?? null,
     height: candidate.height ?? null,
     byteSize: Number(candidate.byteSize ?? 0),
-    source: "generated" as const,
+    source: candidate.source === "uploaded" ? ("uploaded" as const) : ("generated" as const),
     createdAt: candidate.createdAt ?? timestamp,
   }));
   const availableImageCandidates = normalizedImageCandidates.filter(candidateImageFileExists);
@@ -201,7 +201,7 @@ function normalizeSession(record: Partial<DirectorVideoGenerationSession>): Dire
     imageSettings: {
       ...getDefaultImageSettings(),
       ...(record.imageSettings ?? {}),
-      outputCount: Math.max(1, Math.min(10, Number(record.imageSettings?.outputCount ?? 4))),
+      outputCount: Math.max(1, Math.min(10, Number(record.imageSettings?.outputCount ?? 10))),
     },
     videoSettings: {
       ...getDefaultVideoSettings(),
@@ -373,6 +373,15 @@ async function fetchImageAssetBytes(asset: ImageGenerationResult) {
 }
 
 function detectImageExtension(bytes: Buffer, contentType?: string | null) {
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+    return "jpg";
+  }
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "webp";
+  }
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "png";
+  }
   if (contentType?.includes("jpeg") || contentType?.includes("jpg")) {
     return "jpg";
   }
@@ -381,12 +390,6 @@ function detectImageExtension(bytes: Buffer, contentType?: string | null) {
   }
   if (contentType?.includes("png")) {
     return "png";
-  }
-  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
-    return "jpg";
-  }
-  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "webp";
   }
   return "png";
 }
@@ -399,11 +402,35 @@ async function getImageDimensions(bytes: Buffer) {
       height: metadata.height ?? null,
     };
   } catch {
-    return {
-      width: null,
-      height: null,
-    };
+    throw new Error("图片文件无效或格式不支持");
   }
+}
+
+async function buildImageCandidateFromBytes(input: {
+  bytes: Buffer;
+  contentType?: string | null;
+  originalUrl?: string | null;
+  sessionId: string;
+  outputDir: string;
+  candidateId?: string;
+  source: DirectorVideoGenerationImageCandidate["source"];
+}) {
+  const candidateId = input.candidateId ?? randomUUID();
+  const extension = detectImageExtension(input.bytes, input.contentType);
+  const fileName = input.candidateId ? `${candidateId}-${randomUUID().slice(0, 8)}.${extension}` : `${candidateId}.${extension}`;
+  const dimensions = await getImageDimensions(input.bytes);
+  writeFileSync(join(input.outputDir, fileName), input.bytes);
+
+  return {
+    candidateId,
+    imageUrl: getSessionImageUrl(input.sessionId, fileName),
+    originalUrl: input.originalUrl ?? null,
+    width: dimensions.width,
+    height: dimensions.height,
+    byteSize: input.bytes.byteLength,
+    source: input.source,
+    createdAt: nowIso(),
+  } satisfies DirectorVideoGenerationImageCandidate;
 }
 
 async function buildImageCandidateFromAsset(input: {
@@ -412,23 +439,16 @@ async function buildImageCandidateFromAsset(input: {
   outputDir: string;
   candidateId?: string;
 }) {
-  const candidateId = input.candidateId ?? randomUUID();
   const { bytes, contentType, originalUrl } = await fetchImageAssetBytes(input.asset);
-  const extension = detectImageExtension(bytes, contentType);
-  const fileName = `${candidateId}.${extension}`;
-  writeFileSync(join(input.outputDir, fileName), bytes);
-  const dimensions = await getImageDimensions(bytes);
-
-  return {
-    candidateId,
-    imageUrl: getSessionImageUrl(input.sessionId, fileName),
+  return buildImageCandidateFromBytes({
+    bytes,
+    contentType,
     originalUrl,
-    width: dimensions.width,
-    height: dimensions.height,
-    byteSize: bytes.byteLength,
-    source: "generated" as const,
-    createdAt: nowIso(),
-  } satisfies DirectorVideoGenerationImageCandidate;
+    sessionId: input.sessionId,
+    outputDir: input.outputDir,
+    candidateId: input.candidateId,
+    source: "generated",
+  });
 }
 
 export async function setDirectorVideoGenerationImageCandidates(input: {
@@ -458,20 +478,38 @@ export async function setDirectorVideoGenerationImageCandidates(input: {
       throw new Error("图片生成结果为空");
     }
 
-    rmSync(imageDir, { recursive: true, force: true });
-    renameSync(tempImageDir, imageDir);
+    mkdirSync(imageDir, { recursive: true });
+    for (const candidate of input.session.imageCandidates) {
+      if (candidate.source !== "uploaded") {
+        rmSync(resolveRuntimeAssetUrlToPath(candidate.imageUrl), { force: true });
+      }
+    }
+    for (const candidate of imageCandidates) {
+      const fileName = candidate.imageUrl.split("/").pop();
+      if (!fileName) {
+        throw new Error("图片文件名无效");
+      }
+      renameSync(join(tempImageDir, fileName), resolveRuntimeAssetUrlToPath(candidate.imageUrl));
+    }
+    rmSync(tempImageDir, { recursive: true, force: true });
   } catch (error) {
     rmSync(tempImageDir, { recursive: true, force: true });
     throw error;
   }
 
-  const selectedImageCandidateId = imageCandidates[0]?.candidateId ?? null;
+  const uploadedCandidates = input.session.imageCandidates.filter((candidate) => candidate.source === "uploaded");
+  const nextImageCandidates = [...uploadedCandidates, ...imageCandidates];
+  const selectedImageCandidateId =
+    input.session.selectedImageCandidateId &&
+    uploadedCandidates.some((candidate) => candidate.candidateId === input.session.selectedImageCandidateId)
+      ? input.session.selectedImageCandidateId
+      : (nextImageCandidates[0]?.candidateId ?? null);
   const next: DirectorVideoGenerationSession = {
     ...input.session,
-    imageCandidates,
+    imageCandidates: nextImageCandidates,
     selectedImageCandidateId,
-    imageStatus: imageCandidates.length ? "success" : "failed",
-    imageError: imageCandidates.length ? null : "图片生成结果为空",
+    imageStatus: nextImageCandidates.length ? "success" : "failed",
+    imageError: nextImageCandidates.length ? null : "图片生成结果为空",
     videoStatus: "idle",
     videoError: null,
     videoJobId: null,
@@ -480,6 +518,25 @@ export async function setDirectorVideoGenerationImageCandidates(input: {
 
   dbUpsert(COLLECTION, input.session.sessionId, next);
   return next;
+}
+
+export async function insertUploadedDirectorVideoGenerationImageCandidate(input: {
+  session: DirectorVideoGenerationSession;
+  bytes: Buffer;
+  contentType?: string | null;
+}) {
+  const imageDir = getSessionImageDir(input.session.sessionId);
+  mkdirSync(imageDir, { recursive: true });
+
+  const candidate = await buildImageCandidateFromBytes({
+    bytes: input.bytes,
+    contentType: input.contentType,
+    sessionId: input.session.sessionId,
+    outputDir: imageDir,
+    source: "uploaded",
+  });
+  const imageCandidates = [candidate, ...input.session.imageCandidates];
+  return createNextSessionWithImageCandidates(input.session, imageCandidates, candidate.candidateId);
 }
 
 export function deleteDirectorVideoGenerationImageCandidate(sessionId: string, candidateId: string) {
@@ -526,6 +583,62 @@ export async function replaceDirectorVideoGenerationImageCandidate(input: {
       sessionId: input.session.sessionId,
       outputDir: tempImageDir,
       candidateId: input.candidateId,
+    });
+
+    const fileName = nextCandidate.imageUrl.split("/").pop();
+    if (!fileName) {
+      throw new Error("图片文件名无效");
+    }
+    const nextImagePath = resolveRuntimeAssetUrlToPath(nextCandidate.imageUrl);
+    renameSync(join(tempImageDir, fileName), nextImagePath);
+
+    const previousImagePath = resolveRuntimeAssetUrlToPath(existingCandidate.imageUrl);
+    if (previousImagePath !== nextImagePath) {
+      rmSync(previousImagePath, { force: true });
+    }
+  } catch (error) {
+    rmSync(tempImageDir, { recursive: true, force: true });
+    throw error;
+  }
+  rmSync(tempImageDir, { recursive: true, force: true });
+
+  const imageCandidates = input.session.imageCandidates.map((candidate) =>
+    candidate.candidateId === input.candidateId ? nextCandidate : candidate,
+  );
+  const selectedImageCandidateId =
+    input.session.selectedImageCandidateId && imageCandidates.some((item) => item.candidateId === input.session.selectedImageCandidateId)
+      ? input.session.selectedImageCandidateId
+      : (imageCandidates[0]?.candidateId ?? null);
+
+  return createNextSessionWithImageCandidates(input.session, imageCandidates, selectedImageCandidateId);
+}
+
+export async function replaceUploadedDirectorVideoGenerationImageCandidate(input: {
+  session: DirectorVideoGenerationSession;
+  candidateId: string;
+  bytes: Buffer;
+  contentType?: string | null;
+}) {
+  const existingCandidate = input.session.imageCandidates.find((item) => item.candidateId === input.candidateId);
+  if (!existingCandidate) {
+    return null;
+  }
+
+  const imageDir = getSessionImageDir(input.session.sessionId);
+  const imageParentDir = getSessionImageParentDir(input.session.sessionId);
+  const tempImageDir = join(imageParentDir, `.video-generation-upload-${randomUUID()}.tmp`);
+  mkdirSync(imageDir, { recursive: true });
+  mkdirSync(tempImageDir, { recursive: true });
+
+  let nextCandidate: DirectorVideoGenerationImageCandidate;
+  try {
+    nextCandidate = await buildImageCandidateFromBytes({
+      bytes: input.bytes,
+      contentType: input.contentType,
+      sessionId: input.session.sessionId,
+      outputDir: tempImageDir,
+      candidateId: input.candidateId,
+      source: "uploaded",
     });
 
     const fileName = nextCandidate.imageUrl.split("/").pop();

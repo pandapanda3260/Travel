@@ -1,6 +1,6 @@
 import { getTextGenerationRuntime } from "./text-provider-config";
 import { getGenerationRuntime as getOpenAiGenerationRuntime } from "./vision-provider-config";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 
 export type TaskGenerationRuntime = {
   provider: "openai" | "ark";
@@ -59,6 +59,12 @@ export async function callTaskGenerationLlm(input: {
     return null;
   }
 
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "llm.chat",
+  });
+
   const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
     method: "POST",
     headers: {
@@ -95,16 +101,7 @@ export async function callTaskGenerationLlm(input: {
   }
 
   recordModelUsage({
-    pricingKey:
-      runtime.provider === "openai"
-        ? runtime.modelId.startsWith("gpt-5.4")
-          ? "openai.gpt-5.4"
-          : runtime.modelId.startsWith("gpt-4o")
-            ? "openai.gpt-4o"
-            : null
-        : runtime.modelId.includes("doubao-seed-2.0-pro")
-          ? "doubao.seed.2.0.pro"
-          : null,
+    pricingKey,
     serviceName: "llm.chat",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

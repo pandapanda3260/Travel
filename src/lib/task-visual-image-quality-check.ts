@@ -1,5 +1,10 @@
 import type { ImageGenerationResult } from "./image-provider";
-import { recordModelUsage } from "./model-usage-service";
+import {
+  assertModelUsagePreflight,
+  ModelUsageBillingError,
+  recordModelUsage,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
 
 export type TaskVisualImageQualityStatus = "unchecked" | "passed" | "warning" | "failed";
@@ -329,6 +334,12 @@ export async function reviewTaskVisualImageBatch(input: ReviewInput): Promise<Re
   ];
 
   try {
+    const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+    assertModelUsagePreflight({
+      pricingKey,
+      serviceName: "image.self_check",
+    });
+
     const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
       method: "POST",
       headers: {
@@ -364,7 +375,7 @@ export async function reviewTaskVisualImageBatch(input: ReviewInput): Promise<Re
     }
 
     recordModelUsage({
-      pricingKey: runtime.modelId.startsWith("gpt-4o") ? "openai.gpt-4o" : null,
+      pricingKey,
       serviceName: "image.self_check",
       provider: runtime.providerLabel,
       modelId: runtime.modelId,
@@ -399,7 +410,10 @@ export async function reviewTaskVisualImageBatch(input: ReviewInput): Promise<Re
       validCount: results.filter((item) => item.status === "passed" || item.status === "warning").length,
       results,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof ModelUsageBillingError) {
+      throw error;
+    }
     return {
       enabled: true,
       checked: false,

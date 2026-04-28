@@ -1,5 +1,5 @@
 import { extractBestJsonObject } from "./llm-json";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 import { getDirectorPromptOptimizerRuntime } from "./director-video-generation-runtime";
 import {
   type VideoTaskExpectedDurationRange,
@@ -157,6 +157,12 @@ export async function optimizeTaskCreationUserPrompt(
     input.userPrompt.trim(),
   ].join("\n");
 
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "llm.chat",
+  });
+
   const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
     method: "POST",
     headers: {
@@ -191,7 +197,7 @@ export async function optimizeTaskCreationUserPrompt(
   }
 
   recordModelUsage({
-    pricingKey: null,
+    pricingKey,
     serviceName: "llm.chat",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

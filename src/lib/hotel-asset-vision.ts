@@ -1,4 +1,9 @@
-import { recordModelUsage } from "./model-usage-service";
+import {
+  assertModelUsagePreflight,
+  ModelUsageBillingError,
+  recordModelUsage,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
 import type { HotelAssetSceneType } from "./video-task-schema";
 import type {
@@ -280,6 +285,12 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
   }
 
   try {
+    const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+    assertModelUsagePreflight({
+      pricingKey,
+      serviceName: "vision.hotel_asset_analysis",
+    });
+
     const response = await fetch(normalizeApiUrl(runtime.apiBase, runtime.chatEndpoint), {
       method: "POST",
       headers: {
@@ -339,6 +350,7 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
     }
 
     recordModelUsage({
+      pricingKey,
       serviceName: "vision.hotel_asset_analysis",
       provider: runtime.providerLabel,
       modelId: runtime.modelId,
@@ -359,7 +371,10 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
 
     const parsed = JSON.parse(stripCodeFence(content)) as RawHotelAssetVisionResult;
     return sanitizeAnalysisResult(parsed, fallback);
-  } catch {
+  } catch (error) {
+    if (error instanceof ModelUsageBillingError) {
+      throw error;
+    }
     return fallback;
   }
 }

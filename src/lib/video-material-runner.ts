@@ -23,7 +23,7 @@ import {
   updateVideoMaterial,
 } from "./video-material-store";
 import { runWithModelUsageContext } from "./model-usage-context";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 import { getGenerationRuntime, getVisionRuntime } from "./vision-provider-config";
 import { extractVisualSubtitleLinesFromAnalysis } from "./video-material-subtitles";
 
@@ -175,6 +175,11 @@ async function generateContentFromAnalysis(
       "Content-Type": "application/json",
       Authorization: `Bearer ${runtime.apiKey}`,
     };
+    const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+    assertModelUsagePreflight({
+      pricingKey,
+      serviceName: "llm.material_script",
+    });
 
     const response = await withAdminProviderCallTracking(
       {
@@ -221,13 +226,7 @@ async function generateContentFromAnalysis(
     };
 
     recordModelUsage({
-      pricingKey: runtime.modelId.startsWith("gpt-5.4")
-        ? "openai.gpt-5.4"
-        : runtime.modelId.startsWith("gpt-4o")
-          ? "openai.gpt-4o"
-          : runtime.modelId.includes("doubao-seed-2.0-pro")
-            ? "doubao.seed.2.0.pro"
-            : null,
+      pricingKey,
       serviceName: "llm.material_script",
       provider: runtime.providerLabel,
       modelId: runtime.modelId,

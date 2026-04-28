@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { extractBestJsonObject } from "./llm-json";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
 
 const execFileAsync = promisify(execFile);
@@ -427,6 +427,12 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
 
   const url = `${runtime.apiBase}${runtime.chatEndpoint}`;
 
+  const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "video.analysis",
+  });
+
   let response: Response | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     response = await fetch(url, {
@@ -465,7 +471,7 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
   };
 
   recordModelUsage({
-    pricingKey: runtime.modelId.startsWith("gpt-4o") ? "openai.gpt-4o" : null,
+    pricingKey,
     serviceName: "video.analysis",
     provider: runtime.providerLabel,
     modelId: runtime.modelId,

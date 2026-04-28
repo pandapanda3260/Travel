@@ -30,3 +30,17 @@ test("导演模式错误规整保留明确业务错误", () => {
   assert.equal(formatDirectorVideoGenerationError(new Error("请先生成并选择图片"), "视频生成失败"), "请先生成并选择图片");
   assert.equal(normalizeDirectorVideoGenerationStoredError(null, "视频生成失败"), null);
 });
+
+test("导演模式错误规整会隐藏底层 JSON 解析错误", () => {
+  assert.equal(
+    formatDirectorVideoGenerationError(new SyntaxError("Unexpected end of JSON input"), "快速生成记录加载失败"),
+    "快速生成记录加载失败：服务端返回数据格式异常，请稍后重试。",
+  );
+  assert.equal(
+    formatDirectorVideoGenerationError(
+      new SyntaxError(`Unexpected token 'I', "Internal S"... is not valid JSON`),
+      "提示词优化失败",
+    ),
+    "提示词优化失败：服务端返回数据格式异常，请稍后重试。",
+  );
+});

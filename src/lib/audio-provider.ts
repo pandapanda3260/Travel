@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { getSpeechSynthesisRuntime, type SpeechSynthesisRuntime } from "./audio-provider-config";
 import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import { createMockSpeechResult } from "./mock-aigc-assets";
-import { recordModelUsage } from "./model-usage-service";
+import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
 import { joinRuntimePublicStoragePath } from "./runtime-storage";
 import { withRetry } from "./retry";
 import { defaultModelRequestTimeoutMs, fetchWithTimeout } from "./timeout";
@@ -349,6 +349,15 @@ export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<S
   }
 
   const format = input.format ?? "mp3";
+  const pricingKey = "doubao.speech.tts.2.0";
+  assertModelUsagePreflight({
+    pricingKey,
+    serviceName: "audio.tts",
+    estimatedMetrics: {
+      characterCount: Array.from(input.text).length,
+      requestCount: 1,
+    },
+  });
   const parsed = await withRetry(async () => {
     const res = await fetchWithTimeout(
       `${normalizeApiBase(runtime.apiBase)}/api/v3/tts/unidirectional/sse`,
@@ -391,7 +400,7 @@ export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<S
   const wordTimelineDurationSeconds = words.length ? (words[words.length - 1]?.endTime ?? null) : null;
 
   recordModelUsage({
-    pricingKey: "doubao.speech.tts.2.0",
+    pricingKey,
     serviceName: "audio.tts",
     provider: runtime.providerLabel,
     modelId: input.resourceId ?? runtime.resourceId,
