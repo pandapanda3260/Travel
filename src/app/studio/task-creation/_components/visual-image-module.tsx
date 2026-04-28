@@ -791,6 +791,7 @@ export function VisualImageModule({
                             alt={`镜头${shot.shotIndex}已选图片`}
                             width={900}
                             height={1350}
+                            loading={isActive ? "eager" : "lazy"}
                             unoptimized
                           />
                         ) : (
@@ -933,6 +934,7 @@ export function VisualImageModule({
                               alt={`镜头 ${activeShot.shotIndex} 候选图`}
                               width={1200}
                               height={900}
+                              loading={isSelected ? "eager" : "lazy"}
                               unoptimized
                             />
                           </button>
