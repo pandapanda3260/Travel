@@ -9,7 +9,7 @@ function getConfiguredValue(key: string) {
 }
 
 function getDefaultProjectRoot() {
-  return /* turbopackIgnore: true */ process.cwd();
+  return join(/* turbopackIgnore: true */ process.cwd(), ".");
 }
 
 export function getRuntimeStorageRoot() {
@@ -17,11 +17,14 @@ export function getRuntimeStorageRoot() {
 }
 
 export function getRuntimeDataDir() {
-  return getConfiguredValue("TRAVEL_DATA_DIR") || join(getRuntimeStorageRoot(), "data");
+  return getConfiguredValue("TRAVEL_DATA_DIR") || join(/* turbopackIgnore: true */ getRuntimeStorageRoot(), "data");
 }
 
 export function getRuntimePublicStorageDir() {
-  return getConfiguredValue("TRAVEL_PUBLIC_STORAGE_DIR") || join(getRuntimeStorageRoot(), "public");
+  return (
+    getConfiguredValue("TRAVEL_PUBLIC_STORAGE_DIR") ||
+    join(/* turbopackIgnore: true */ getRuntimeStorageRoot(), "public")
+  );
 }
 
 export function getRuntimeStorageMeta() {
@@ -47,11 +50,11 @@ export function ensureRuntimePublicStorageDir() {
 }
 
 export function joinRuntimeDataPath(...segments: string[]) {
-  return join(getRuntimeDataDir(), ...segments);
+  return join(/* turbopackIgnore: true */ getRuntimeDataDir(), ...segments);
 }
 
 export function joinRuntimePublicStoragePath(...segments: string[]) {
-  return join(getRuntimePublicStorageDir(), ...segments);
+  return join(/* turbopackIgnore: true */ getRuntimePublicStorageDir(), ...segments);
 }
 
 export function resolveRuntimeAssetUrlToPath(publicUrl: string) {

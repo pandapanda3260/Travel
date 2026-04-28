@@ -8,6 +8,10 @@ import {
   hasCriticalTrafficOrTaxiMismatch,
   normalizeTaskVisualImageQualityResult,
 } from "./task-visual-image-quality-check";
+import {
+  buildVisualImageCandidateRegenerationReasons,
+  shouldShowVisualImageCandidateRegenerationReason,
+} from "./task-visual-image-quality-copy";
 import { buildImageDimensionQualityCheck, pickRecommendedTaskVisualImageCandidate } from "./task-visual-image-store";
 
 test("右舵或日式出租车问题会被强制收口为失败并建议重生", () => {
@@ -205,5 +209,35 @@ test("自动推荐会跳过质量检查失败的候选图", () => {
       },
     ]),
     null,
+  );
+});
+
+test("候选图 UI 会提取建议重生的明确原因", () => {
+  const candidate = {
+    qualityStatus: "failed",
+    qualitySummary: "图片方向与目标竖版画幅相反，建议重生成",
+    qualityIssues: ["目标画幅为竖版，但实际尺寸为横版"],
+    scoreLabel: "建议重生",
+    scoreReasons: ["视觉自检 未通过（-55）", "问题：目标画幅为竖版，但实际尺寸为横版"],
+  };
+
+  assert.equal(shouldShowVisualImageCandidateRegenerationReason(candidate), true);
+  assert.deepEqual(buildVisualImageCandidateRegenerationReasons(candidate), [
+    "图片方向与目标竖版画幅相反，建议重生成",
+    "目标画幅为竖版，但实际尺寸为横版",
+    "视觉自检 未通过（-55）",
+  ]);
+});
+
+test("轻微偏差候选图不会被 UI 误标为建议重生", () => {
+  assert.equal(
+    shouldShowVisualImageCandidateRegenerationReason({
+      qualityStatus: "warning",
+      qualitySummary: "轻微偏色",
+      qualityIssues: ["整体可用"],
+      scoreLabel: "推荐保留",
+      scoreReasons: ["视觉自检 轻微偏差"],
+    }),
+    false,
   );
 });

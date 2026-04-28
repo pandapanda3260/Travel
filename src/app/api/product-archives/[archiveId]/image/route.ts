@@ -239,7 +239,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const imageDir = joinRuntimePublicStoragePath("product-archives", archiveId, "source");
     mkdirSync(imageDir, { recursive: true });
     const fileName = `${crypto.randomUUID()}.${extension}`;
-    const absolutePath = join(imageDir, fileName);
+    const absolutePath = join(/* turbopackIgnore: true */ imageDir, fileName);
     writeFileSync(absolutePath, bytes);
     const publicUrl = `/product-archives/${archiveId}/source/${fileName}`;
     const uploadedAt = new Date().toISOString();

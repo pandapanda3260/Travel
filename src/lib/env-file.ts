@@ -65,11 +65,11 @@ function parseEnvFileContent(content: string) {
 }
 
 function readEnvFileIfExists(filePath: string) {
-  if (!existsSync(filePath)) {
+  if (!existsSync(/* turbopackIgnore: true */ filePath)) {
     return {} as Record<string, string>;
   }
 
-  return parseEnvFileContent(readFileSync(filePath, "utf8"));
+  return parseEnvFileContent(readFileSync(/* turbopackIgnore: true */ filePath, "utf8"));
 }
 
 export function loadOptionalEnvFile(fileName: string) {

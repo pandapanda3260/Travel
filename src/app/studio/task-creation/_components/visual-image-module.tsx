@@ -11,6 +11,10 @@ import {
 import { formatDurationSecondsLabel } from "../../../../lib/duration-format";
 import { isTaskStageProgressRunning, type TaskStageProgressSnapshot } from "../../../../lib/task-stage-progress";
 import {
+  buildVisualImageCandidateRegenerationReasons,
+  shouldShowVisualImageCandidateRegenerationReason,
+} from "../../../../lib/task-visual-image-quality-copy";
+import {
   getVideoTaskStatusIndex,
   type VideoTaskRecord,
   usesCapturedMaterialFirstWorkflow,
@@ -33,6 +37,10 @@ type VisualImageCandidate = {
   scoreLabel: string;
   scoreReasons: string[];
   source: "generated" | "uploaded";
+  qualityStatus: "unchecked" | "passed" | "warning" | "failed";
+  qualityIssues: string[];
+  qualitySummary: string | null;
+  qualityCheckedAt: string | null;
 };
 
 type VisualImageShot = {
@@ -919,10 +927,14 @@ export function VisualImageModule({
                     activeShot.candidates.map((candidate) => {
                       const isRecommended = candidate.candidateId === activeShot.recommendedCandidateId;
                       const isSelected = candidate.candidateId === activeShot.selectedCandidateId;
+                      const regenerationReasons = buildVisualImageCandidateRegenerationReasons(candidate);
+                      const showRegenerationReason = shouldShowVisualImageCandidateRegenerationReason(candidate);
                       return (
                         <article
                           key={candidate.candidateId}
-                          className={`task-visual-shot-candidate ${isSelected ? "selected" : ""}`}
+                          className={`task-visual-shot-candidate ${isSelected ? "selected" : ""} ${
+                            showRegenerationReason ? "needs-regeneration" : ""
+                          }`}
                         >
                           <button
                             className="task-visual-shot-candidate-trigger image-preview-trigger"
@@ -956,9 +968,24 @@ export function VisualImageModule({
                                 <span className="task-visual-shot-score">用户上传</span>
                               ) : isRecommended ? (
                                 <span className="task-visual-shot-recommended">✓ 系统推荐</span>
+                              ) : showRegenerationReason ? (
+                                <span className="task-visual-shot-warning">建议重生</span>
                               ) : null}
                             </div>
                           </div>
+                          {showRegenerationReason ? (
+                            <div className="task-visual-shot-regeneration-reason">
+                              <strong>为什么建议重生</strong>
+                              <ul>
+                                {(regenerationReasons.length
+                                  ? regenerationReasons
+                                  : ["视觉自检未通过，建议重新生成该候选图。"]
+                                ).map((reason) => (
+                                  <li key={reason}>{reason}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ) : null}
                         </article>
                       );
                     })

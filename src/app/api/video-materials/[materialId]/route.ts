@@ -207,7 +207,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const uploadsDir = ensureUploadsDir();
     const videoFileName = `${materialId}.${extension}`;
-    const videoPath = join(uploadsDir, videoFileName);
+    const videoPath = join(/* turbopackIgnore: true */ uploadsDir, videoFileName);
     await writeUploadedFileToPath(file, videoPath);
 
     const videoFileUrl = `/video-materials/${videoFileName}`;

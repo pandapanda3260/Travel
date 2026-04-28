@@ -1852,6 +1852,11 @@ textarea {
   box-shadow: 0 0 0 2px rgba(82, 196, 26, 0.1);
 }
 
+.task-visual-shot-candidate.needs-regeneration .task-visual-shot-candidate-trigger {
+  border-color: rgba(245, 133, 40, 0.32);
+  box-shadow: 0 0 0 2px rgba(245, 133, 40, 0.08);
+}
+
 .task-visual-shot-select-button {
   min-width: 102px;
   transition:
@@ -1906,6 +1911,41 @@ textarea {
 .task-visual-shot-recommended {
   color: #2f8f12;
   font-weight: 600;
+}
+
+.task-visual-shot-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b35b00;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.task-visual-shot-regeneration-reason {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(245, 133, 40, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 247, 237, 0.88);
+  color: #7c4a17;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.task-visual-shot-regeneration-reason strong {
+  color: #9a4b00;
+  font-size: 12px;
+}
+
+.task-visual-shot-regeneration-reason ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
 }
 
 .task-visual-shot-candidate-empty {

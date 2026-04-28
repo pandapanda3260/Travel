@@ -674,7 +674,7 @@ export async function generateTaskVisualImageShot(input: {
       const candidateId = randomUUID();
       const { bytes, contentType, originalUrl } = await fetchAssetBytes(asset);
       const extension = detectImageExtension(bytes, contentType);
-      const filePath = join(shotDir, `${candidateId}.${extension}`);
+      const filePath = join(/* turbopackIgnore: true */ shotDir, `${candidateId}.${extension}`);
       writeFileSync(filePath, bytes);
       const dimensions = getImageDimensions(bytes);
       const byteSize = bytes.byteLength;
@@ -970,7 +970,7 @@ export async function uploadTaskVisualImage(input: {
   const originalId = randomUUID();
   const originalExt =
     resizedBuffer !== input.imageBuffer ? "jpg" : detectImageExtension(input.imageBuffer, input.contentType);
-  writeFileSync(join(shotDir, `${originalId}.${originalExt}`), resizedBuffer);
+  writeFileSync(join(/* turbopackIgnore: true */ shotDir, `${originalId}.${originalExt}`), resizedBuffer);
   const originalDim = getImageDimensions(resizedBuffer);
   const originalSize = resizedBuffer.byteLength;
   const originalPixels =
