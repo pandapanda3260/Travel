@@ -334,7 +334,6 @@ export default function VoiceManagementPageClient({
   const [squareTimbres, setSquareTimbres] = useState<TimbreItem[]>(initialData.squarePage.items);
   const [squarePagination, setSquarePagination] = useState<VoiceSquarePagination>(initialData.squarePage.pagination);
   const [squareSearchKeyword, setSquareSearchKeyword] = useState(initialData.squarePage.keyword);
-  const [squarePage, setSquarePage] = useState(initialData.squarePage.pagination.page);
   const deferredSquareSearchKeyword = useDeferredValue(squareSearchKeyword);
   const [favoriteTimbres, setFavoriteTimbres] = useState<TimbreItem[]>(initialData.favoriteTimbres);
   const [favoriteSearchKeyword, setFavoriteSearchKeyword] = useState("");
@@ -391,15 +390,15 @@ export default function VoiceManagementPageClient({
     });
   }, [initialData.membership, initialError, loadBaseData]);
 
-  const loadSquarePage = useCallback(async (keyword: string, page: number) => {
+  const loadSquareVoices = useCallback(async (keyword: string) => {
     setIsSquareLoading(true);
     try {
       const params = new URLSearchParams();
-      params.set("page", String(page));
       if (keyword.trim()) {
         params.set("q", keyword.trim());
       }
-      const response = await fetch(`/api/voice-management/search?${params.toString()}`, { cache: "no-store" });
+      const query = params.toString();
+      const response = await fetch(`/api/voice-management/search${query ? `?${query}` : ""}`, { cache: "no-store" });
       const data = (await response.json()) as {
         items: TimbreItem[];
         pagination: VoiceSquarePagination;
@@ -410,7 +409,6 @@ export default function VoiceManagementPageClient({
       }
       setSquareTimbres(data.items ?? []);
       setSquarePagination(data.pagination);
-      setSquarePage(data.pagination?.page ?? page);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "音色广场加载失败");
@@ -424,8 +422,8 @@ export default function VoiceManagementPageClient({
       skipInitialSquareFetchRef.current = false;
       return;
     }
-    void loadSquarePage(deferredSquareSearchKeyword, squarePage);
-  }, [deferredSquareSearchKeyword, loadSquarePage, squarePage]);
+    void loadSquareVoices(deferredSquareSearchKeyword);
+  }, [deferredSquareSearchKeyword, loadSquareVoices]);
 
   const activeClonedVoices = useMemo(() => {
     return clonedVoices.filter((v) => v.status === "SUCCESS" || v.status === "ACTIVE");
@@ -454,23 +452,13 @@ export default function VoiceManagementPageClient({
       .filter(Boolean) as Array<{ type: "timbre" | "clone"; item: TimbreItem | ClonedVoiceRecord; speakerId: string }>;
   }, [activeClonedVoices, favoriteIds, favoriteSearchKeyword, favoriteTimbres]);
 
-  const squarePagedItems = useMemo(() => {
+  const squareRows = useMemo(() => {
     return buildVoiceRows(squareTimbres);
   }, [squareTimbres]);
 
   const clonedVoiceRows = useMemo(() => buildVoiceRows(clonedVoices), [clonedVoices]);
 
   const favoriteRows = useMemo(() => buildVoiceRows(favoriteItems), [favoriteItems]);
-
-  const squarePageInfo = useMemo(() => {
-    const totalPages = Math.max(1, squarePagination.totalPages || 1);
-    const currentPage = Math.min(Math.max(1, squarePage), totalPages);
-    return {
-      currentPage,
-      totalPages,
-      totalCount: squarePagination.totalCount,
-    };
-  }, [squarePage, squarePagination.totalCount, squarePagination.totalPages]);
 
   async function toggleFavorite(speakerId: string, sourceItem?: TimbreItem | ClonedVoiceRecord) {
     const isFav = favoriteIds.has(speakerId);
@@ -1136,10 +1124,7 @@ export default function VoiceManagementPageClient({
                   </span>
                   <input
                     value={squareSearchKeyword}
-                    onChange={(event) => {
-                      setSquareSearchKeyword(event.target.value);
-                      setSquarePage(1);
-                    }}
+                    onChange={(event) => setSquareSearchKeyword(event.target.value)}
                     placeholder="在音色库中搜索音色名称或音色ID"
                   />
                 </div>
@@ -1150,10 +1135,7 @@ export default function VoiceManagementPageClient({
                       className="voice-search-back-btn"
                       type="button"
                       aria-label="清空搜索"
-                      onClick={() => {
-                        setSquareSearchKeyword("");
-                        setSquarePage(1);
-                      }}
+                      onClick={() => setSquareSearchKeyword("")}
                     >
                       <ArrowLeftIcon />
                     </button>
@@ -1163,14 +1145,13 @@ export default function VoiceManagementPageClient({
 
                 <div style={{ padding: "0 0 10px" }}>
                   <span className="voice-count-label">
-                    {squarePageInfo.totalCount} 个音色 · 第 {squarePageInfo.currentPage} / {squarePageInfo.totalPages} 页
-                    {isSquareLoading ? " · 更新中…" : ""}
+                    {squarePagination.totalCount} 个音色{isSquareLoading ? " · 更新中…" : ""}
                   </span>
                 </div>
 
                 {squareTimbres.length > 0 ? (
                   <div className="voice-grid-board">
-                    {squarePagedItems.map((row, rowIndex) => (
+                    {squareRows.map((row, rowIndex) => (
                       <div key={rowIndex} className="voice-grid-row">
                         {row.map((item) => renderTimbreCard(item))}
                       </div>
@@ -1185,29 +1166,6 @@ export default function VoiceManagementPageClient({
                         : "当前没有可显示的音色"}
                   </div>
                 )}
-
-                {squarePageInfo.totalPages > 1 ? (
-                  <div className="voice-pagination">
-                    <div className="composition-pagination">
-                      <button
-                        className="btn-secondary small btn-pagination"
-                        type="button"
-                        disabled={squarePageInfo.currentPage <= 1 || isSquareLoading}
-                        onClick={() => setSquarePage((current) => Math.max(1, current - 1))}
-                      >
-                        上一页
-                      </button>
-                      <button
-                        className="btn-secondary small btn-pagination"
-                        type="button"
-                        disabled={squarePageInfo.currentPage >= squarePageInfo.totalPages || isSquareLoading}
-                        onClick={() => setSquarePage((current) => Math.min(squarePageInfo.totalPages, current + 1))}
-                      >
-                        下一页
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
               </>
             )}
 

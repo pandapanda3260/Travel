@@ -7,6 +7,7 @@ import {
 import type { VideoMaterialRecord } from "./video-material-store";
 import type {
   HotelAssetSceneType,
+  CommercialBeatPhase,
   ShotGenerationMode,
   ShotPlan,
   ShotPlanItem,
@@ -23,6 +24,9 @@ type HotelStoryBeat = {
   sellingPointTags: string[];
   narrationHint: string;
   functionTag: string;
+  commercialPhase: CommercialBeatPhase;
+  commercialIntent: string;
+  evidenceTarget: string;
   isAtmosphereInsert: boolean;
 };
 
@@ -48,105 +52,132 @@ const defaultStoryBeatTemplates: HotelStoryBeat[] = [
     cameraMovement: "缓慢推进",
     rhythm: "起势",
     mood: "欢迎感",
-    sellingPointTags: ["到达感", "门头辨识度", "酒店气质"],
-    narrationHint: "先把这家酒店的到达感和第一眼气质立住",
+    sellingPointTags: ["全新开业", "亲子/度假定位", "第一眼吸引"],
+    narrationHint: "开场直接抛出地域、人群和最大停留理由，不慢铺垫",
     functionTag: "hero_opening",
+    commercialPhase: "attention_hook",
+    commercialIntent: "3 秒内让目标用户知道这条视频和自己有关，并愿意继续看",
+    evidenceTarget: "地域/人群/强利益钩子",
     isAtmosphereInsert: false,
   },
   {
     sceneCandidates: ["lobby"],
-    goal: "建立大堂与公共区域品质感",
+    goal: "确认品牌、地点和真实空间",
     shotScale: "wide",
     cameraMovement: "平稳横移",
     rhythm: "展开",
     mood: "品质感",
-    sellingPointTags: ["公区设计", "入住氛围", "空间感"],
-    narrationHint: "把公共区域的空间感和第一印象讲清楚",
+    sellingPointTags: ["品牌识别", "项目位置", "真实空间"],
+    narrationHint: "快速讲清这是谁、在哪、靠不靠谱",
     functionTag: "arrival_space",
+    commercialPhase: "identity_confirmation",
+    commercialIntent: "让用户明确品牌/酒店/地点，建立真实感和信任感",
+    evidenceTarget: "品牌和地点身份",
     isAtmosphereInsert: false,
   },
   {
-    sceneCandidates: ["room"],
-    goal: "展示核心房型与入住体验",
+    sceneCandidates: ["room", "exterior", "facility"],
+    goal: "前置开业、套餐或促销机会",
     shotScale: "wide",
     cameraMovement: "自然推进",
-    rhythm: "核心展示",
-    mood: "舒适感",
-    sellingPointTags: ["房型", "空间布局", "入住舒适度"],
-    narrationHint: "把最核心的房型体验和空间布局交代清楚",
+    rhythm: "机会抛出",
+    mood: "紧迫感",
+    sellingPointTags: ["开业大促", "限时机会", "先囤"],
+    narrationHint: "把开业大促、低价房券或限时机会提前说出来",
     functionTag: "room_core",
+    commercialPhase: "opportunity_offer",
+    commercialIntent: "让用户知道为什么现在值得继续看或先囤",
+    evidenceTarget: "开业/促销/稀缺机会",
     isAtmosphereInsert: false,
   },
   {
-    sceneCandidates: ["bathroom", "service_detail"],
-    goal: "补足清洁度与细节体验",
+    sceneCandidates: ["room", "dining", "food"],
+    goal: "明确套餐、价格、房型或核心权益",
     shotScale: "close",
     cameraMovement: "细节推近",
-    rhythm: "细节补充",
-    mood: "安心感",
-    sellingPointTags: ["洗浴体验", "清洁感", "细节完成度"],
-    narrationHint: "把卫浴或细节体验补充出来，增强真实感",
+    rhythm: "核心利益",
+    mood: "划算感",
+    sellingPointTags: ["套餐内容", "一价全包", "住宿餐饮"],
+    narrationHint: "把价格、晚数、含吃含住含玩等核心利益讲清楚",
     functionTag: "detail_support",
+    commercialPhase: "core_benefit",
+    commercialIntent: "让用户明确这份套餐或体验具体给到什么",
+    evidenceTarget: "价格/套餐/核心利益",
     isAtmosphereInsert: false,
   },
   {
     sceneCandidates: ["dining", "food", "facility"],
-    goal: "展示餐饮或配套体验",
+    goal: "连续展示餐饮和配套权益",
     shotScale: "medium",
     cameraMovement: "轻微扫拍",
-    rhythm: "丰富卖点",
+    rhythm: "权益堆叠",
     mood: "体验感",
-    sellingPointTags: ["餐饮", "早餐", "配套体验"],
-    narrationHint: "把餐饮或配套体验带出来，增强转化信息",
+    sellingPointTags: ["早餐", "正餐", "配套体验"],
+    narrationHint: "用短句密集给出早餐、正餐、配套等具体权益",
     functionTag: "amenity_showcase",
+    commercialPhase: "benefit_stack",
+    commercialIntent: "让用户感觉权益密度高、东西多、很值",
+    evidenceTarget: "餐饮/配套权益",
     isAtmosphereInsert: false,
   },
   {
     sceneCandidates: ["facility", "neighborhood"],
-    goal: "延展酒店配套与可玩性",
+    goal: "继续证明亲子、玩乐或周边权益",
     shotScale: "wide",
     cameraMovement: "稳定推进",
-    rhythm: "延展",
+    rhythm: "权益加码",
     mood: "丰富感",
-    sellingPointTags: ["泳池健身", "公共设施", "停留价值"],
-    narrationHint: "把配套价值说得更完整，不只停留在房间",
+    sellingPointTags: ["儿童乐园", "运动娱乐", "周边权益"],
+    narrationHint: "继续加码儿童乐园、俱乐部、课程、门票等可感知权益",
     functionTag: "facility_extension",
+    commercialPhase: "benefit_stack",
+    commercialIntent: "用多个实拍权益镜头扩大价值感",
+    evidenceTarget: "玩乐/亲子/周边权益",
     isAtmosphereInsert: false,
   },
   {
     sceneCandidates: ["service_detail", "food", "bathroom"],
-    goal: "放大真实可感知的服务细节",
+    goal: "用服务或细节镜头做真实性证明",
     shotScale: "detail",
     cameraMovement: "微距推近",
     rhythm: "精细化",
     mood: "被照顾感",
-    sellingPointTags: ["服务细节", "欢迎礼", "体验完成度"],
-    narrationHint: "通过真实细节把这家酒店和普通住宿区分开",
+    sellingPointTags: ["真实证明", "服务细节", "体验完成度"],
+    narrationHint: "让画面证明口播利益点，不要只空说划算",
     functionTag: "service_detail",
+    commercialPhase: "evidence_proof",
+    commercialIntent: "让每个核心利益都有可见证据",
+    evidenceTarget: "真实服务/细节证明",
     isAtmosphereInsert: false,
   },
   {
     sceneCandidates: ["neighborhood", "atmosphere", "exterior"],
-    goal: "交代区位与周边环境",
+    goal: "用位置、原价、品牌或环境完成价值锚定",
     shotScale: "wide",
     cameraMovement: "缓慢拉远",
-    rhythm: "收束前铺垫",
+    rhythm: "价值锚定",
     mood: "松弛感",
-    sellingPointTags: ["区位", "周边环境", "目的地氛围"],
-    narrationHint: "顺手把周边环境和目的地氛围补出来",
+    sellingPointTags: ["区位", "原价对比", "品牌价值"],
+    narrationHint: "用平日价格、品牌、位置或环境解释为什么这次划算",
     functionTag: "location_extension",
+    commercialPhase: "value_anchor",
+    commercialIntent: "把便宜变成有理由的划算，而不是单纯低价",
+    evidenceTarget: "原价/品牌/区位价值",
     isAtmosphereInsert: true,
   },
   {
     sceneCandidates: ["atmosphere", "room", "exterior"],
-    goal: "用氛围镜头收束整条视频",
+    goal: "解除风险并完成行动收口",
     shotScale: "medium",
     cameraMovement: "轻柔定帧推进",
     rhythm: "收尾",
     mood: "记忆点",
-    sellingPointTags: ["入住氛围", "记忆点", "收尾情绪"],
-    narrationHint: "最后用氛围感把这次入住体验收住",
+    sellingPointTags: ["可退", "有效期", "行动引导"],
+    narrationHint: "最后补不约可退、有效期或刷到先囤这类行动理由",
     functionTag: "closing_atmosphere",
+    commercialPhase: "action_close",
+    commercialIntent: "解决犹豫并告诉用户现在该做什么",
+    evidenceTarget: "风险解除/行动引导",
     isAtmosphereInsert: true,
   },
 ];
@@ -259,6 +290,9 @@ function buildBeatSequence(shotCount: number) {
       sellingPointTags: ["体验补充", "真实入住", "中段节奏"],
       narrationHint: "用真实体验镜头把中段内容补齐",
       functionTag: "generic",
+      commercialPhase: "evidence_proof",
+      commercialIntent: "用补充镜头继续证明前面提出的权益或体验价值",
+      evidenceTarget: "中段体验补充证明",
       isAtmosphereInsert: false,
     });
   }
@@ -300,13 +334,23 @@ function pickCandidateForBeat(input: {
   previousOrderHint?: number | null;
 }) {
   let eligibleCandidates = input.sceneCandidates.flatMap((sceneType) => input.groupedCandidates[sceneType] ?? []);
-  if (!eligibleCandidates.length && input.workflowKind === "captured_material_first") {
-    eligibleCandidates = input.allCandidates.filter((candidate) => candidate.sourceKind === "reference_video_shot");
-  }
   if (!eligibleCandidates.length) {
-    eligibleCandidates = input.allCandidates;
+    return null;
   }
-  if (!eligibleCandidates.length) {
+  if (input.workflowKind === "captured_material_first") {
+    const unusedReferenceVideoCandidates = eligibleCandidates.filter(
+      (candidate) =>
+        candidate.sourceKind === "reference_video_shot" && (input.usedAssetCount.get(candidate.candidateId) ?? 0) === 0,
+    );
+    if (unusedReferenceVideoCandidates.length > 0) {
+      eligibleCandidates = unusedReferenceVideoCandidates;
+    }
+  }
+
+  const unusedCandidates = eligibleCandidates.filter((candidate) => (input.usedAssetCount.get(candidate.candidateId) ?? 0) === 0);
+  if (unusedCandidates.length > 0) {
+    eligibleCandidates = unusedCandidates;
+  } else {
     return null;
   }
 
@@ -458,9 +502,17 @@ function applyBeatToShot(
     action: beat.goal,
     emotion: beat.mood,
     cameraMovement: candidate?.cameraMovement || beat.cameraMovement,
-    functionTag: shot.functionTag || beat.functionTag,
-    sellingPointType: shot.sellingPointType || beat.sellingPointTags[0] || shot.sellingPointType,
-    shotScale: candidate?.recommendedShotScale || beat.shotScale,
+      functionTag: shot.functionTag || beat.functionTag,
+      sellingPointType: shot.sellingPointType || beat.sellingPointTags[0] || shot.sellingPointType,
+      commercialPhase: shot.commercialPhase ?? beat.commercialPhase,
+      commercialIntent: shot.commercialIntent ?? beat.commercialIntent,
+      evidenceTarget: shot.evidenceTarget ?? beat.evidenceTarget,
+      conversionRole:
+        shot.conversionRole ??
+        (beat.commercialPhase === "risk_reversal" || beat.commercialPhase === "action_close"
+          ? beat.commercialIntent
+          : null),
+      shotScale: candidate?.recommendedShotScale || beat.shotScale,
     compositionHint: candidate?.compositionType || beat.goal,
     rhythmTag: beat.rhythm,
     mood: beat.mood,

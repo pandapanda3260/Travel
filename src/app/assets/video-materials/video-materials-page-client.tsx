@@ -338,7 +338,9 @@ export default function VideoMaterialsPageClient({
   const [editingMaterialName, setEditingMaterialName] = useState("");
   const [savingMaterialNameId, setSavingMaterialNameId] = useState("");
   const [copiedMaterialId, setCopiedMaterialId] = useState("");
+  const [manualCopyMaterialId, setManualCopyMaterialId] = useState("");
   const copiedTimerRef = useRef<number | null>(null);
+  const manualCopyInputRef = useRef<HTMLInputElement | null>(null);
   const skipNameSaveRef = useRef(false);
 
   const selectedMaterialSummary =
@@ -370,6 +372,17 @@ export default function VideoMaterialsPageClient({
     0,
   );
   const previewVideoTimecode = useVideoTimecode(selectedMaterial?.videoFileUrl ?? null);
+
+  useEffect(() => {
+    if (!manualCopyMaterialId) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      manualCopyInputRef.current?.focus();
+      manualCopyInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [manualCopyMaterialId]);
 
   useEffect(() => {
     if (!previewImageId) {
@@ -618,7 +631,7 @@ export default function VideoMaterialsPageClient({
       copiedTimerRef.current = window.setTimeout(() => setCopiedMaterialId(""), 1200);
     } catch (copyError) {
       console.warn("复制素材 ID 失败", copyError);
-      window.alert("复制失败，请稍后重试");
+      setManualCopyMaterialId(materialId);
     }
   }, []);
 
@@ -866,6 +879,26 @@ export default function VideoMaterialsPageClient({
         </section>
 
         <section className="voice-page-stack">
+          {manualCopyMaterialId ? (
+            <div className="vm-copy-fallback-layer" role="presentation">
+              <section className="vm-copy-fallback-dialog" role="dialog" aria-modal="true" aria-labelledby="vm-copy-title">
+                <div className="vm-copy-fallback-copy">
+                  <strong id="vm-copy-title">当前浏览器限制自动复制</strong>
+                  <span>已为你选中素材 ID，可直接按 Cmd+C 手动复制。</span>
+                </div>
+                <input
+                  ref={manualCopyInputRef}
+                  className="vm-copy-fallback-input"
+                  value={manualCopyMaterialId}
+                  readOnly
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+                <button className="btn-secondary small" type="button" onClick={() => setManualCopyMaterialId("")}>
+                  关闭
+                </button>
+              </section>
+            </div>
+          ) : null}
           {error ? <div className="error-box">{error}</div> : null}
 
           <div className="dashboard-grid generation-tasks-grid product-archive-dashboard">

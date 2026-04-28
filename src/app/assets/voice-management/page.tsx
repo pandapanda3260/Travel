@@ -2,8 +2,6 @@ import { requireUserPageSession } from "../../../lib/auth-session";
 import { getVoiceManagementRuntime } from "../../../lib/voice-management-config";
 import VoiceManagementPageClient, { type VoiceManagementInitialData } from "./voice-management-page-client";
 
-const TIMBRE_PAGE_SIZE = 9;
-
 function buildVoiceRuntimePayload() {
   const runtime = getVoiceManagementRuntime();
   return {
@@ -29,7 +27,7 @@ function buildEmptyPayload(): VoiceManagementInitialData {
       keyword: "",
       pagination: {
         page: 1,
-        pageSize: TIMBRE_PAGE_SIZE,
+        pageSize: 0,
         totalCount: 0,
         totalPages: 1,
       },

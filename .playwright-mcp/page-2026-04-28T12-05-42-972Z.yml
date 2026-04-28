@@ -1,0 +1,655 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - complementary [ref=e3]:
+      - generic [ref=e4]:
+        - generic [ref=e5]: AI
+        - generic [ref=e6]:
+          - strong [ref=e7]: 任务工作台
+          - generic [ref=e8]: Hospitality AI Studio
+      - navigation "全局导航" [ref=e9]:
+        - link "概览页" [ref=e12] [cursor=pointer]:
+          - /url: /overview
+          - generic [ref=e14]: 概览页
+        - generic [ref=e15]:
+          - paragraph [ref=e16]: 内容创作
+          - generic [ref=e17]:
+            - link "实拍素材成片" [ref=e18] [cursor=pointer]:
+              - /url: /studio/task-creation/real-photo-video
+              - generic [ref=e20]: 实拍素材成片
+            - link "AI 素材成片" [ref=e21] [cursor=pointer]:
+              - /url: /studio/task-creation/ai-image-video
+              - generic [ref=e23]: AI 素材成片
+            - link "快速生成" [ref=e24] [cursor=pointer]:
+              - /url: /studio/video-generation
+              - generic [ref=e26]: 快速生成
+        - generic [ref=e27]:
+          - paragraph [ref=e28]: 模型定制
+          - link "人物模型" [ref=e30] [cursor=pointer]:
+            - /url: /models/character
+            - generic [ref=e32]: 人物模型
+        - generic [ref=e33]:
+          - paragraph [ref=e34]: 素材管理
+          - generic [ref=e35]:
+            - link "商品信息" [ref=e36] [cursor=pointer]:
+              - /url: /assets/product-info
+              - generic [ref=e38]: 商品信息
+            - link "音色管理" [ref=e39] [cursor=pointer]:
+              - /url: /assets/voice-management
+              - generic [ref=e41]: 音色管理
+            - link "视频拆解" [ref=e42] [cursor=pointer]:
+              - /url: /assets/video-materials
+              - generic [ref=e44]: 视频拆解
+        - generic [ref=e45]:
+          - paragraph [ref=e46]: 系统设置
+          - generic [ref=e47]:
+            - link "参数设置" [ref=e48] [cursor=pointer]:
+              - /url: /settings/parameter-settings
+              - generic [ref=e50]: 参数设置
+            - link "会员中心" [ref=e51] [cursor=pointer]:
+              - /url: /settings/membership
+              - generic [ref=e53]: 会员中心
+            - link "用量账单" [ref=e54] [cursor=pointer]:
+              - /url: /settings/usage
+              - generic [ref=e56]: 用量账单
+            - link "账号管理" [ref=e57] [cursor=pointer]:
+              - /url: /settings/account
+              - generic [ref=e59]: 账号管理
+      - button "Mark L5 会员" [ref=e61] [cursor=pointer]:
+        - generic [ref=e62]: M
+        - generic [ref=e63]:
+          - strong [ref=e64]: Mark
+          - generic [ref=e65]: L5 会员
+        - img [ref=e67]
+    - main [ref=e70]:
+      - generic [ref=e71]:
+        - generic [ref=e72]:
+          - generic [ref=e75]:
+            - generic [ref=e76]: AI
+            - heading "实拍素材成片" [level=2] [ref=e78]
+          - generic [ref=e79]:
+            - generic [ref=e80]:
+              - strong [ref=e81]: 实拍素材成片
+              - generic [ref=e82]: 从实拍图片或实拍视频素材出发，先绑定真实素材镜头，再生成视频。
+            - button "创建新的任务" [ref=e83] [cursor=pointer]:
+              - generic [ref=e84]: 创建新的任务
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - generic [ref=e87]:
+              - generic [ref=e88]:
+                - generic [ref=e89]:
+                  - paragraph [ref=e90]: 实拍素材成片
+                  - heading "实拍素材成片列表" [level=3] [ref=e91]
+                - generic [ref=e92]: 2 条记录
+              - table [ref=e94]:
+                - rowgroup [ref=e95]:
+                  - row "任务 ID 任务名称 类型 状态 创建时间 操作" [ref=e96]:
+                    - columnheader "任务 ID" [ref=e97]
+                    - columnheader "任务名称" [ref=e98]
+                    - columnheader "类型" [ref=e99]
+                    - columnheader "状态" [ref=e100]
+                    - columnheader "创建时间" [ref=e101]
+                    - columnheader "操作" [ref=e102]
+                - rowgroup [ref=e103]:
+                  - row "a39e20d2... 复制任务 ID clubmed 实拍素材成片 生成完成 2026/4/26 17:59:19 查看 删除" [ref=e104]:
+                    - cell "a39e20d2... 复制任务 ID" [ref=e105]:
+                      - generic [ref=e106]:
+                        - generic [ref=e107]: a39e20d2...
+                        - button "复制任务 ID" [ref=e108] [cursor=pointer]:
+                          - img [ref=e109]
+                    - cell "clubmed" [ref=e112]
+                    - cell "实拍素材成片" [ref=e113]:
+                      - generic [ref=e114]: 实拍素材成片
+                    - cell "生成完成" [ref=e115]:
+                      - generic [ref=e116]: 生成完成
+                    - cell "2026/4/26 17:59:19" [ref=e117]:
+                      - generic [ref=e118]: 2026/4/26
+                      - strong [ref=e119]: 17:59:19
+                    - cell "查看 删除" [ref=e120]:
+                      - generic [ref=e121]:
+                        - button "查看" [ref=e122] [cursor=pointer]
+                        - button "删除" [ref=e123] [cursor=pointer]
+                  - row "8467a599... 复制任务 ID 旅行社 待生成 任务已创建 2026/4/25 14:04:00 查看 删除" [ref=e124]:
+                    - cell "8467a599... 复制任务 ID" [ref=e125]:
+                      - generic [ref=e126]:
+                        - generic [ref=e127]: 8467a599...
+                        - button "复制任务 ID" [ref=e128] [cursor=pointer]:
+                          - img [ref=e129]
+                    - cell "旅行社" [ref=e132]
+                    - cell "待生成" [ref=e133]:
+                      - generic [ref=e134]: 待生成
+                    - cell "任务已创建" [ref=e135]:
+                      - generic [ref=e136]: 任务已创建
+                    - cell "2026/4/25 14:04:00" [ref=e137]:
+                      - generic [ref=e138]: 2026/4/25
+                      - strong [ref=e139]: 14:04:00
+                    - cell "查看 删除" [ref=e140]:
+                      - generic [ref=e141]:
+                        - button "查看" [ref=e142] [cursor=pointer]
+                        - button "删除" [ref=e143] [cursor=pointer]
+            - generic [ref=e144]:
+              - generic [ref=e145]:
+                - generic [ref=e146]:
+                  - paragraph [ref=e147]: 实拍视频结果
+                  - heading "实拍成片预览" [level=3] [ref=e148]
+                - link "下载视频" [ref=e150] [cursor=pointer]:
+                  - /url: /generated-compositions/a39e20d2-8ad9-425b-9306-f40714622830/004ed75f-28f2-4b21-a66b-05b6be9b56fc.mp4
+              - generic [ref=e151]:
+                - generic [ref=e152]:
+                  - generic: 0:00/0:00
+                - generic [ref=e154]:
+                  - paragraph [ref=e156]: 视频参数
+                  - generic [ref=e157]:
+                    - generic [ref=e158]:
+                      - generic [ref=e159]: 时长
+                      - strong [ref=e160]: 45 秒
+                    - generic [ref=e161]:
+                      - generic [ref=e162]: 存储
+                      - strong [ref=e163]: 已生成
+                    - generic [ref=e164]:
+                      - generic [ref=e165]: 比例
+                      - strong [ref=e166]: 9:16 竖版
+                    - generic [ref=e167]:
+                      - generic [ref=e168]: 原生音频
+                      - strong [ref=e169]: 开启
+                    - generic [ref=e170]:
+                      - generic [ref=e171]: Prompt
+                      - strong [ref=e172]: 382 字
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - generic [ref=e176]: 生产流水线
+              - generic "整体进度 · 100%" [ref=e177]:
+                - generic [ref=e178]: 整体进度 · 100%
+            - generic [ref=e179]:
+              - generic [ref=e181]:
+                - img [ref=e184]
+                - generic [ref=e187]:
+                  - generic [ref=e188]: 镜头计划
+                  - generic [ref=e189]: 已完成
+              - generic [ref=e191]:
+                - img [ref=e194]
+                - generic [ref=e197]:
+                  - generic [ref=e198]: 字幕音频
+                  - generic [ref=e199]: 已完成
+              - generic [ref=e201]:
+                - img [ref=e204]
+                - generic [ref=e207]:
+                  - generic [ref=e208]: 素材镜头
+                  - generic [ref=e209]: 已完成
+              - generic [ref=e211]:
+                - img [ref=e214]
+                - generic [ref=e217]:
+                  - generic [ref=e218]: 视频片段
+                  - generic [ref=e219]: 已完成
+              - generic [ref=e221]:
+                - img [ref=e224]
+                - generic [ref=e226]:
+                  - generic [ref=e227]: 成片合成
+                  - generic [ref=e228]: 已完成
+            - generic [ref=e229]:
+              - generic [ref=e230]:
+                - generic [ref=e231]: 口播/字幕草稿
+                - strong [ref=e232]: 已填写 · 200 字
+              - generic [ref=e233]:
+                - generic [ref=e234]: 分段音频就绪
+                - strong [ref=e235]: 0/9 段
+              - generic [ref=e236]:
+                - generic [ref=e237]: 素材候选覆盖
+                - strong [ref=e238]: 0/20 镜
+              - generic [ref=e239]:
+                - generic [ref=e240]: 确认素材镜头
+                - strong [ref=e241]: 0/20 镜
+              - generic [ref=e242]:
+                - generic [ref=e243]: 素材镜头绑定
+                - strong [ref=e244]: 0/9 段
+              - generic [ref=e245]:
+                - generic [ref=e246]: 可用视频片段
+                - strong [ref=e247]: 0/9 段
+              - generic [ref=e248]:
+                - generic [ref=e249]: 实拍驱动镜头
+                - strong [ref=e250]: 17/20 镜
+              - generic [ref=e251]:
+                - generic [ref=e252]: AI 补镜头
+                - strong [ref=e253]: 3/20 镜
+          - generic [ref=e254]:
+            - generic [ref=e256]:
+              - paragraph [ref=e257]: 任务详情
+              - heading "实拍素材成片详情" [level=3] [ref=e258]
+            - generic [ref=e259]:
+              - generic [ref=e260]:
+                - generic [ref=e261]:
+                  - heading "第一步：素材与任务信息" [level=3] [ref=e263]
+                  - generic [ref=e264]: 状态加载中
+                - generic [ref=e266]:
+                  - generic [ref=e267]:
+                    - generic [ref=e268]:
+                      - generic [ref=e269]: 任务名称
+                      - textbox "任务名称" [ref=e270] [cursor=pointer]:
+                        - /placeholder: 输入任务名称
+                    - generic [ref=e271]:
+                      - generic [ref=e272]: 选择酒店/商品信息
+                      - combobox "选择酒店/商品信息" [ref=e273] [cursor=pointer]:
+                        - option "请选择酒店/商品信息" [selected]
+                        - option "ClubMed 开业"
+                        - option "大连般佈酒店（东港威"
+                        - option "北京亚朵品牌5天4晚"
+                  - generic [ref=e274]:
+                    - generic [ref=e275]:
+                      - generic [ref=e276]: 视频类型
+                      - combobox "视频类型" [ref=e277] [cursor=pointer]:
+                        - option "酒店-探店-漫游旁白" [selected]
+                    - generic [ref=e278]:
+                      - generic [ref=e279]: 选择实拍/参考视频素材（可选）
+                      - combobox "选择实拍/参考视频素材（可选）" [ref=e280] [cursor=pointer]:
+                        - option "不使用实拍/参考视频素材" [selected]
+                        - option "299啊就能在东…"
+                        - option "哈尔滨波塞冬海底…"
+                        - option "大品牌1000多…"
+                        - option "入住会先戴上手环…"
+                        - option "带家人花小钱住进…"
+                        - option "重庆渝中半岛压轴…"
+                        - option "北京玩5天有接送…"
+                        - option "第一次来北京很多…"
+                        - option "ClubMed"
+                        - option "299啊就能住三…"
+                        - option "这次北京很多人第…"
+                    - generic [ref=e281]:
+                      - generic [ref=e282]: 期望视频时长
+                      - combobox "期望视频时长" [ref=e283] [cursor=pointer]:
+                        - option "15～25 秒" [selected]
+                        - option "25～35 秒"
+                        - option "35～60 秒"
+                    - generic [ref=e284]:
+                      - generic [ref=e285]: 画面比例
+                      - combobox "画面比例" [ref=e286] [cursor=pointer]:
+                        - option "16:9"
+                        - option "9:16" [selected]
+                        - option "1:1"
+                  - generic [ref=e287]:
+                    - generic [ref=e288]:
+                      - generic [ref=e289]: 输入实拍素材使用要求
+                      - textbox "输入实拍素材使用要求" [ref=e290]:
+                        - /placeholder: 输入希望强调的房型、设施、动线、真实场景或剪辑节奏。
+                    - generic [ref=e291]:
+                      - generic [ref=e292]:
+                        - generic [ref=e293]: 系统优化后的实拍剪辑提示词
+                        - button "系统优化后的实拍剪辑提示词" [disabled] [ref=e294] [cursor=pointer]: 优化提示词
+                      - textbox "点击“优化提示词”后生成，也可以手动修改。生成视频计划时会优先使用这里。" [ref=e295]
+                  - generic [ref=e296]:
+                    - generic [ref=e297]: 酒店实拍图片
+                    - generic [ref=e299]:
+                      - generic [ref=e300]:
+                        - strong [ref=e301]: 图片上传
+                        - generic [ref=e302]: 共 0 张图片
+                      - generic [ref=e307] [cursor=pointer]: 点击上传图片
+                - button "任务状态加载中..." [disabled] [ref=e308]:
+                  - generic [ref=e309]: 任务状态加载中...
+              - generic [ref=e310]:
+                - generic [ref=e311]:
+                  - heading "第二步：成片结构与镜头计划" [level=3] [ref=e313]
+                  - generic [ref=e314]: 加载中
+                - generic [ref=e315]:
+                  - generic [ref=e316]:
+                    - generic [ref=e317]:
+                      - generic [ref=e318]:
+                        - strong [ref=e319]: 成片结构与镜头计划展示页
+                        - generic [ref=e320]: 查看商业打法、成交节奏、素材证据绑定、台词字幕和时间参数。
+                      - generic [ref=e321]:
+                        - generic [ref=e322]: 9 个片段
+                        - generic [ref=e323]: 20 个镜头
+                        - generic [ref=e324]: 45 秒
+                      - link "详情查看与编辑" [ref=e325] [cursor=pointer]:
+                        - /url: /studio/task-creation/a39e20d2-8ad9-425b-9306-f40714622830/shot-plan
+                    - group [ref=e326]:
+                      - generic "商业故事板 · 商业故事板 ClubMed 开业将以“先抓注意力、再讲清信息、随后展开套餐/体验卖点、最后给出购买建议”的顺序组织，18 个镜头中 18 个优先承接用户实拍素材。 5 个叙事段 16/31 素材已绑定 18 个镜头映射 3 个 AI 补镜头 展开" [ref=e327] [cursor=pointer]:
+                        - generic [ref=e328]:
+                          - strong [ref=e329]: 商业故事板 · 商业故事板
+                          - generic [ref=e330]: ClubMed 开业将以“先抓注意力、再讲清信息、随后展开套餐/体验卖点、最后给出购买建议”的顺序组织，18 个镜头中 18 个优先承接用户实拍素材。
+                        - generic [ref=e331]:
+                          - generic [ref=e332]: 5 个叙事段
+                          - generic [ref=e333]: 16/31 素材已绑定
+                          - generic [ref=e334]: 18 个镜头映射
+                          - generic [ref=e335]: 3 个 AI 补镜头
+                        - generic:
+                          - generic: 展开
+                      - generic [ref=e336]:
+                        - generic [ref=e337]:
+                          - strong [ref=e338]: 待确认
+                          - generic [ref=e339]: 3 个镜头需要补充可用素材，建议先确认对应图片是否缺失。
+                        - generic [ref=e340]:
+                          - article [ref=e341]:
+                            - generic [ref=e342]:
+                              - strong [ref=e343]: 开篇钩子
+                              - generic [ref=e344]: 2.5~5.5 秒
+                            - paragraph [ref=e345]: 先把这家酒店的到达感和第一眼气质立住，重点是酒店外观与泳池
+                            - generic [ref=e347]: 镜头 1
+                          - article [ref=e348]:
+                            - generic [ref=e349]:
+                              - strong [ref=e350]: 信息建立
+                              - generic [ref=e351]: 10~15 秒
+                            - paragraph [ref=e352]: 把公共区域的空间感和第一印象讲清楚，重点是酒店大堂内的现代装饰和家具布局。
+                            - generic [ref=e354]: 镜头 2、8、16
+                          - article [ref=e355]:
+                            - generic [ref=e356]:
+                              - strong [ref=e357]: 套餐卖点讲解
+                              - generic [ref=e358]: 10~20 秒
+                            - paragraph [ref=e359]: 把最核心的房型体验和空间布局交代清楚，重点是儿童主题房间内的独特床铺设计
+                            - generic [ref=e361]: 镜头 3、6、9、10、11、12、13、14、15、17
+                          - article [ref=e362]:
+                            - generic [ref=e363]:
+                              - strong [ref=e364]: 体验展开
+                              - generic [ref=e365]: 4~8 秒
+                            - paragraph [ref=e366]: 把卫浴或细节体验补充出来，增强真实感，重点是酒店外部环境，酒店建筑，建筑细节
+                            - generic [ref=e368]: 镜头 4、7
+                          - article [ref=e369]:
+                            - generic [ref=e370]:
+                              - strong [ref=e371]: 收尾转化
+                              - generic [ref=e372]: 3~6 秒
+                            - paragraph [ref=e373]: 把餐饮或配套体验带出来，增强转化信息，重点是儿童游乐设施滑梯
+                            - generic [ref=e375]: 镜头 5、18
+                        - generic [ref=e376]:
+                          - article [ref=e377]:
+                            - generic [ref=e378]:
+                              - strong [ref=e379]: 镜头 1
+                              - generic [ref=e380]: 2.5 秒
+                            - generic [ref=e381]:
+                              - strong [ref=e382]: 商业任务 · 镜头 1
+                              - generic [ref=e383]: 先把这家酒店的到达感和第一眼气质立住
+                            - generic [ref=e384]:
+                              - generic [ref=e385]: 图片3
+                              - generic [ref=e386]: 实拍素材
+                          - article [ref=e387]:
+                            - generic [ref=e388]:
+                              - strong [ref=e389]: 镜头 2
+                              - generic [ref=e390]: 1.25 秒
+                            - generic [ref=e391]:
+                              - strong [ref=e392]: 商业任务 · 镜头 2
+                              - generic [ref=e393]: 把公共区域的空间感和第一印象讲清楚，重点是酒店大堂内的现代装饰和家具布局。
+                            - generic [ref=e394]:
+                              - generic [ref=e395]: 图片10
+                              - generic [ref=e396]: 实拍素材
+                          - article [ref=e397]:
+                            - generic [ref=e398]:
+                              - strong [ref=e399]: 镜头 3
+                              - generic [ref=e400]: 2.5 秒
+                            - generic [ref=e401]:
+                              - strong [ref=e402]: 商业任务 · 镜头 3
+                              - generic [ref=e403]: 把最核心的房型体验和空间布局交代清楚
+                            - generic [ref=e404]:
+                              - generic [ref=e405]: 图片8
+                              - generic [ref=e406]: 实拍素材
+                          - article [ref=e407]:
+                            - generic [ref=e408]:
+                              - strong [ref=e409]: 镜头 4
+                              - generic [ref=e410]: 2.5 秒
+                            - generic [ref=e411]:
+                              - strong [ref=e412]: 商业任务 · 镜头 4
+                              - generic [ref=e413]: 把卫浴或细节体验补充出来，增强真实感，重点是酒店外部环境，酒店建筑，建筑细节
+                            - generic [ref=e414]:
+                              - generic [ref=e415]: 10-13秒
+                              - generic [ref=e416]: AI 补镜头
+                          - article [ref=e417]:
+                            - generic [ref=e418]:
+                              - strong [ref=e419]: 镜头 5
+                              - generic [ref=e420]: 2.5 秒
+                            - generic [ref=e421]:
+                              - strong [ref=e422]: 商业任务 · 镜头 5
+                              - generic [ref=e423]: 把餐饮或配套体验带出来，增强转化信息
+                            - generic [ref=e424]:
+                              - generic [ref=e425]: 图片16
+                              - generic [ref=e426]: 实拍素材
+                          - article [ref=e427]:
+                            - generic [ref=e428]:
+                              - strong [ref=e429]: 镜头 6
+                              - generic [ref=e430]: 2.5 秒
+                            - generic [ref=e431]:
+                              - strong [ref=e432]: 商业任务 · 镜头 6
+                              - generic [ref=e433]: 把配套价值说得更完整，不只停留在房间，重点是儿童游乐滑梯
+                            - generic [ref=e434]:
+                              - generic [ref=e435]: 图片5
+                              - generic [ref=e436]: 实拍素材
+                          - article [ref=e437]:
+                            - generic [ref=e438]:
+                              - strong [ref=e439]: 镜头 7
+                              - generic [ref=e440]: 2.5 秒
+                            - generic [ref=e441]:
+                              - strong [ref=e442]: 商业任务 · 镜头 7
+                              - generic [ref=e443]: 通过真实细节把这家酒店和普通住宿区分开
+                            - generic [ref=e444]:
+                              - generic [ref=e445]: 10-13秒
+                              - generic [ref=e446]: AI 补镜头
+                          - article [ref=e447]:
+                            - generic [ref=e448]:
+                              - strong [ref=e449]: 镜头 8
+                              - generic [ref=e450]: 1.25 秒
+                            - generic [ref=e451]:
+                              - strong [ref=e452]: 商业任务 · 镜头 8
+                              - generic [ref=e453]: 顺手把周边环境和目的地氛围补出来，重点是茶园与湖泊的自然风光
+                            - generic [ref=e454]:
+                              - generic [ref=e455]: 图片23
+                              - generic [ref=e456]: 实拍素材
+                          - article [ref=e457]:
+                            - generic [ref=e458]:
+                              - strong [ref=e459]: 镜头 9
+                              - generic [ref=e460]: 2.5 秒
+                            - generic [ref=e461]:
+                              - strong [ref=e462]: 商业任务 · 镜头 9
+                              - generic [ref=e463]: 用真实体验镜头把中段内容补齐
+                            - generic [ref=e464]:
+                              - generic [ref=e465]: 图片28
+                              - generic [ref=e466]: 实拍素材
+                          - article [ref=e467]:
+                            - generic [ref=e468]:
+                              - strong [ref=e469]: 镜头 10
+                              - generic [ref=e470]: 2.5 秒
+                            - generic [ref=e471]:
+                              - strong [ref=e472]: 商业任务 · 镜头 10
+                              - generic [ref=e473]: 用真实体验镜头把中段内容补齐，重点是现代风格的酒店客房，带浴缸和大床
+                            - generic [ref=e474]:
+                              - generic [ref=e475]: 图片20
+                              - generic [ref=e476]: 实拍素材
+                          - article [ref=e477]:
+                            - generic [ref=e478]:
+                              - strong [ref=e479]: 镜头 11
+                              - generic [ref=e480]: 2.5 秒
+                            - generic [ref=e481]:
+                              - strong [ref=e482]: 商业任务 · 镜头 11
+                              - generic [ref=e483]: 用真实体验镜头把中段内容补齐
+                            - generic [ref=e484]:
+                              - generic [ref=e485]: 图片21
+                              - generic [ref=e486]: 实拍素材
+                          - article [ref=e487]:
+                            - generic [ref=e488]:
+                              - strong [ref=e489]: 镜头 12
+                              - generic [ref=e490]: 2.5 秒
+                            - generic [ref=e491]:
+                              - strong [ref=e492]: 商业任务 · 镜头 12
+                              - generic [ref=e493]: 用真实体验镜头把中段内容补齐，重点是小孩在酒店房间内走动
+                            - generic [ref=e494]:
+                              - generic [ref=e495]: 图片7
+                              - generic [ref=e496]: 实拍素材
+                          - article [ref=e497]:
+                            - generic [ref=e498]:
+                              - strong [ref=e499]: 镜头 13
+                              - generic [ref=e500]: 2.5 秒
+                            - generic [ref=e501]:
+                              - strong [ref=e502]: 商业任务 · 镜头 13
+                              - generic [ref=e503]: 用真实体验镜头把中段内容补齐
+                            - generic [ref=e504]:
+                              - generic [ref=e505]: 5-8秒
+                              - generic [ref=e506]: AI 补镜头
+                          - article [ref=e507]:
+                            - generic [ref=e508]:
+                              - strong [ref=e509]: 镜头 14
+                              - generic [ref=e510]: 2.5 秒
+                            - generic [ref=e511]:
+                              - strong [ref=e512]: 商业任务 · 镜头 14
+                              - generic [ref=e513]: 用真实体验镜头把中段内容补齐，重点是儿童攀岩墙
+                            - generic [ref=e514]:
+                              - generic [ref=e515]: 图片2
+                              - generic [ref=e516]: 实拍素材
+                          - article [ref=e517]:
+                            - generic [ref=e518]:
+                              - strong [ref=e519]: 镜头 15
+                              - generic [ref=e520]: 2.5 秒
+                            - generic [ref=e521]:
+                              - strong [ref=e522]: 商业任务 · 镜头 15
+                              - generic [ref=e523]: 用真实体验镜头把中段内容补齐
+                            - generic [ref=e524]:
+                              - generic [ref=e525]: 图片15
+                              - generic [ref=e526]: 实拍素材
+                          - article [ref=e527]:
+                            - generic [ref=e528]:
+                              - strong [ref=e529]: 镜头 16
+                              - generic [ref=e530]: 2.5 秒
+                            - generic [ref=e531]:
+                              - strong [ref=e532]: 商业任务 · 镜头 16
+                              - generic [ref=e533]: 用真实体验镜头把中段内容补齐，重点是舞台上的健身活动
+                            - generic [ref=e534]:
+                              - generic [ref=e535]: 图片4
+                              - generic [ref=e536]: 实拍素材
+                          - article [ref=e537]:
+                            - generic [ref=e538]:
+                              - strong [ref=e539]: 镜头 17
+                              - generic [ref=e540]: 2.5 秒
+                            - generic [ref=e541]:
+                              - strong [ref=e542]: 商业任务 · 镜头 17
+                              - generic [ref=e543]: 用真实体验镜头把中段内容补齐
+                            - generic [ref=e544]:
+                              - generic [ref=e545]: 图片6
+                              - generic [ref=e546]: 实拍素材
+                          - article [ref=e547]:
+                            - generic [ref=e548]:
+                              - strong [ref=e549]: 镜头 18
+                              - generic [ref=e550]: 2.5 秒
+                            - generic [ref=e551]:
+                              - strong [ref=e552]: 商业任务 · 镜头 18
+                              - generic [ref=e553]: 最后用氛围感把这次入住体验收住
+                            - generic [ref=e554]:
+                              - generic [ref=e555]: 图片1
+                              - generic [ref=e556]: 实拍素材
+                  - generic [ref=e557]:
+                    - generic [ref=e558]:
+                      - generic [ref=e559]: 音频参数
+                      - generic [ref=e561]:
+                        - generic [ref=e562]:
+                          - generic [ref=e563]: 全片时长（自动对齐）
+                          - textbox "全片时长（自动对齐）" [ref=e564] [cursor=pointer]: 25 秒
+                        - generic [ref=e565]:
+                          - generic [ref=e566]: 统一配音音色
+                          - combobox "统一配音音色" [ref=e567] [cursor=pointer]:
+                            - option "请先在音色管理中收藏或复刻音色" [disabled]
+                        - generic [ref=e568]:
+                          - generic [ref=e569]: 开启分段音色
+                          - combobox "开启分段音色" [ref=e570] [cursor=pointer]:
+                            - option "关闭" [selected]
+                            - option "开启"
+                    - generic [ref=e572]:
+                      - generic [ref=e574]:
+                        - generic [ref=e575]:
+                          - strong [ref=e576]: 字幕与背景音设置
+                          - button "恢复系统默认" [ref=e577] [cursor=pointer]
+                        - generic [ref=e580]:
+                          - generic [ref=e581]: 背景音乐
+                          - group "是否加入背景音乐" [ref=e582]:
+                            - button "不加入" [ref=e583]
+                            - button "加入" [ref=e584]
+                        - generic [ref=e586]:
+                          - generic [ref=e587]:
+                            - generic [ref=e588]: 字幕开关
+                            - group "字幕开关" [ref=e589]:
+                              - button "开启" [ref=e590]
+                              - button "关闭" [ref=e591]
+                          - generic [ref=e592]:
+                            - generic [ref=e593]: 样式预设
+                            - combobox "样式预设" [ref=e594]:
+                              - option "简洁白字"
+                              - option "高对比描边" [selected]
+                              - option "氛围描边"
+                              - option "底条字幕"
+                          - generic [ref=e595]:
+                            - generic [ref=e596]: 字体
+                            - combobox "字体" [ref=e597]:
+                              - option "苹方"
+                              - option "冬青黑体"
+                              - option "宋体"
+                              - option "黑体" [selected]
+                              - option "楷体"
+                          - generic [ref=e598]:
+                            - generic [ref=e599]: 显示方式
+                            - combobox "显示方式" [ref=e600]:
+                              - option "逐字显示"
+                              - option "整句显示" [selected]
+                          - generic [ref=e601]:
+                            - generic [ref=e602]: 字号
+                            - generic [ref=e603]:
+                              - generic [ref=e604]:
+                                - button "减小字幕字号" [ref=e605] [cursor=pointer]: "-"
+                                - textbox "字幕字号" [ref=e606]: "17"
+                                - generic [ref=e607]: 号
+                                - button "增大字幕字号" [ref=e608] [cursor=pointer]: +
+                              - generic [ref=e609]: 前端字号 10-20，成片约 10-40px，当前约 31px
+                          - generic [ref=e610]:
+                            - generic [ref=e611]: 描边宽度
+                            - generic [ref=e612]:
+                              - spinbutton "描边宽度 px" [ref=e613]: "0.5"
+                              - generic [ref=e614]: px
+                          - generic [ref=e615]:
+                            - generic [ref=e616]: 字幕左右位置
+                            - generic [ref=e617]:
+                              - spinbutton "字幕左右位置 % 距左边" [ref=e618]: "50"
+                              - generic [ref=e619]: "% 距左边"
+                          - generic [ref=e620]:
+                            - generic [ref=e621]: 字幕上下位置
+                            - generic [ref=e622]:
+                              - spinbutton "字幕上下位置 % 距底部" [ref=e623]: "30"
+                              - generic [ref=e624]: "% 距底部"
+                          - generic [ref=e625]:
+                            - generic [ref=e626]: 每行字数
+                            - combobox "每行字数" [ref=e627]:
+                              - option "8 字"
+                              - option "10 字"
+                              - option "12 字"
+                              - option "14 字"
+                              - option "16 字" [selected]
+                          - generic [ref=e628]:
+                            - generic [ref=e629]: 颜色
+                            - button "颜色设置" [ref=e631] [cursor=pointer]:
+                              - generic [ref=e632]: 颜色设置
+                              - generic [ref=e634]: A
+                      - complementary [ref=e636]:
+                        - generic [ref=e637]:
+                          - strong [ref=e639]: 字幕预览
+                          - generic [ref=e643]: 先把这家酒店的到达感
+                          - generic [ref=e644]:
+                            - button "上一条" [disabled] [ref=e645] [cursor=pointer]
+                            - generic [ref=e646]: 第 1 / 36 条
+                            - button "下一条" [ref=e647] [cursor=pointer]
+                - button "关键素材状态加载中..." [disabled] [ref=e648]:
+                  - generic [ref=e649]: 关键素材状态加载中...
+              - generic [ref=e650]:
+                - generic [ref=e651]:
+                  - heading "第三步：素材镜头工作台" [level=3] [ref=e653]
+                  - generic [ref=e654]: 音频/字幕已生成
+                - generic [ref=e656]:
+                  - generic [ref=e657]:
+                    - generic [ref=e658]:
+                      - strong [ref=e659]: 素材镜头确认
+                      - generic [ref=e660]: 按镜头统一确认图片/视频素材、字幕台词和候选画面。
+                    - button "视频生成状态加载中..." [disabled] [ref=e661]:
+                      - generic [ref=e662]: 视频生成状态加载中...
+                  - generic [ref=e663]: 素材镜头列表加载中…
+                - generic [ref=e664]: 完成故事板后，这里会合并处理镜头顺序、台词音频、字幕节奏和素材镜头确认。
+              - generic [ref=e665]:
+                - generic [ref=e666]:
+                  - heading "第四步：片段生成" [level=3] [ref=e668]
+                  - generic [ref=e669]: 片段已生成
+                - generic [ref=e670]: 片段结果加载中…
+              - generic [ref=e671]:
+                - generic [ref=e672]:
+                  - heading "第五步：视频合成" [level=3] [ref=e674]
+                  - generic [ref=e675]: 视频合成完成
+                - generic [ref=e676]: 合成结果加载中…
+  - button "返回页面顶部":
+    - generic: ↑
+  - button "Open Next.js Dev Tools" [ref=e682] [cursor=pointer]:
+    - img [ref=e683]

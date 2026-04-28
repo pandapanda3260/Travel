@@ -12,6 +12,7 @@ import type {
   VideoTaskParameterBundle,
   VideoTaskSource,
 } from "./video-task-schema";
+import { buildCommercialStrategyPlan } from "./commercial-video-strategy";
 
 const sceneLabelMap: Record<HotelAssetSceneType, string> = {
   exterior: "酒店外观",
@@ -36,6 +37,10 @@ function normalizeText(text: string | null | undefined) {
 }
 
 function getShotPhase(shot: ShotPlanItem, index: number, shotCount: number): StoryPhase {
+  if (shot.commercialPhase) {
+    return shot.commercialPhase;
+  }
+
   const text = [
     shot.functionTag,
     shot.purpose,
@@ -48,10 +53,25 @@ function getShotPhase(shot: ShotPlanItem, index: number, shotCount: number): Sto
     .join(" ");
 
   if (index === 0 || /(hook|hero|opening|开篇|开场|吸引)/iu.test(text)) {
-    return "opening_hook";
+    return "attention_hook";
   }
   if (index === shotCount - 1 || /(closing|收尾|转化|建议|行动)/iu.test(text)) {
-    return "closing";
+    return "action_close";
+  }
+  if (/(下周|库存|下架|涨价|开业|大促|促销|优惠|限时|先囤|刷到)/iu.test(text)) {
+    return "opportunity_offer";
+  }
+  if (/(价格|套餐|房券|一价全包|三天两晚|两晚|只要|\d+\s*(?:元|多))/iu.test(text)) {
+    return "core_benefit";
+  }
+  if (/(早餐|正餐|托管|乐园|俱乐部|门票|停车|房型|海景|权益|包含|免费|送)/iu.test(text)) {
+    return "benefit_stack";
+  }
+  if (/(平日|原价|性价比|划算|品牌|C位|茶山|位置|海景)/iu.test(text)) {
+    return "value_anchor";
+  }
+  if (/(不约|可退|随时退|有效期|周末|五一|保障)/iu.test(text)) {
+    return "risk_reversal";
   }
   if (/(促销|活动|开业|价格|优惠|权益|信息|arrival|location)/iu.test(text)) {
     return "commercial_info";
@@ -75,6 +95,90 @@ const phaseMeta: Record<
     narrationStrategy: string;
   }
 > = {
+  attention_hook: {
+    title: "停留钩子",
+    defaultGoal: "3 秒内抛出地域、目标人群或强利益，让用户停下来",
+    durationRangeLabel: "0~3 秒",
+    materialStrategy: "优先使用最有识别度的门头、外观、人物体验或强视觉素材",
+    narrationStrategy: "第一句话直接给最大停留理由，不慢铺垫，不散乱堆卖点",
+  },
+  identity_confirmation: {
+    title: "身份确认",
+    defaultGoal: "快速讲清品牌、地点和项目，建立真实感",
+    durationRangeLabel: "3~6 秒",
+    materialStrategy: "优先使用门头、标识、外观、大堂或能确认主体的画面",
+    narrationStrategy: "品牌/地点/项目名单独成句，短而清楚",
+  },
+  opportunity_offer: {
+    title: "机会抛出",
+    defaultGoal: "把开业、大促、低价、限时或库存机会前置",
+    durationRangeLabel: "5~10 秒",
+    materialStrategy: "用家庭体验、热闹设施或醒目信息画面承接机会感",
+    narrationStrategy: "直接说现在为什么值得看：开业大促、刷到先囤、后面涨价",
+  },
+  core_benefit: {
+    title: "核心利益",
+    defaultGoal: "明确价格、套餐、晚数、有效期或适用时间",
+    durationRangeLabel: "8~16 秒",
+    materialStrategy: "使用最能承接套餐价值的房间、餐饮、家庭体验画面",
+    narrationStrategy: "价格、晚数、一价全包、有效期拆成短句，保证扫读效率",
+  },
+  benefit_stack: {
+    title: "权益轰炸",
+    defaultGoal: "连续堆叠具体权益，让用户形成“很值”的判断",
+    durationRangeLabel: "14~28 秒",
+    materialStrategy: "早餐、正餐、托管、乐园、课程、门票等一镜一权益",
+    narrationStrategy: "短句密集推进，画面负责证明，字幕负责钉住关键词",
+  },
+  evidence_proof: {
+    title: "素材证明",
+    defaultGoal: "用实拍画面证明口播利益点不是空说",
+    durationRangeLabel: "全程穿插",
+    materialStrategy: "每个镜头只证明一个空间、权益或体验点",
+    narrationStrategy: "口播给结论，画面给证据，避免音画错位",
+  },
+  value_anchor: {
+    title: "价值锚定",
+    defaultGoal: "用原价、品牌、位置或稀缺性解释为什么划算",
+    durationRangeLabel: "28~35 秒",
+    materialStrategy: "使用客房、全景、区位或品质细节强化价值判断",
+    narrationStrategy: "只保留最有说服力的一两个价值锚点",
+  },
+  risk_reversal: {
+    title: "风险解除",
+    defaultGoal: "解决买错、不去或时间不合适的犹豫",
+    durationRangeLabel: "34~39 秒",
+    materialStrategy: "用稳定、安心、有品质感的画面承接可退/有效期信息",
+    narrationStrategy: "不约可退、有效期长、周末可用等信息放在行动前",
+  },
+  action_close: {
+    title: "行动收口",
+    defaultGoal: "明确下一步动作，短促有力",
+    durationRangeLabel: "最后 2~4 秒",
+    materialStrategy: "用夜景、全景、门头或最稳定的记忆点画面收尾",
+    narrationStrategy: "刷到先囤、快去囤、进直播间等动作句，不拖尾",
+  },
+  route_correction: {
+    title: "认知纠偏",
+    defaultGoal: "指出常见玩法问题，并承诺更优方案",
+    durationRangeLabel: "3~10 秒",
+    materialStrategy: "用常规地点、人群或讲解镜头承接避坑信息",
+    narrationStrategy: "先说痛点，再说照这个路线玩",
+  },
+  itinerary_delivery: {
+    title: "路线交付",
+    defaultGoal: "按时间、地点或步骤交付可执行安排",
+    durationRangeLabel: "中段",
+    materialStrategy: "地点、体验和人物镜头按路线顺序推进",
+    narrationStrategy: "一天/一站一个小结论，字幕提炼地点和动作",
+  },
+  atmosphere_memory: {
+    title: "氛围记忆",
+    defaultGoal: "用稳定画面留下空间和调性记忆",
+    durationRangeLabel: "后段",
+    materialStrategy: "回到外观、全景、夜景或最有品质感的镜头",
+    narrationStrategy: "降低信息密度，用一句感受或记忆点收住",
+  },
   opening_hook: {
     title: "开篇钩子",
     defaultGoal: "用最有记忆点的实拍画面和利益点让用户停留",
@@ -123,7 +227,8 @@ function buildNarrativeSummary(source: VideoTaskSource, plan: ShotPlan) {
   const subject = normalizeText(source.productInfoTitle) || normalizeText(source.userPrompt).slice(0, 24) || "这组实拍素材";
   const shotCount = plan.shots.length;
   const materialDrivenCount = plan.shots.filter((shot) => shot.assetId || shot.referenceImageUrl).length;
-  return `${subject}将以“先抓注意力、再讲清信息、随后展开套餐/体验卖点、最后给出购买建议”的顺序组织，${shotCount} 个镜头中 ${materialDrivenCount} 个优先承接用户实拍素材。`;
+  const commercialPlan = buildCommercialStrategyPlan({ source, shotPlan: plan });
+  return `${subject}按「${commercialPlan.strategyLabel}」组织：${commercialPlan.decisionPath.join(" -> ")}。${shotCount} 个镜头中 ${materialDrivenCount} 个优先承接用户实拍素材，当前商业推进分 ${commercialPlan.score.totalScore}/100。`;
 }
 
 function buildStoryboardBeats(plan: ShotPlan) {
@@ -277,6 +382,11 @@ export function buildTaskStoryboardPlan(input: {
   referenceVideoMaterial?: VideoMaterialRecord | null;
 }): TaskStoryboardPlan {
   const sortedShots = [...input.shotPlan.shots].sort((left, right) => left.shotIndex - right.shotIndex);
+  const commercialPlan = buildCommercialStrategyPlan({
+    source: input.source,
+    videoType: input.parameters.video.videoType,
+    shotPlan: input.shotPlan,
+  });
   const materialIntents = buildMaterialIntents({
     hotelAssets: input.hotelAssets ?? [],
     referenceVideoMaterial: input.referenceVideoMaterial,
@@ -289,13 +399,18 @@ export function buildTaskStoryboardPlan(input: {
   const warnings = [
     unboundMaterialCount > 0 ? `${unboundMaterialCount} 个用户素材暂未绑定到镜头，可在素材确认阶段手动替换或调整顺序。` : "",
     aiFallbackCount > 0 ? `${aiFallbackCount} 个镜头需要 AI 补镜头，建议确认是否缺少对应实拍素材。` : "",
+    ...commercialPlan.score.findings,
   ].filter(Boolean);
 
   return {
     version: 1,
+    commercialPlan,
     narrativeSummary: buildNarrativeSummary(input.source, input.shotPlan),
-    speakingStyle: "像真人探店推荐一样表达：短句、具体、带感受，不堆砌酒店参数，不机械播报套餐清单。",
-    editingGuidance: "先确认叙事段落和图片顺序，再调整台词与字幕；替换图片时优先保持同一叙事段的画面功能不变。",
+    speakingStyle:
+      commercialPlan.strategyKind === "transaction_seed"
+        ? "像真实本地生活种草短视频：利益前置、短句密集、画面证明，先让用户觉得相关和值得，再解除风险并给行动。"
+        : "像真人探店推荐一样表达：短句、具体、带感受，不堆砌参数，不机械播报清单。",
+    editingGuidance: "先确认商业推进顺序和图片证据关系，再调整台词与字幕；替换图片时优先保持同一商业阶段的证明功能不变。",
     beats: buildStoryboardBeats(input.shotPlan),
     materialIntents,
     shotBindings,
@@ -303,6 +418,7 @@ export function buildTaskStoryboardPlan(input: {
       "镜头数量不超过可用实拍图片数量，除非明确需要 AI 补镜头。",
       "每个主镜头都能解释为什么使用这张图或这段视频。",
       "开篇 3 秒内有强画面或强利益点。",
+      "交易型种草前 8 秒要讲清主体和机会，中段要有权益密度，结尾要有风险解除或行动引导。",
       "台词听起来像真人推荐，不像参数说明书。",
       "字幕短句化，和口播含义一致但不必逐字相同。",
     ],

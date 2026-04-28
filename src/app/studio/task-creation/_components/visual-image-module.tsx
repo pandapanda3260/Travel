@@ -45,6 +45,10 @@ type VisualImageShot = {
   narrationText: string;
   subtitleText: string;
   durationSeconds: number | null;
+  commercialPhase: string | null;
+  commercialIntent: string | null;
+  evidenceTarget: string | null;
+  conversionRole: string | null;
   primaryAssetLabel: string | null;
   bindingReason: string | null;
   userIntentPreserved: string | null;
@@ -87,6 +91,25 @@ type VisualWorkbenchNarrationClip = {
   durationSeconds: number;
   audioUrl?: string | null;
 };
+
+const commercialPhaseDisplayLabels: Record<string, string> = {
+  attention_hook: "停留钩子",
+  identity_confirmation: "身份确认",
+  opportunity_offer: "机会抛出",
+  core_benefit: "核心利益",
+  benefit_stack: "权益轰炸",
+  evidence_proof: "素材证明",
+  value_anchor: "价值锚定",
+  risk_reversal: "风险解除",
+  action_close: "行动收口",
+  route_correction: "认知纠偏",
+  itinerary_delivery: "路线交付",
+  atmosphere_memory: "氛围记忆",
+};
+
+function getCommercialPhaseDisplayLabel(phase: string | null | undefined) {
+  return phase ? (commercialPhaseDisplayLabels[phase] ?? phase) : "商业任务";
+}
 
 function isReferenceBackedMaterialShot(shot: VisualImageShot) {
   return Boolean(
@@ -775,6 +798,11 @@ export function VisualImageModule({
                         )}
                       </div>
                       <span className="task-visual-shot-strip-label">{`镜头${shot.shotIndex}`}</span>
+                      {shot.commercialPhase ? (
+                        <span className="task-visual-shot-strip-phase">
+                          {getCommercialPhaseDisplayLabel(shot.commercialPhase)}
+                        </span>
+                      ) : null}
                       <span
                         className={`task-visual-shot-strip-asset${shot.needsAiFallback ? " needs-fallback" : ""}`}
                         title={shot.primaryAssetLabel ?? shot.assetSubjectSummary ?? undefined}
@@ -829,6 +857,10 @@ export function VisualImageModule({
                 </div>
                 <div className="task-visual-shot-context-panel">
                   <div className="task-visual-shot-context-item">
+                    <strong>成交任务</strong>
+                    <span>{getCommercialPhaseDisplayLabel(activeShot.commercialPhase)}</span>
+                  </div>
+                  <div className="task-visual-shot-context-item">
                     <strong>素材</strong>
                     <span>
                       {activeShot.primaryAssetLabel ??
@@ -838,8 +870,20 @@ export function VisualImageModule({
                   </div>
                   <div className="task-visual-shot-context-item">
                     <strong>表达</strong>
-                    <span>{activeShot.narrationGoal || activeShot.subtitleGoal || activeShot.narrationText || "待确认"}</span>
+                    <span>
+                      {activeShot.commercialIntent ||
+                        activeShot.narrationGoal ||
+                        activeShot.subtitleGoal ||
+                        activeShot.narrationText ||
+                        "待确认"}
+                    </span>
                   </div>
+                  {activeShot.evidenceTarget ? (
+                    <div className="task-visual-shot-context-item">
+                      <strong>证明点</strong>
+                      <span>{activeShot.evidenceTarget}</span>
+                    </div>
+                  ) : null}
                   <div className="task-visual-shot-context-item">
                     <strong>台词</strong>
                     <span>{activeShot.subtitleText || activeShot.narrationText || "无台词"}</span>

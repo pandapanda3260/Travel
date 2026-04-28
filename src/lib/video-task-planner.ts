@@ -47,6 +47,7 @@ import { WeightedProgressTracker } from "./weighted-progress-tracker";
 import { applyHotelAssetPlanning } from "./hotel-shot-planner";
 import { buildHotelCapturedMaterialContext } from "./hotel-shot-candidates";
 import { buildTaskStoryboardPlan } from "./task-storyboard-plan";
+import { buildCommercialStrategyPlan, buildCommercialStrategyPromptContext } from "./commercial-video-strategy";
 import {
   applyAgencyGuideVoiceoverSparseCharacters,
   getAgencyGuideVoiceoverMaxCharacterShots,
@@ -286,6 +287,7 @@ function buildSourceSummary(
         itinerarySource: autoStructure.itinerary.source,
         segmentBlueprint: autoStructure.segmentBlueprint,
       },
+      commercialStrategyGuidance: buildCommercialStrategyPromptContext(source, parameters.video.videoType),
       taskConstraints: {
         customRules: parameters.constraints.customRules ?? [],
         characterConsistency: parameters.constraints.characterConsistency ?? null,
@@ -387,8 +389,10 @@ function buildShotPlanSystemPrompt(constraints: TaskConstraints, videoType?: Vid
         "2. 保留用户上传实拍素材的原始意愿：主体、空间关系、构图价值和备注不要被改写成泛泛的 AI 画面。",
         "3. 如果已有可用实拍图片，镜头数量不得超过可用实拍图片数量；允许一个镜头使用一张主图，图片多于镜头时按叙事价值筛选。",
         "4. 每个镜头都要说明画面承担的讲述功能，并尽量建立“图片/视频素材 -> 镜头 -> 台词字幕”的对应关系。",
-        "5. 酒店类视频默认按“开篇吸引 2.5~5.5 秒、信息/促销 10~15 秒、套餐卖点 10~20 秒、购买建议/收尾 5~10 秒”的商业讲述逻辑组织；若素材不足，优先保留开篇和核心卖点。",
-        "6. 台词和字幕要像真人推荐：短句、自然、没有语病，不机械罗列参数。",
+        "5. 先判断商业打法：交易型种草、攻略路线型、品牌展示型或体验推荐型。交易型种草要按“停留钩子 -> 身份确认 -> 机会抛出 -> 核心利益 -> 权益轰炸 -> 价值锚定 -> 风险解除 -> 行动收口”推进。",
+        "6. 酒店/本地生活交易型内容不是慢铺垫介绍。前 3 秒必须给地域/人群/强利益，前 8 秒必须讲清主体和机会；可以直接讲最大卖点，但不能散乱堆卖点。",
+        "7. 每个镜头尽量输出 commercialPhase、commercialIntent、evidenceTarget、conversionRole：说明它在回答用户哪个决策问题、证明哪个利益点。",
+        "8. 台词和字幕要像真实短视频推荐：短句、具体、有成交节奏；字幕提炼关键词，不必逐字复述口播。",
       ]
     : [];
 
@@ -413,6 +417,8 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
     "目的地";
   const shotCount = getPlannedStoryShotCount(parameters);
   const shotDuration = getPlannedStoryShotDurationSeconds(parameters);
+  const commercialPlan = buildCommercialStrategyPlan({ source, videoType: parameters.video.videoType });
+  const fallbackCommercialPhases = commercialPlan.beatPlan.map((beat) => beat.phase);
   const montageLike =
     parameters.video.segmentMode === "multi_shot_montage" ||
     parameters.video.segmentMode === "hybrid_intro_plus_montage";
@@ -424,6 +430,9 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
       ? !montageLike || shotCount <= 3 || isFirst || isLast || shotIndex % 2 === 1
       : false;
     const purpose = isFirst ? "hook" : isLast ? "closing" : shotIndex % 2 === 0 ? "detail" : "experience";
+    const commercialPhase =
+      fallbackCommercialPhases[Math.min(i, fallbackCommercialPhases.length - 1)] ??
+      (isFirst ? "attention_hook" : isLast ? "action_close" : "evidence_proof");
 
     return {
       shotIndex,
@@ -445,6 +454,10 @@ function buildFallbackShotPlan(source: VideoTaskSource, parameters: VideoTaskPar
         : isLast
           ? `${subject}的收束画面，呼应开场`
           : `${subject}的体验细节`,
+      commercialPhase,
+      commercialIntent: commercialPlan.beatPlan.find((beat) => beat.phase === commercialPhase)?.goal ?? null,
+      evidenceTarget: isFirst ? commercialPlan.coreHook : shouldVoice ? `${subject}的可感知理由` : null,
+      conversionRole: isLast ? "用行动建议或记忆点收口" : null,
       narrationHint: shouldVoice
         ? isFirst
           ? "先把最想去的理由抛出来"
@@ -529,6 +542,13 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
       endAtSeconds: Number(raw.endAtSeconds) || undefined,
       functionTag: typeof raw.functionTag === "string" ? raw.functionTag : undefined,
       sellingPointType: typeof raw.sellingPointType === "string" ? raw.sellingPointType : undefined,
+      commercialPhase:
+        typeof raw.commercialPhase === "string"
+          ? (raw.commercialPhase as ShotPlanItem["commercialPhase"])
+          : null,
+      commercialIntent: typeof raw.commercialIntent === "string" ? raw.commercialIntent : null,
+      evidenceTarget: typeof raw.evidenceTarget === "string" ? raw.evidenceTarget : null,
+      conversionRole: typeof raw.conversionRole === "string" ? raw.conversionRole : null,
       visual: raw.visual
         ? {
             sceneSetting: String(raw.visual.sceneSetting ?? ""),
@@ -652,7 +672,7 @@ function parseShotPlanResponse(content: string, parameters: VideoTaskParameterBu
 // ---------------------------------------------------------------------------
 
 /** 规则说明见 `system-rules-payload.ts`（与「系统规则」页同步维护）。 */
-function validateShotPlan(plan: ShotPlan, _source: VideoTaskSource, parameters: VideoTaskParameterBundle): string[] {
+function validateShotPlan(plan: ShotPlan, source: VideoTaskSource, parameters: VideoTaskParameterBundle): string[] {
   const errors: string[] = [];
   const expected = getPlannedStoryShotCount(parameters);
   const constraints = parameters.constraints;
@@ -779,6 +799,25 @@ function validateShotPlan(plan: ShotPlan, _source: VideoTaskSource, parameters: 
     const middleHighlightShots = middleVoicedShots.filter((shot) => ["experience", "climax"].includes(shot.purpose));
     if (middleVoicedShots.length >= 3 && middleHighlightShots.length === 0) {
       errors.push("中段缺少重点句承载镜头：除了开头和收尾，中间也需要至少一个能抬情绪或提炼价值的口播镜头");
+    }
+  }
+
+  if (usesCapturedMaterialFirstWorkflow(parameters.video.videoType)) {
+    const commercialPlan = buildCommercialStrategyPlan({
+      source,
+      videoType: parameters.video.videoType,
+      shotPlan: plan,
+    });
+    if (commercialPlan.strategyKind === "transaction_seed") {
+      if (commercialPlan.score.hookScore < 12) {
+        errors.push("交易型种草开场钩子偏弱：前 3 秒需要地域/人群/强利益中的至少两项");
+      }
+      if (commercialPlan.score.identityOpportunityScore < 12) {
+        errors.push("交易型种草前 8 秒主体和机会不清晰：需要更早讲清品牌/地点/开业/促销/价格机会");
+      }
+      if (commercialPlan.score.totalScore < 58) {
+        errors.push(`商业推进分偏低：当前 ${commercialPlan.score.totalScore}/100，需补足权益密度、素材证明或结尾转化`);
+      }
     }
   }
 
@@ -941,6 +980,11 @@ function buildPromptGenerationUserContent(
   return JSON.stringify(
     {
       narrationStyleBrief: buildNarrationStyleBrief(source, parameters.video.videoType, normalizedPlan),
+      commercialPlan: buildCommercialStrategyPlan({
+        source,
+        videoType: parameters.video.videoType,
+        shotPlan: normalizedPlan,
+      }),
       shotPlan: normalizedPlan,
       structureBlueprint: deriveVideoTaskStructure({
         source,
@@ -1257,6 +1301,7 @@ function buildNarrationStyleBrief(
       "情绪：听起来是真实感受，不是广告口号",
     ],
     continuityGoal: "整条脚本要有开场钩子、中段理由、结尾收束的连续推进；不要让每个镜头像互不相关的宣传短句。",
+    commercialPlan: buildCommercialStrategyPlan({ source, videoType, shotPlan }),
     lowQualitySignals: [
       "只说省心、轻松、舒服、值得，但没有原因",
       "只罗列地点、空间、商品或服务名",

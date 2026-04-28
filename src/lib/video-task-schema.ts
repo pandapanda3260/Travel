@@ -120,6 +120,58 @@ export type ShotStructure = {
   transitionType?: string;
 };
 
+export type CommercialStrategyKind =
+  | "transaction_seed"
+  | "guide_route"
+  | "brand_showcase"
+  | "experience_recommendation";
+
+export type CommercialBeatPhase =
+  | "attention_hook"
+  | "identity_confirmation"
+  | "opportunity_offer"
+  | "core_benefit"
+  | "benefit_stack"
+  | "evidence_proof"
+  | "value_anchor"
+  | "risk_reversal"
+  | "action_close"
+  | "route_correction"
+  | "itinerary_delivery"
+  | "atmosphere_memory";
+
+export type CommercialProgressScore = {
+  totalScore: number;
+  hookScore: number;
+  identityOpportunityScore: number;
+  benefitDensityScore: number;
+  evidenceScore: number;
+  conversionScore: number;
+  findings: string[];
+};
+
+export type CommercialBeatPlanItem = {
+  phase: CommercialBeatPhase;
+  title: string;
+  goal: string;
+  targetWindow: string;
+  userQuestion: string;
+  recommendedCopyMove: string;
+  targetShotIndexes: number[];
+  strength: "must" | "strong" | "soft";
+};
+
+export type TaskCommercialPlan = {
+  strategyKind: CommercialStrategyKind;
+  strategyLabel: string;
+  strategyReason: string;
+  targetAudience: string;
+  coreHook: string;
+  decisionPath: string[];
+  score: CommercialProgressScore;
+  beatPlan: CommercialBeatPlanItem[];
+};
+
 export type ShotPlanItem = {
   shotId?: string;
   shotIndex: number;
@@ -146,6 +198,10 @@ export type ShotPlanItem = {
   endAtSeconds?: number;
   functionTag?: string;
   sellingPointType?: string;
+  commercialPhase?: CommercialBeatPhase | null;
+  commercialIntent?: string | null;
+  evidenceTarget?: string | null;
+  conversionRole?: string | null;
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;
@@ -214,7 +270,14 @@ export type SegmentSubtitlePlan = {
 export type StoryboardNarrativeBeat = {
   beatId: string;
   title: string;
-  phase: "opening_hook" | "commercial_info" | "package_value" | "purchase_advice" | "closing" | "experience";
+  phase:
+    | "opening_hook"
+    | "commercial_info"
+    | "package_value"
+    | "purchase_advice"
+    | "closing"
+    | "experience"
+    | CommercialBeatPhase;
   goal: string;
   durationRangeLabel: string;
   targetShotIndexes: number[];
@@ -250,6 +313,7 @@ export type StoryboardShotBinding = {
 
 export type TaskStoryboardPlan = {
   version: 1;
+  commercialPlan?: TaskCommercialPlan;
   narrativeSummary: string;
   speakingStyle: string;
   editingGuidance: string;
@@ -304,6 +368,10 @@ export type DirectorStoryShot = {
   endAtSeconds?: number;
   functionTag?: string;
   sellingPointType?: string;
+  commercialPhase?: CommercialBeatPhase | null;
+  commercialIntent?: string | null;
+  evidenceTarget?: string | null;
+  conversionRole?: string | null;
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;

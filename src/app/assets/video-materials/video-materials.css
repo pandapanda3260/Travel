@@ -152,6 +152,64 @@
   outline: none;
 }
 
+.vm-copy-fallback-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(19, 28, 52, 0.18);
+  backdrop-filter: blur(4px);
+}
+
+.vm-copy-fallback-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid rgba(110, 123, 255, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 20px 50px rgba(40, 54, 96, 0.16);
+}
+
+.vm-copy-fallback-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.vm-copy-fallback-copy strong {
+  color: #233357;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.vm-copy-fallback-copy span {
+  color: #7380a3;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.vm-copy-fallback-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(110, 123, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(247, 249, 255, 0.9);
+  color: #25365d;
+  font-size: 12px;
+  line-height: 40px;
+  outline: none;
+}
+
+.vm-copy-fallback-input:focus {
+  border-color: rgba(83, 99, 216, 0.4);
+  box-shadow: 0 0 0 3px rgba(110, 123, 255, 0.12);
+}
+
 .vm-material-name-input {
   width: min(100%, 168px);
   height: 28px;
