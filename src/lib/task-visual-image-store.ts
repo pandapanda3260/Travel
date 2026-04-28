@@ -688,6 +688,61 @@ export function clearTaskVisualImageSelection(taskId: string, shotIndex: number)
   return records[index];
 }
 
+export function remapTaskVisualImageShots(
+  taskId: string,
+  mappings: Array<{
+    sourceShotIndex: number;
+    shotIndex: number;
+    segmentId: string;
+    segmentIndex: number;
+    prompt?: string | null;
+  }>,
+) {
+  const normalizedTaskId = taskId.trim();
+  if (!normalizedTaskId || mappings.length === 0) {
+    return [];
+  }
+
+  const mappingBySourceShotIndex = new Map(
+    mappings
+      .filter(
+        (mapping) =>
+          Number.isFinite(mapping.sourceShotIndex) &&
+          mapping.sourceShotIndex > 0 &&
+          Number.isFinite(mapping.shotIndex) &&
+          mapping.shotIndex > 0,
+      )
+      .map((mapping) => [mapping.sourceShotIndex, mapping]),
+  );
+  if (mappingBySourceShotIndex.size === 0) {
+    return [];
+  }
+
+  const now = new Date().toISOString();
+  const records = readStore();
+  const remappedRecords = records
+    .filter((record) => record.taskId === normalizedTaskId)
+    .map((record) => {
+      const mapping = mappingBySourceShotIndex.get(record.shotIndex);
+      if (!mapping) {
+        return record;
+      }
+      return {
+        ...record,
+        segmentId: mapping.segmentId,
+        segmentIndex: mapping.segmentIndex,
+        shotIndex: mapping.shotIndex,
+        shotTitle: `镜头 ${mapping.shotIndex}`,
+        prompt: mapping.prompt?.trim() || record.prompt,
+        updatedAt: now,
+      } satisfies TaskVisualImageShotRecord;
+    })
+    .sort((left, right) => left.shotIndex - right.shotIndex);
+
+  writeStore([...records.filter((record) => record.taskId !== normalizedTaskId), ...remappedRecords]);
+  return remappedRecords;
+}
+
 export function getTaskVisualSelectedImageDataUrl(sessionId: string) {
   const parsed = parseTaskVisualSelectedImageSessionId(sessionId);
   if (!parsed) {

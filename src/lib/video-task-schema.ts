@@ -211,6 +211,56 @@ export type SegmentSubtitlePlan = {
   subtitles: SubtitlePlanEntry[];
 };
 
+export type StoryboardNarrativeBeat = {
+  beatId: string;
+  title: string;
+  phase: "opening_hook" | "commercial_info" | "package_value" | "purchase_advice" | "closing" | "experience";
+  goal: string;
+  durationRangeLabel: string;
+  targetShotIndexes: number[];
+  materialStrategy: string;
+  narrationStrategy: string;
+};
+
+export type StoryboardMaterialIntent = {
+  assetId: string;
+  displayName: string;
+  sourceType: VideoTaskAssetSourceType | "user_video";
+  sceneType?: HotelAssetSceneType | null;
+  originalUserNote: string;
+  analysisSummary: string;
+  recommendedRole: string;
+  mappedShotIndexes: number[];
+  priority: "hero" | "core" | "support" | "backup";
+};
+
+export type StoryboardShotBinding = {
+  shotIndex: number;
+  segmentIndex?: number | null;
+  primaryAssetId: string | null;
+  primaryAssetLabel: string;
+  sourceType: VideoTaskAssetSourceType | "user_video" | null;
+  supportingAssetIds: string[];
+  bindingReason: string;
+  userIntentPreserved: string;
+  narrationGoal: string;
+  subtitleGoal: string;
+  needsAiFallback: boolean;
+};
+
+export type TaskStoryboardPlan = {
+  version: 1;
+  narrativeSummary: string;
+  speakingStyle: string;
+  editingGuidance: string;
+  beats: StoryboardNarrativeBeat[];
+  materialIntents: StoryboardMaterialIntent[];
+  shotBindings: StoryboardShotBinding[];
+  reviewChecklist: string[];
+  warnings: string[];
+  generatedAt: string;
+};
+
 export type ShotPlan = {
   shots: ShotPlanItem[];
   globalStyle: string;
@@ -220,6 +270,7 @@ export type ShotPlan = {
   reusableModules?: ShotPlanReusableModules;
   narrativeCurves?: ShotPlanNarrativeCurves;
   subtitlePlan?: SegmentSubtitlePlan[];
+  storyboard?: TaskStoryboardPlan;
 };
 
 export type DirectorStoryShot = {
@@ -334,6 +385,7 @@ export type VideoTaskDirectorPlan = {
   renderSegments: DirectorRenderSegment[];
   audioCues: DirectorAudioCue[];
   subtitlePlan?: SegmentSubtitlePlan[];
+  storyboard?: TaskStoryboardPlan;
   legacyMirrored: boolean;
 };
 

@@ -871,6 +871,7 @@ export function buildDirectorPlanFromTaskData(input: {
     renderSegments,
     audioCues,
     subtitlePlan,
+    storyboard: normalizedShotPlan?.storyboard,
     legacyMirrored: true,
   } satisfies VideoTaskDirectorPlan;
 }
@@ -1010,6 +1011,7 @@ export function buildShotPlanFromDirectorPlan(plan: VideoTaskDirectorPlan, base?
     reusableModules: base?.reusableModules,
     narrativeCurves: base?.narrativeCurves,
     subtitlePlan: plan.subtitlePlan ?? base?.subtitlePlan,
+    storyboard: base?.storyboard ?? plan.storyboard,
   } satisfies ShotPlan;
 }
 

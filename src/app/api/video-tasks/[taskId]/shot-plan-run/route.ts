@@ -54,6 +54,28 @@ type ShotPlanRunRequest = {
   parameters?: Partial<ReturnType<typeof getDefaultTaskCreationParameterState>>;
 };
 
+function normalizeCapturedMaterialDerivedStructure(
+  structure: ReturnType<typeof deriveVideoTaskStructure>,
+  input: {
+    enabled: boolean;
+    usableAssetCount: number;
+  },
+): ReturnType<typeof deriveVideoTaskStructure> {
+  if (!input.enabled || input.usableAssetCount <= 0) {
+    return structure;
+  }
+
+  const storyShotCount = Math.max(1, Math.min(structure.storyShotCount, input.usableAssetCount));
+  const segmentCount = Math.max(1, Math.min(structure.segmentCount, storyShotCount));
+
+  return {
+    ...structure,
+    storyShotCount,
+    segmentCount,
+    storyShotsPerSegment: Math.max(1, Math.ceil(storyShotCount / segmentCount)),
+  };
+}
+
 function buildTaskCreationFallbackParameters(
   task: VideoTaskRecord,
 ): Partial<ReturnType<typeof getDefaultTaskCreationParameterState>> {
@@ -190,14 +212,20 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const constraints = { ...preset.constraints, customRules };
     const planningSource = buildPlanningSourceWithOptimizedPrompt(source);
 
-    const derivedStructure = deriveVideoTaskStructure({
-      source: planningSource,
-      videoType: parameters.videoType,
-      expectedDurationRange: parameters.videoExpectedDurationRange,
-      requestedSegmentCount: parameters.videoSegmentCount,
-      requestedDurationSeconds: parameters.videoDurationSeconds,
-      requestedStoryShotsPerSegment: undefined,
-    });
+    const derivedStructure = normalizeCapturedMaterialDerivedStructure(
+      deriveVideoTaskStructure({
+        source: planningSource,
+        videoType: parameters.videoType,
+        expectedDurationRange: parameters.videoExpectedDurationRange,
+        requestedSegmentCount: parameters.videoSegmentCount,
+        requestedDurationSeconds: parameters.videoDurationSeconds,
+        requestedStoryShotsPerSegment: undefined,
+      }),
+      {
+        enabled: usesCapturedMaterialFirstWorkflow(parameters.videoType),
+        usableAssetCount: hotelAssets.length,
+      },
+    );
 
     const taskParameterBundle = {
       image: {

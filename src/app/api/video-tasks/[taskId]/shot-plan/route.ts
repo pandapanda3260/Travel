@@ -3,14 +3,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../../../lib/auth-session";
 import { getActiveKeyMaterialWorkflow } from "../../../../../lib/key-material-task-store";
 import { getGeneratedVideoRecordForTask } from "../../../../../lib/task-creation-index-data";
+import { remapTaskVisualImageShots } from "../../../../../lib/task-visual-image-store";
+import { clearTaskClipAndCompositionOutputs } from "../../../../../lib/video-task-output-reset";
 import { getVideoTask, patchVideoTask } from "../../../../../lib/video-task-store";
 import {
   applyShotPlanEditorSave,
   buildShotPlanEditorState,
+  type AppliedShotPlanEditorSave,
   type ShotPlanEditorSavePayload,
 } from "../../../../../lib/video-task-plan-edit";
 import { getActiveVideoGenerationWorkflow } from "../../../../../lib/video-generation-workflow-store";
-import { videoTaskStatusFlow } from "../../../../../lib/video-task-schema";
+import { capVideoTaskStatus, videoTaskStatusFlow } from "../../../../../lib/video-task-schema";
 
 type RouteContext = {
   params: Promise<{
@@ -21,6 +24,40 @@ type RouteContext = {
 type UpdateShotPlanRequest = ShotPlanEditorSavePayload & {
   baseUpdatedAt?: string;
 };
+
+function buildVisualImageShotOrderMappings(body: UpdateShotPlanRequest, applied: AppliedShotPlanEditorSave) {
+  const shotPlanByIndex = new Map(applied.shotPlan.shots.map((shot) => [shot.shotIndex, shot]));
+  const mappings =
+    body.segments?.flatMap((segment) =>
+      (segment.shots ?? [])
+        .map((shot) => {
+          const shotIndex = Number(shot.shotIndex);
+          const sourceShotIndex = Number(shot.sourceShotIndex ?? shot.shotIndex);
+          if (
+            !Number.isFinite(shotIndex) ||
+            shotIndex <= 0 ||
+            !Number.isFinite(sourceShotIndex) ||
+            sourceShotIndex <= 0
+          ) {
+            return null;
+          }
+          const planShot = shotPlanByIndex.get(shotIndex);
+          return {
+            sourceShotIndex,
+            shotIndex,
+            segmentId: planShot?.segmentId ?? segment.segmentId ?? `segment-${segment.segmentIndex}`,
+            segmentIndex: planShot?.segmentIndex ?? segment.segmentIndex,
+            prompt: planShot?.img2imgPrompt ?? planShot?.sceneDescription ?? null,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+    ) ?? [];
+
+  return {
+    mappings,
+    hasReorderedShots: mappings.some((mapping) => mapping.sourceShotIndex !== mapping.shotIndex),
+  };
+}
 
 export async function PATCH(request: NextRequest, context: RouteContext) {
   const session = requireUserApiSession(request);
@@ -58,10 +95,24 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     }
 
     const applied = applyShotPlanEditorSave(existingTask, body);
+    const visualImageShotOrder = buildVisualImageShotOrderMappings(body, applied);
+    if (visualImageShotOrder.hasReorderedShots) {
+      remapTaskVisualImageShots(taskId, visualImageShotOrder.mappings);
+      clearTaskClipAndCompositionOutputs(taskId);
+    }
     const task = patchVideoTask(taskId, {
       shotPlan: applied.shotPlan,
       draftBundle: applied.draftBundle,
       directorPlan: applied.directorPlan,
+      ...(visualImageShotOrder.hasReorderedShots
+        ? {
+            status: capVideoTaskStatus(existingTask.status, "IMAGES_READY"),
+            stageTimestamps: {
+              CLIPS_READY: undefined,
+              COMPOSITION_READY: undefined,
+            },
+          }
+        : {}),
     });
 
     if (!task) {

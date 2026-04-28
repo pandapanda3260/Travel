@@ -46,6 +46,7 @@ import { getVideoTypeCategoryPrompt, getVideoTypeAddonPrompt } from "./video-typ
 import { WeightedProgressTracker } from "./weighted-progress-tracker";
 import { applyHotelAssetPlanning } from "./hotel-shot-planner";
 import { buildHotelCapturedMaterialContext } from "./hotel-shot-candidates";
+import { buildTaskStoryboardPlan } from "./task-storyboard-plan";
 import {
   applyAgencyGuideVoiceoverSparseCharacters,
   getAgencyGuideVoiceoverMaxCharacterShots,
@@ -378,11 +379,24 @@ function buildShotPlanSystemPrompt(constraints: TaskConstraints, videoType?: Vid
   const mainPrompt = getEffectiveConstraintPrompt("shot_plan");
   const categoryPrompt = getVideoTypeCategoryPrompt(resolvedType, "shot_plan");
   const addonPrompt = getVideoTypeAddonPrompt(resolvedType, "shot_plan");
+  const capturedMaterialRules = usesCapturedMaterialFirstWorkflow(resolvedType)
+    ? [
+        "",
+        "实拍素材优先工作流要求（必须严格遵守）：",
+        "1. 先理解用户输入、商品/酒店信息、上传图片分析和参考视频分析，再决定叙事结构。",
+        "2. 保留用户上传实拍素材的原始意愿：主体、空间关系、构图价值和备注不要被改写成泛泛的 AI 画面。",
+        "3. 如果已有可用实拍图片，镜头数量不得超过可用实拍图片数量；允许一个镜头使用一张主图，图片多于镜头时按叙事价值筛选。",
+        "4. 每个镜头都要说明画面承担的讲述功能，并尽量建立“图片/视频素材 -> 镜头 -> 台词字幕”的对应关系。",
+        "5. 酒店类视频默认按“开篇吸引 2.5~5.5 秒、信息/促销 10~15 秒、套餐卖点 10~20 秒、购买建议/收尾 5~10 秒”的商业讲述逻辑组织；若素材不足，优先保留开篇和核心卖点。",
+        "6. 台词和字幕要像真人推荐：短句、自然、没有语病，不机械罗列参数。",
+      ]
+    : [];
 
   return [
     mainPrompt,
     categoryPrompt,
     addonPrompt,
+    ...capturedMaterialRules,
     ...(constraintRules.length > 0
       ? ["", "本任务的专属约束（必须严格遵守）：", ...constraintRules.map((r, i) => `${i + 1}. ${r}`)]
       : []),
@@ -949,6 +963,7 @@ function buildPromptGenerationUserContent(
       storyboardEnabled: parameters.audio.storyboardEnabled,
       characterAppearancePolicy: getMainCharacterAppearancePolicy(source),
       narrativeCurves: normalizedPlan.narrativeCurves ?? null,
+      storyboardPlan: normalizedPlan.storyboard ?? null,
       narrationExecutionNotes,
     },
     null,
@@ -2144,6 +2159,29 @@ async function enrichShotPlan(
   return applyMainCharacterAppearancePolicy(shotPlan, source);
 }
 
+function attachCapturedMaterialStoryboardPlan(input: {
+  source: VideoTaskSource;
+  parameters: VideoTaskParameterBundle;
+  shotPlan: ShotPlan;
+  hotelAssets?: TaskHotelAssetRecord[];
+  referenceVideoMaterial?: VideoMaterialRecord | null;
+}): ShotPlan {
+  if (!usesCapturedMaterialFirstWorkflow(input.parameters.video.videoType)) {
+    return input.shotPlan;
+  }
+
+  return {
+    ...input.shotPlan,
+    storyboard: buildTaskStoryboardPlan({
+      source: input.source,
+      parameters: input.parameters,
+      shotPlan: input.shotPlan,
+      hotelAssets: input.hotelAssets ?? [],
+      referenceVideoMaterial: input.referenceVideoMaterial ?? null,
+    }),
+  };
+}
+
 export async function generateVideoTaskDraftBundle(
   source: VideoTaskSource,
   parameters: VideoTaskParameterBundle,
@@ -2168,6 +2206,13 @@ export async function generateVideoTaskDraftBundle(
           workflowKind: getVideoTaskWorkflowKind(parameters.video.videoType),
         });
       }
+      fallbackPlan = attachCapturedMaterialStoryboardPlan({
+        source,
+        parameters,
+        shotPlan: fallbackPlan,
+        hotelAssets: options?.hotelAssets ?? [],
+        referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+      });
       progressTracker?.complete("skeleton", "已生成兜底镜头规划");
       progressTracker?.skip("repair_1", "跳过修复轮次 1");
       progressTracker?.skip("repair_2", "跳过修复轮次 2");
@@ -2273,6 +2318,13 @@ export async function generateVideoTaskDraftBundle(
         workflowKind: getVideoTaskWorkflowKind(parameters.video.videoType),
       });
     }
+    shotPlan = attachCapturedMaterialStoryboardPlan({
+      source,
+      parameters,
+      shotPlan,
+      hotelAssets: options?.hotelAssets ?? [],
+      referenceVideoMaterial: options?.referenceVideoMaterial ?? null,
+    });
 
     // Step 5: Generate prompts from shot plan
     progressTracker?.start("prompt_generation", "生成提示词...");

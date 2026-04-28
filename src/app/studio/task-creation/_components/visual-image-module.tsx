@@ -8,6 +8,7 @@ import {
   directorSecondaryStepActionKeys,
   getDirectorPrimaryStepButtonLabel,
 } from "../../../../lib/director-step-actions";
+import { formatDurationSecondsLabel } from "../../../../lib/duration-format";
 import { isTaskStageProgressRunning, type TaskStageProgressSnapshot } from "../../../../lib/task-stage-progress";
 import {
   getVideoTaskStatusIndex,
@@ -39,6 +40,16 @@ type VisualImageShot = {
   prompt: string;
   generationMode: string | null;
   referenceImageUrl: string | null;
+  assetSubjectSummary: string | null;
+  narrationText: string;
+  subtitleText: string;
+  durationSeconds: number | null;
+  primaryAssetLabel: string | null;
+  bindingReason: string | null;
+  userIntentPreserved: string | null;
+  narrationGoal: string | null;
+  subtitleGoal: string | null;
+  needsAiFallback: boolean;
   size: string;
   guidanceScale: number;
   watermark: boolean;
@@ -69,6 +80,13 @@ type PreviewImageState = {
   mode: "strip" | "candidate";
 };
 
+type VisualWorkbenchNarrationClip = {
+  shotIndex: number;
+  narrationText: string;
+  durationSeconds: number;
+  audioUrl?: string | null;
+};
+
 function isReferenceBackedMaterialShot(shot: VisualImageShot) {
   return Boolean(
     shot.referenceImageUrl &&
@@ -79,6 +97,7 @@ function isReferenceBackedMaterialShot(shot: VisualImageShot) {
 export function VisualImageModule({
   task,
   persistedStageProgress,
+  narrationClips = [],
   onTaskUpdate,
   onPrimaryActionChange,
   onSummaryChange,
@@ -86,6 +105,7 @@ export function VisualImageModule({
 }: {
   task: VideoTaskRecord | null;
   persistedStageProgress?: TaskStageProgressSnapshot | null;
+  narrationClips?: VisualWorkbenchNarrationClip[];
   onTaskUpdate: (task: VideoTaskRecord) => void;
   onPrimaryActionChange?: ((config: TaskStepActionState | null) => void) | undefined;
   onSummaryChange?: ((summary: VisualPipelineSummary | null) => void) | undefined;
@@ -99,6 +119,8 @@ export function VisualImageModule({
   const [generatingShotIndex, setGeneratingShotIndex] = useState<number | null>(null);
   const [submittingShotIndex, setSubmittingShotIndex] = useState<number | null>(null);
   const [activeShotIndex, setActiveShotIndex] = useState<number | null>(null);
+  const [draggingShotIndex, setDraggingShotIndex] = useState<number | null>(null);
+  const [sortingShotIndex, setSortingShotIndex] = useState<number | null>(null);
   const [previewImage, setPreviewImage] = useState<PreviewImageState | null>(null);
   const batchStreamProgress = useStreamProgress();
   const batchProgressMessage = batchStreamProgress.progress.message;
@@ -195,6 +217,11 @@ export function VisualImageModule({
     () => shots.find((shot) => shot.shotIndex === activeShotIndex) ?? shots[0] ?? null,
     [activeShotIndex, shots],
   );
+  const narrationClipByShotIndex = useMemo(
+    () => new Map(narrationClips.map((clip) => [clip.shotIndex, clip])),
+    [narrationClips],
+  );
+  const activeNarrationClip = activeShot ? (narrationClipByShotIndex.get(activeShot.shotIndex) ?? null) : null;
   const previewShot = useMemo(
     () => (previewImage ? (shots.find((shot) => shot.shotIndex === previewImage.shotIndex) ?? null) : null),
     [previewImage, shots],
@@ -560,6 +587,101 @@ export function VisualImageModule({
     setActiveShotIndex(shot.shotIndex);
   }
 
+  async function handleReorderShot(sourceShotIndex: number, targetShotIndex: number) {
+    if (!taskId || !task?.directorPlan || sourceShotIndex === targetShotIndex) {
+      return;
+    }
+
+    const orderedSegments = [...task.directorPlan.renderSegments].sort(
+      (left, right) => left.segmentIndex - right.segmentIndex,
+    );
+    const storyShotByIndex = new Map(task.directorPlan.storyShots.map((shot) => [shot.shotIndex, shot]));
+    const flatShots = orderedSegments.flatMap((segment) =>
+      segment.shotIndexes.map((shotIndex) => storyShotByIndex.get(shotIndex)).filter(Boolean),
+    ) as NonNullable<typeof task.directorPlan>["storyShots"];
+    const sourceIndex = flatShots.findIndex((shot) => shot.shotIndex === sourceShotIndex);
+    const targetIndex = flatShots.findIndex((shot) => shot.shotIndex === targetShotIndex);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+      return;
+    }
+
+    const nextFlatShots = [...flatShots];
+    const [movedShot] = nextFlatShots.splice(sourceIndex, 1);
+    if (!movedShot) {
+      return;
+    }
+    nextFlatShots.splice(targetIndex, 0, movedShot);
+
+    let cursor = 0;
+    let nextShotIndex = 1;
+    let nextActiveShotIndex = targetShotIndex;
+    const segments = orderedSegments.map((segment) => {
+      const segmentShots = nextFlatShots.slice(cursor, cursor + segment.shotIndexes.length);
+      cursor += segment.shotIndexes.length;
+      return {
+        segmentId: segment.segmentId,
+        segmentIndex: segment.segmentIndex,
+        narrationText: segment.narrationText || segment.subtitleText || "",
+        shots: segmentShots.map((shot) => {
+          const shotIndex = nextShotIndex;
+          nextShotIndex += 1;
+          if (shot.shotIndex === sourceShotIndex) {
+            nextActiveShotIndex = shotIndex;
+          }
+          return {
+            sourceShotIndex: shot.shotIndex,
+            shotIndex,
+            purpose: shot.purpose,
+            location: shot.location,
+            sceneDescription: shot.sceneDescription,
+            action: shot.action,
+            emotion: shot.emotion,
+            cameraMovement: shot.cameraMovement,
+            durationSeconds: shot.durationSeconds,
+            hasVoice: shot.hasVoice,
+            hasSubtitle: shot.hasSubtitle,
+            requiresLipSync: shot.requiresLipSync,
+            imagePrompt: shot.imagePrompt,
+            videoPrompt: shot.videoPrompt,
+            narrationHint: shot.narrationHint,
+          };
+        }),
+      };
+    });
+
+    setSortingShotIndex(sourceShotIndex);
+    setError(null);
+    try {
+      const response = await fetch(`/api/video-tasks/${encodeURIComponent(taskId)}/shot-plan`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseUpdatedAt: task.updatedAt,
+          segments,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        error?: string;
+        task?: VideoTaskRecord | null;
+      } | null;
+      if (!response.ok) {
+        throw new Error(data?.error ?? "调整镜头顺序失败");
+      }
+      if (data?.task) {
+        onTaskUpdate(data.task);
+      }
+      await loadShots(true);
+      setActiveShotIndex(nextActiveShotIndex);
+    } catch (reorderError) {
+      setError(reorderError instanceof Error ? reorderError.message : "调整镜头顺序失败");
+    } finally {
+      setSortingShotIndex(null);
+      setDraggingShotIndex(null);
+    }
+  }
+
   function handlePreviewNavigate(direction: "prev" | "next") {
     if (!previewShot || previewCandidateIndex < 0) {
       return;
@@ -601,11 +723,40 @@ export function VisualImageModule({
               <div className="task-visual-shot-strip-list">
                 {shots.map((shot) => {
                   const isActive = activeShot?.shotIndex === shot.shotIndex;
+                  const narrationClip = narrationClipByShotIndex.get(shot.shotIndex);
+                  const isDragging = draggingShotIndex === shot.shotIndex;
+                  const isSorting = sortingShotIndex === shot.shotIndex;
                   return (
                     <button
                       key={shot.shotIndex}
-                      className={`task-visual-shot-strip-item ${isActive ? "active" : ""}`}
+                      className={`task-visual-shot-strip-item ${isActive ? "active" : ""}${isDragging ? " dragging" : ""}${isSorting ? " sorting" : ""}`}
                       type="button"
+                      draggable={!generationMutationLocked && !sortingShotIndex}
+                      title="拖拽调整镜头顺序"
+                      onDragEnd={() => setDraggingShotIndex(null)}
+                      onDragOver={(event) => {
+                        if (draggingShotIndex && draggingShotIndex !== shot.shotIndex) {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                        }
+                      }}
+                      onDragStart={(event) => {
+                        if (generationMutationLocked || sortingShotIndex) {
+                          event.preventDefault();
+                          return;
+                        }
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", String(shot.shotIndex));
+                        setDraggingShotIndex(shot.shotIndex);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const rawSourceShotIndex = event.dataTransfer.getData("text/plain");
+                        const sourceShotIndex = Number(rawSourceShotIndex || draggingShotIndex);
+                        if (Number.isFinite(sourceShotIndex)) {
+                          void handleReorderShot(sourceShotIndex, shot.shotIndex);
+                        }
+                      }}
                       onClick={() => handleSelectShot(shot)}
                     >
                       <div className="task-visual-shot-strip-media">
@@ -622,6 +773,17 @@ export function VisualImageModule({
                         )}
                       </div>
                       <span className="task-visual-shot-strip-label">{`镜头${shot.shotIndex}`}</span>
+                      <span
+                        className={`task-visual-shot-strip-asset${shot.needsAiFallback ? " needs-fallback" : ""}`}
+                        title={shot.primaryAssetLabel ?? shot.assetSubjectSummary ?? undefined}
+                      >
+                        {shot.primaryAssetLabel ?? shot.assetSubjectSummary ?? (shot.needsAiFallback ? "AI 补镜头" : "素材待确认")}
+                      </span>
+                      <span
+                        className={`task-visual-shot-strip-audio${narrationClip?.audioUrl ? " ready" : narrationClip ? " pending" : ""}`}
+                      >
+                        {narrationClip?.audioUrl ? "音频已就绪" : narrationClip ? "音频待生成" : "无音频"}
+                      </span>
                     </button>
                   );
                 })}
@@ -635,6 +797,14 @@ export function VisualImageModule({
                     capturedMaterialFirst ? "素材确认" : "图片选择"
                   }（当前镜头${activeShot.shotIndex}）`}</strong>
                   <div className="task-visual-shot-picker-actions">
+                    {taskId ? (
+                      <a
+                        className="btn-pill task-visual-shot-edit-link"
+                        href={`/studio/task-creation/${taskId}/shot-plan?shot=${activeShot.shotIndex}`}
+                      >
+                        调整顺序与细节
+                      </a>
+                    ) : null}
                     <label className="btn-pill task-visual-upload-label">
                       <input
                         type="file"
@@ -654,6 +824,48 @@ export function VisualImageModule({
                       {generatingShotIndex === activeShot.shotIndex ? "重新生成中..." : "重新生成一批"}
                     </button>
                   </div>
+                </div>
+                <div className="task-visual-shot-context-panel">
+                  <div className="task-visual-shot-context-item">
+                    <strong>素材</strong>
+                    <span>
+                      {activeShot.primaryAssetLabel ??
+                        activeShot.assetSubjectSummary ??
+                        (activeShot.needsAiFallback ? "AI 补镜头" : "素材待确认")}
+                    </span>
+                  </div>
+                  <div className="task-visual-shot-context-item">
+                    <strong>表达</strong>
+                    <span>{activeShot.narrationGoal || activeShot.subtitleGoal || activeShot.narrationText || "待确认"}</span>
+                  </div>
+                  <div className="task-visual-shot-context-item">
+                    <strong>台词</strong>
+                    <span>{activeShot.subtitleText || activeShot.narrationText || "无台词"}</span>
+                  </div>
+                  <div className="task-visual-shot-context-item">
+                    <strong>音频</strong>
+                    <span>
+                      {activeNarrationClip?.audioUrl
+                        ? "音频已生成"
+                        : activeNarrationClip
+                          ? "台词已生成，音频待生成"
+                          : "暂无音频"}
+                    </span>
+                  </div>
+                  <div className="task-visual-shot-context-item">
+                    <strong>时长</strong>
+                    <span>
+                      {activeShot.durationSeconds
+                        ? (formatDurationSecondsLabel(activeShot.durationSeconds) ?? `${activeShot.durationSeconds} 秒`)
+                        : "待确认"}
+                    </span>
+                  </div>
+                  {activeShot.bindingReason || activeShot.userIntentPreserved ? (
+                    <div className="task-visual-shot-context-item wide">
+                      <strong>确认重点</strong>
+                      <span>{[activeShot.bindingReason, activeShot.userIntentPreserved].filter(Boolean).join("；")}</span>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="task-visual-shot-candidate-list">
                   {activeShot.candidates.length ? (

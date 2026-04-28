@@ -119,9 +119,12 @@ function parseShotPlanText(text: string, fallback: EditorShot): EditorShot {
 
 function normalizeEditorStateTimings(state: LocalEditorState): LocalEditorState {
   let cursor = 0;
+  let shotCursor = 1;
   const segments = state.segments.map((segment) => {
     let segmentDuration = 0;
     const shots = segment.shots.map((shot) => {
+      const shotIndex = shotCursor;
+      shotCursor += 1;
       const durationSeconds = Number.isFinite(shot.durationSeconds)
         ? Math.max(0.8, Number(Number(shot.durationSeconds).toFixed(2)))
         : 0.8;
@@ -131,6 +134,11 @@ function normalizeEditorStateTimings(state: LocalEditorState): LocalEditorState 
       segmentDuration = Number((segmentDuration + durationSeconds).toFixed(2));
       return {
         ...shot,
+        shotId: `shot-${shotIndex}`,
+        shotIndex,
+        sourceShotIndex: shot.sourceShotIndex ?? shot.shotIndex,
+        segmentId: segment.segmentId,
+        segmentIndex: segment.segmentIndex,
         durationSeconds,
         startAtSeconds,
         endAtSeconds,
@@ -281,6 +289,7 @@ export function ShotPlanEditor({
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveMessage, setSaveMessage] = useState("");
   const [dirtyVersion, setDirtyVersion] = useState(0);
+  const [draggingShotSourceIndex, setDraggingShotSourceIndex] = useState<number | null>(null);
   const dirtyVersionRef = useRef(0);
   const latestEditorStateRef = useRef(editorState);
   const baseUpdatedAtRef = useRef(updatedAt);
@@ -375,6 +384,10 @@ export function ShotPlanEditor({
     setDirtyVersion(dirtyVersionRef.current);
   }
 
+  function getShotSourceIndex(shot: LocalEditorShot) {
+    return shot.sourceShotIndex ?? shot.shotIndex;
+  }
+
   function updateSegmentNarration(segmentIndex: number, narrationText: string) {
     setEditorState((current) =>
       normalizeEditorStateTimings({
@@ -445,6 +458,46 @@ export function ShotPlanEditor({
     markDirty();
   }
 
+  function reorderShot(sourceShotSourceIndex: number, targetShotSourceIndex: number) {
+    if (sourceShotSourceIndex === targetShotSourceIndex) {
+      return;
+    }
+
+    let moved = false;
+    setEditorState((current) => {
+      const flatShots = current.segments.flatMap((segment) => segment.shots);
+      const currentIndex = flatShots.findIndex((shot) => getShotSourceIndex(shot) === sourceShotSourceIndex);
+      const nextIndex = flatShots.findIndex((shot) => getShotSourceIndex(shot) === targetShotSourceIndex);
+      if (currentIndex < 0 || nextIndex < 0 || currentIndex === nextIndex) {
+        return current;
+      }
+
+      const nextFlatShots = [...flatShots];
+      const [movedShot] = nextFlatShots.splice(currentIndex, 1);
+      if (!movedShot) {
+        return current;
+      }
+      nextFlatShots.splice(nextIndex, 0, movedShot);
+
+      let cursor = 0;
+      const segments = current.segments.map((segment) => {
+        const count = segment.shots.length;
+        const shots = nextFlatShots.slice(cursor, cursor + count);
+        cursor += count;
+        return {
+          ...segment,
+          shots,
+        };
+      });
+
+      moved = true;
+      return normalizeEditorStateTimings({ ...current, segments });
+    });
+    if (moved) {
+      markDirty();
+    }
+  }
+
   return (
     <main className="shot-plan-table-page shot-plan-editor-page">
       <header className="shot-plan-table-hero">
@@ -509,23 +562,58 @@ export function ShotPlanEditor({
                   </th>
                   <td>
                     <div className="shot-plan-cell-stack">
-                      {segment.shots.map((shot) => (
-                        <article
-                          key={`plan-${shot.shotId}`}
-                          id={`shot-edit-${shot.shotIndex}`}
-                          className={`shot-plan-cell-block shot-plan-editor-table-shot ${
-                            highlightedShotIndex === shot.shotIndex ? "is-targeted" : ""
-                          }`}
-                        >
-                          <strong>{`镜头 ${shot.shotIndex}`}</strong>
-                          <AutoGrowTextarea
-                            className="shot-plan-editor-table-textarea shot-plan-editor-shot-plan-textarea"
-                            label="Shot Plan"
-                            value={getShotPlanText(shot)}
-                            onChange={(value) => updateShotPlanText(segment.segmentIndex, shot.shotIndex, value)}
-                          />
-                        </article>
-                      ))}
+                      {segment.shots.map((shot) => {
+                        const sourceShotIndex = getShotSourceIndex(shot);
+                        const isDragging = draggingShotSourceIndex === sourceShotIndex;
+
+                        return (
+                          <article
+                            key={`plan-${shot.shotId}`}
+                            id={`shot-edit-${shot.shotIndex}`}
+                            className={`shot-plan-cell-block shot-plan-editor-table-shot ${
+                              highlightedShotIndex === shot.shotIndex ? "is-targeted" : ""
+                            }${isDragging ? " is-dragging" : ""}`}
+                            onDragOver={(event) => {
+                              if (draggingShotSourceIndex && draggingShotSourceIndex !== sourceShotIndex) {
+                                event.preventDefault();
+                                event.dataTransfer.dropEffect = "move";
+                              }
+                            }}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              const rawSourceShotIndex = event.dataTransfer.getData("text/plain");
+                              const nextSourceShotIndex = Number(rawSourceShotIndex || draggingShotSourceIndex);
+                              if (Number.isFinite(nextSourceShotIndex)) {
+                                reorderShot(nextSourceShotIndex, sourceShotIndex);
+                              }
+                              setDraggingShotSourceIndex(null);
+                            }}
+                          >
+                            <div className="shot-plan-editor-shot-head">
+                              <strong>{`镜头 ${shot.shotIndex}`}</strong>
+                              <span
+                                className="shot-plan-editor-drag-handle"
+                                draggable
+                                title="拖拽调整镜头顺序"
+                                onDragEnd={() => setDraggingShotSourceIndex(null)}
+                                onDragStart={(event) => {
+                                  event.dataTransfer.effectAllowed = "move";
+                                  event.dataTransfer.setData("text/plain", String(sourceShotIndex));
+                                  setDraggingShotSourceIndex(sourceShotIndex);
+                                }}
+                              >
+                                拖拽排序
+                              </span>
+                            </div>
+                            <AutoGrowTextarea
+                              className="shot-plan-editor-table-textarea shot-plan-editor-shot-plan-textarea"
+                              label="Shot Plan"
+                              value={getShotPlanText(shot)}
+                              onChange={(value) => updateShotPlanText(segment.segmentIndex, shot.shotIndex, value)}
+                            />
+                          </article>
+                        );
+                      })}
                     </div>
                   </td>
                   <td>

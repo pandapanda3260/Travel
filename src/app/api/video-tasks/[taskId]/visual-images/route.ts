@@ -254,6 +254,12 @@ function buildShotPayload(taskId: string) {
       const candidates = saved?.candidates ?? [];
       const selectedCandidate =
         candidates.find((candidate) => candidate.candidateId === saved?.selectedCandidateId) ?? null;
+      const storyShot = task.directorPlan?.storyShots.find((item) => item.shotIndex === shot.shotIndex) ?? null;
+      const shotPlanItem = task.shotPlan?.shots.find((item) => item.shotIndex === shot.shotIndex) ?? null;
+      const storyboard =
+        task.shotPlan?.storyboard?.shotBindings.find((item) => item.shotIndex === shot.shotIndex) ??
+        task.directorPlan?.storyboard?.shotBindings.find((item) => item.shotIndex === shot.shotIndex) ??
+        null;
       return {
         segmentId: shot.segmentId,
         segmentIndex: shot.segmentIndex,
@@ -264,6 +270,17 @@ function buildShotPayload(taskId: string) {
         generationMode: shot.generationMode ?? null,
         assetId: shot.assetId ?? null,
         assetSubjectSummary: shot.assetSubjectSummary ?? null,
+        narrationText: storyShot?.narrationText || shotPlanItem?.narrationHint || "",
+        subtitleText: storyShot?.subtitleText || storyShot?.narrationText || shotPlanItem?.narrationHint || "",
+        durationSeconds: storyShot?.durationSeconds ?? shotPlanItem?.durationSeconds ?? null,
+        primaryAssetLabel: storyboard?.primaryAssetLabel ?? shot.assetSubjectSummary ?? null,
+        bindingReason: storyboard?.bindingReason ?? null,
+        userIntentPreserved: storyboard?.userIntentPreserved ?? null,
+        narrationGoal: storyboard?.narrationGoal ?? null,
+        subtitleGoal: storyboard?.subtitleGoal ?? null,
+        needsAiFallback:
+          storyboard?.needsAiFallback ??
+          (!shot.assetId && shot.generationMode !== "photo_direct_i2v" && shot.generationMode !== "photo_enhanced_i2v"),
         referenceImageUrl: shot.referenceImageUrl ?? null,
         size: shot.size,
         guidanceScale: shot.guidanceScale,

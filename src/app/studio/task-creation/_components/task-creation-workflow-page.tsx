@@ -261,7 +261,12 @@ type VideoGenerationWorkflowResponse = {
 
 const taskCreateDraftLegacyStorageKey = "task-creation-inline-draft";
 type TaskCreateStatus = "idle" | "editing" | "created";
-const taskDetailModules: Array<{ title: string; targetStatus: VideoTaskStatus; placeholder: string }> = [
+const taskDetailModules: Array<{
+  title: string;
+  targetStatus: VideoTaskStatus;
+  placeholder: string;
+  combinedMaterialWorkbench?: boolean;
+}> = [
   {
     title: "第三步：台词配音生成",
     targetStatus: "SUBTITLE_AUDIO_READY",
@@ -767,6 +772,29 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   const selectedProductOption = productOptions.find((item) => item.id === createSelectedProductId) ?? null;
   const selectedReferenceVideoMaterialOption =
     referenceVideoMaterialOptions.find((item) => item.materialId === createVideoMaterialId) ?? null;
+  const storyboardPlan = selectedTask?.shotPlan?.storyboard ?? selectedTask?.directorPlan?.storyboard ?? null;
+  const storyboardSummary = useMemo(() => {
+    if (!storyboardPlan) {
+      return null;
+    }
+
+    const boundMaterialCount = storyboardPlan.materialIntents.filter(
+      (asset) => asset.mappedShotIndexes.length > 0,
+    ).length;
+    const aiFallbackCount = storyboardPlan.shotBindings.filter((binding) => binding.needsAiFallback).length;
+
+    return {
+      beatCount: storyboardPlan.beats.length,
+      materialCount: storyboardPlan.materialIntents.length,
+      boundMaterialCount,
+      shotBindingCount: storyboardPlan.shotBindings.length,
+      aiFallbackCount,
+    };
+  }, [storyboardPlan]);
+  const storyboardBindingByShotIndex = useMemo(
+    () => new Map((storyboardPlan?.shotBindings ?? []).map((binding) => [binding.shotIndex, binding])),
+    [storyboardPlan],
+  );
   const subtitlePreviewMaterials = useMemo(
     () =>
       (selectedTask?.directorPlan?.storyShots ?? []).map((shot) => ({
@@ -3736,19 +3764,37 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
   const taskDetailModuleConfigs = useMemo(
     () =>
-      taskDetailModules.map((module) => {
-        if (
-          module.targetStatus === "IMAGES_READY" &&
-          selectedTask &&
-          usesCapturedMaterialFirstWorkflow(selectedTask.parameters.video.videoType)
-        ) {
-          return {
-            ...module,
-            title: "第四步：素材镜头确认",
-            placeholder: "完成镜头规划后，这里会优先把上传实拍图和视频关键帧同步成镜头候选，供后续片段生成使用。",
-          };
+      taskDetailModules.flatMap((module) => {
+        const capturedMaterialTask = Boolean(
+          selectedTask && usesCapturedMaterialFirstWorkflow(selectedTask.parameters.video.videoType),
+        );
+        if (!capturedMaterialTask) {
+          return [module];
         }
-        return module;
+
+        if (module.targetStatus === "SUBTITLE_AUDIO_READY") {
+          return [{
+            ...module,
+            title: "第三步：素材镜头工作台",
+            placeholder:
+              "完成故事板后，这里会合并处理镜头顺序、台词音频、字幕节奏和素材镜头确认。",
+            combinedMaterialWorkbench: true,
+          }];
+        }
+
+        if (module.targetStatus === "IMAGES_READY") {
+          return [];
+        }
+
+        if (module.targetStatus === "CLIPS_READY") {
+          return [{ ...module, title: "第四步：片段生成" }];
+        }
+
+        if (module.targetStatus === "COMPOSITION_READY") {
+          return [{ ...module, title: "第五步：视频合成" }];
+        }
+
+        return [module];
       }),
     [selectedTask],
   );
@@ -4015,8 +4061,8 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                       <div className="task-plan-content-stack">
                         <div className="task-plan-detail-entry">
                           <div className="task-plan-detail-entry-copy">
-                            <strong>镜头计划及提示词展示页</strong>
-                            <span>用表格查看片段、Shot Plan、时间参数、文生图提示词、图生视频提示词和解说词。</span>
+                            <strong>故事板与镜头计划展示页</strong>
+                            <span>用表格查看叙事结构、素材镜头绑定、时间参数、提示词、台词和字幕。</span>
                           </div>
                           <div className="task-plan-detail-entry-meta">
                             {shotPlanDisplay ? (
@@ -4042,6 +4088,81 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             详情查看与编辑
                           </Link>
                         </div>
+                        {storyboardPlan && storyboardSummary ? (
+                          <details className="task-shot-plan-panel task-storyboard-panel" open>
+                            <summary className="task-shot-plan-panel-summary">
+                              <div className="task-shot-plan-panel-title">
+                                <strong>商业故事板</strong>
+                                <span>{storyboardPlan.narrativeSummary}</span>
+                              </div>
+                              <div className="task-shot-plan-panel-metrics">
+                                <span>{`${storyboardSummary.beatCount} 个叙事段`}</span>
+                                <span>{`${storyboardSummary.boundMaterialCount}/${storyboardSummary.materialCount} 素材已绑定`}</span>
+                                <span>{`${storyboardSummary.shotBindingCount} 个镜头映射`}</span>
+                                {storyboardSummary.aiFallbackCount ? (
+                                  <span className="danger">{`${storyboardSummary.aiFallbackCount} 个 AI 补镜头`}</span>
+                                ) : null}
+                              </div>
+                              <span className="task-shot-plan-panel-toggle task-subtitle-audio-detail-toggle">
+                                <span>展开</span>
+                                <span className="task-subtitle-audio-detail-toggle-icon is-open" aria-hidden="true" />
+                              </span>
+                            </summary>
+                            <div className="task-shot-plan-panel-body task-storyboard-body">
+                              <div className="task-storyboard-brief">
+                                <span>{storyboardPlan.speakingStyle}</span>
+                                <span>{storyboardPlan.editingGuidance}</span>
+                              </div>
+                              {storyboardPlan.warnings.length ? (
+                                <div className="notice-bar compact inline task-storyboard-warning">
+                                  <strong>待确认</strong>
+                                  <span>{storyboardPlan.warnings.join(" ")}</span>
+                                </div>
+                              ) : null}
+                              <div className="task-storyboard-beat-grid">
+                                {storyboardPlan.beats.map((beat) => (
+                                  <article key={beat.beatId} className="task-storyboard-beat-card">
+                                    <div className="task-storyboard-card-head">
+                                      <strong>{beat.title}</strong>
+                                      <span>{beat.durationRangeLabel}</span>
+                                    </div>
+                                    <p>{beat.goal}</p>
+                                    <div className="task-storyboard-chip-row">
+                                      <span>{`镜头 ${beat.targetShotIndexes.join("、")}`}</span>
+                                      <span>{beat.materialStrategy}</span>
+                                    </div>
+                                  </article>
+                                ))}
+                              </div>
+                              <div className="task-storyboard-map-board">
+                                {storyboardPlan.shotBindings.map((binding) => (
+                                  <article
+                                    key={`storyboard-binding-${binding.shotIndex}`}
+                                    className={`task-storyboard-map-row${binding.needsAiFallback ? " needs-fallback" : ""}`}
+                                  >
+                                    <div className="task-storyboard-map-index">
+                                      <strong>{`镜头 ${binding.shotIndex}`}</strong>
+                                      <span>{binding.segmentIndex ? `片段 ${binding.segmentIndex}` : "未分片段"}</span>
+                                    </div>
+                                    <div className="task-storyboard-map-copy">
+                                      <strong>{binding.primaryAssetLabel}</strong>
+                                      <span>{binding.bindingReason}</span>
+                                      <span>{binding.userIntentPreserved}</span>
+                                    </div>
+                                    <div className="task-storyboard-map-goal">
+                                      <span>{binding.narrationGoal || binding.subtitleGoal}</span>
+                                    </div>
+                                  </article>
+                                ))}
+                              </div>
+                            </div>
+                          </details>
+                        ) : (
+                          <div className="notice-bar compact inline task-storyboard-warning">
+                            <strong>故事板待生成</strong>
+                            <span>重新生成镜头计划后，会自动补充叙事段落、素材意图和图片镜头绑定说明。</span>
+                          </div>
+                        )}
                       </div>
                       <div className="task-create-parameter-stack task-plan-parameter-stack">
                         <section className="task-inline-parameter-group">
@@ -4234,7 +4355,41 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                   compositionPrimaryAction?.progressPercent ??
                   (isTaskStageProgressRunning(compositionStageProgress) ? (compositionStageProgress?.percent ?? 0) : 0);
                 const moduleStatusMeta =
-                  module.targetStatus === "SUBTITLE_AUDIO_READY" && keyMaterialSubtitleStep?.status === "failed"
+                  module.combinedMaterialWorkbench && keyMaterialVisualStep?.status === "failed"
+                    ? {
+                        label: "失败待重试",
+                        tone: "editing" as const,
+                      }
+                    : module.combinedMaterialWorkbench &&
+                        selectedTask &&
+                        visualStageAvailable &&
+                        visualModuleTotal > 0 &&
+                        visualModuleRunning
+                      ? {
+                          label: `生成中 ${visualCandidateReadyCount}/${visualModuleTotal} 镜`,
+                          tone: "editing" as const,
+                        }
+                      : module.combinedMaterialWorkbench &&
+                          selectedTask &&
+                          visualStageAvailable &&
+                          visualModuleTotal > 0 &&
+                          visualCandidateReadyCount > 0 &&
+                          visualCandidateReadyCount < visualModuleTotal
+                        ? {
+                            label: `进行中 ${visualCandidateReadyCount}/${visualModuleTotal} 镜`,
+                            tone: "editing" as const,
+                          }
+                        : module.combinedMaterialWorkbench &&
+                            selectedTask &&
+                            visualStageAvailable &&
+                            visualModuleTotal > 0 &&
+                            visualCandidateReadyCount === visualModuleTotal &&
+                            visualSelectedCount < visualModuleTotal
+                          ? {
+                              label: `待选图 ${visualSelectedCount}/${visualModuleTotal} 镜`,
+                              tone: "editing" as const,
+                            }
+                          : module.targetStatus === "SUBTITLE_AUDIO_READY" && keyMaterialSubtitleStep?.status === "failed"
                     ? {
                         label: "失败待重试",
                         tone: "editing" as const,
@@ -4355,6 +4510,9 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                   {formatDurationSecondsLabel(subtitleAudioDurationSeconds) ??
                                     `${subtitleAudioDurationSeconds} 秒`}
                                 </span>
+                                {storyboardSummary ? (
+                                  <span>{`${storyboardSummary.boundMaterialCount} 个素材关联`}</span>
+                                ) : null}
                                 {subtitleAudioOvertimeCount ? (
                                   <span className="danger">{`${subtitleAudioOvertimeCount} 镜超时`}</span>
                                 ) : null}
@@ -4408,6 +4566,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                     const lineText = getSubtitleAudioClipLineText(clip);
                                     const isEditingLine = editingSubtitleAudioClipId === clip.id;
                                     const isSavingLine = savingSubtitleAudioClipIds.includes(clip.id);
+                                    const storyboardBinding = storyboardBindingByShotIndex.get(clip.shotIndex);
                                     const editButtonDisabled =
                                       isSavingLine || keyMaterialWorkflowRunning || subtitleActionRunning;
                                     const readingCheckMeta = getReadingCheckMeta(
@@ -4422,6 +4581,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                       >
                                         <div className="task-subtitle-audio-shot-cell">
                                           <strong>{`镜头 ${clip.shotIndex}`}</strong>
+                                          {storyboardBinding ? (
+                                            <span
+                                              className={`task-subtitle-audio-shot-asset${storyboardBinding.needsAiFallback ? " needs-fallback" : ""}`}
+                                            >
+                                              {storyboardBinding.primaryAssetLabel}
+                                            </span>
+                                          ) : null}
                                         </div>
                                         <div className="task-subtitle-audio-line-cell">
                                           <div
@@ -4474,6 +4640,12 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                           {readingCheckMeta.isOvertime ? (
                                             <span className="task-subtitle-audio-warning compact">{`预计超时 ${formatDurationSecondsLabel(readingCheckMeta.overflowSeconds) ?? "0 秒"}，建议压缩台词。`}</span>
                                           ) : null}
+                                          {storyboardBinding ? (
+                                            <div className="task-subtitle-audio-context">
+                                              <span>{storyboardBinding.narrationGoal || storyboardBinding.subtitleGoal}</span>
+                                              <span>{storyboardBinding.bindingReason}</span>
+                                            </div>
+                                          ) : null}
                                         </div>
                                         <div className="task-subtitle-audio-duration-cell">
                                           <span>{`镜头 ${formatDurationSecondsLabel(clip.durationSeconds) ?? "0 秒"}`}</span>
@@ -4509,6 +4681,40 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             </div>
                           </details>
                         ) : null}
+                        {module.combinedMaterialWorkbench ? (
+                          <section className="task-material-workbench-panel">
+                            <div className="task-material-workbench-panel-head">
+                              <div>
+                                <strong>素材镜头确认</strong>
+                                <span>按镜头统一确认图片/视频素材、字幕台词和候选画面。</span>
+                              </div>
+                              {videoGenerationActionState ? (
+                                <TaskNextStepButton
+                                  state={videoGenerationActionState}
+                                  onBlocked={(reason) => {
+                                    setError(reason);
+                                  }}
+                                />
+                              ) : null}
+                            </div>
+                            {visualStageAvailable ? (
+                              <VisualImageModule
+                                key={`visual-${selectedTask?.taskId ?? "empty"}`}
+                                task={selectedTask}
+                                persistedStageProgress={visualStageProgress}
+                                narrationClips={subtitleAudioResult?.clips ?? []}
+                                onTaskUpdate={handleReplaceTask}
+                                onPrimaryActionChange={handleVisualPrimaryActionChange}
+                                onSummaryChange={handleVisualPipelineSummaryChange}
+                                workflowLocked={createActionRunning || keyMaterialWorkflowRunning}
+                              />
+                            ) : (
+                              <div className="task-module-empty">
+                                关键素材生成完成后，这里会展示素材镜头轨道、候选图和当前镜头检查器。
+                              </div>
+                            )}
+                          </section>
+                        ) : null}
                       </div>
                     ) : null}
                     {module.targetStatus === "IMAGES_READY" ? (
@@ -4518,6 +4724,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             key={`visual-${selectedTask?.taskId ?? "empty"}`}
                             task={selectedTask}
                             persistedStageProgress={visualStageProgress}
+                            narrationClips={subtitleAudioResult?.clips ?? []}
                             onTaskUpdate={handleReplaceTask}
                             onPrimaryActionChange={handleVisualPrimaryActionChange}
                             onSummaryChange={handleVisualPipelineSummaryChange}
