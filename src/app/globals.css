@@ -949,6 +949,15 @@ textarea {
   line-height: 1.45;
 }
 
+.hotel-asset-strip-count {
+  margin-left: auto;
+  color: #7b86ab;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+
 .task-visual-shot-strip-list {
   display: grid;
   grid-auto-flow: column;
@@ -1285,7 +1294,7 @@ textarea {
 .hotel-asset-strip-item {
   position: relative;
   gap: 10px;
-  cursor: grab;
+  cursor: default;
 }
 
 .hotel-asset-strip-item.dragging {
@@ -1344,12 +1353,21 @@ textarea {
   cursor: not-allowed;
 }
 
-.hotel-asset-name-input {
+.hotel-asset-sequence-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
   min-height: 30px;
   padding: 0 10px;
+  border: 1px solid rgba(110, 123, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #243458;
   text-align: center;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.45;
 }
 
 .hotel-asset-strip-caption {
@@ -5995,8 +6013,14 @@ textarea {
   align-items: center;
   justify-content: center;
   min-width: 0;
+  color: inherit;
   line-height: 1;
   white-space: nowrap;
+}
+
+.btn-primary.task-next-step-button,
+.btn-primary.task-next-step-button .task-next-step-button-text {
+  color: #fff;
 }
 
 .task-next-step-button.is-running {
@@ -8808,6 +8832,23 @@ textarea {
   background: rgba(255, 111, 136, 0.12);
 }
 
+.hotel-asset-ai-optimize-button.btn-secondary {
+  border-color: transparent;
+  background: linear-gradient(135deg, #4568f0 0%, #6e7cff 100%);
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(69, 104, 240, 0.22);
+}
+
+.hotel-asset-ai-optimize-button.btn-secondary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #3658d9 0%, #5f6ff0 100%);
+}
+
+.hotel-asset-ai-optimize-button.btn-secondary:disabled {
+  opacity: 0.66;
+  cursor: wait;
+  transform: none;
+}
+
 .prompt-box {
   width: 100%;
   min-height: 132px;
@@ -9424,11 +9465,14 @@ button.setting-select.active::after {
 }
 
 .video-param-row strong {
+  min-width: 0;
+  overflow: hidden;
   color: #28385d;
   font-size: 12px;
   line-height: 1.5;
   text-align: left;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
 }
 

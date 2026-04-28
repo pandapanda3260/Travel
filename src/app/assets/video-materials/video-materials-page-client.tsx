@@ -64,6 +64,42 @@ function getEditableMaterialName(record: Pick<VideoMaterialRecord, "name" | "sub
   return record.videoFileName ?? "";
 }
 
+function copyTextWithLegacySelection(text: string): boolean {
+  const textarea = document.createElement("textarea");
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, text.length);
+
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  activeElement?.focus({ preventScroll: true });
+
+  return copied;
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (copyTextWithLegacySelection(text)) {
+    return;
+  }
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  throw new Error("Clipboard copy failed");
+}
+
 function getMaterialListStatusMeta(status: VideoMaterialRecord["status"]) {
   switch (status) {
     case "ready":
@@ -574,13 +610,14 @@ export default function VideoMaterialsPageClient({
 
   const handleCopyMaterialId = useCallback(async (materialId: string) => {
     try {
-      await navigator.clipboard.writeText(materialId);
+      await copyTextToClipboard(materialId);
       setCopiedMaterialId(materialId);
       if (copiedTimerRef.current) {
         window.clearTimeout(copiedTimerRef.current);
       }
       copiedTimerRef.current = window.setTimeout(() => setCopiedMaterialId(""), 1200);
-    } catch {
+    } catch (copyError) {
+      console.warn("复制素材 ID 失败", copyError);
       window.alert("复制失败，请稍后重试");
     }
   }, []);
@@ -872,7 +909,10 @@ export default function VideoMaterialsPageClient({
                                 type="button"
                                 aria-label="复制素材 ID"
                                 title={copiedMaterialId === material.materialId ? "已复制" : "复制素材 ID"}
-                                onClick={() => void handleCopyMaterialId(material.materialId)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleCopyMaterialId(material.materialId);
+                                }}
                               >
                                 {copiedMaterialId === material.materialId ? (
                                   <Check size={13} strokeWidth={2.2} />
@@ -1022,7 +1062,7 @@ export default function VideoMaterialsPageClient({
                     {previewInfoRows.map((item) => (
                       <div key={item.label} className="video-param-row">
                         <span>{item.label}</span>
-                        <strong>{item.value}</strong>
+                        <strong title={item.value}>{item.value}</strong>
                       </div>
                     ))}
                   </div>
@@ -1049,7 +1089,10 @@ export default function VideoMaterialsPageClient({
                           type="button"
                           aria-label="复制素材 ID"
                           title={copiedMaterialId === selectedMaterial.materialId ? "已复制" : "复制素材 ID"}
-                          onClick={() => void handleCopyMaterialId(selectedMaterial.materialId)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleCopyMaterialId(selectedMaterial.materialId);
+                          }}
                         >
                           {copiedMaterialId === selectedMaterial.materialId ? (
                             <Check size={13} strokeWidth={2.2} />

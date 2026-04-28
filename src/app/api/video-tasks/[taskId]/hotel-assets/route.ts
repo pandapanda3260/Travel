@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { after, NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 
+import { getHotelAssetDisplayOrder } from "../../../../../lib/hotel-asset-ordering";
 import { buildPendingHotelAssetAnalysis } from "../../../../../lib/hotel-asset-upload";
 import { generateSeedreamImages, type ImageGenerationResult } from "../../../../../lib/image-provider";
 import { getImageCleaningRuntime } from "../../../../../lib/image-provider-config";
@@ -89,16 +90,22 @@ async function readGeneratedImageAsset(asset: ImageGenerationResult) {
 
 function getHotelAssetEnhancementSize(asset: TaskHotelAssetRecord) {
   if (asset.orientation === "square") {
-    return "1024x1024";
+    return "1920x1920";
   }
 
-  return asset.orientation === "landscape" ? "1280x720" : "720x1280";
+  return asset.orientation === "landscape" ? "2560x1440" : "1440x2560";
+}
+
+function listTaskHotelAssetsForResponse(taskId: string) {
+  return getHotelAssetDisplayOrder(listTaskHotelAssets(taskId));
 }
 
 function buildHotelAssetEnhancementPrompt(asset: TaskHotelAssetRecord, prompt: string) {
   const userPrompt = prompt.trim();
   const sceneLabel = asset.subjectSummary || asset.fileName || "酒店实拍画面";
-  const basePrompt = userPrompt || "提升清晰度、光影层次和画面通透感，保持真实酒店空间、主体结构、材质和构图，不新增不存在的家具、人物或文字。";
+  const basePrompt =
+    userPrompt ||
+    "提升清晰度、光影层次和画面通透感，保持真实酒店空间、主体结构、材质和构图，不新增不存在的家具、人物或文字。";
 
   return [
     `基于上传的酒店实拍参考图进行真实感图片优化，主体内容：${sceneLabel}。`,
@@ -430,7 +437,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
   return NextResponse.json({
     task: access.task,
-    assets: listTaskHotelAssets(taskId),
+    assets: listTaskHotelAssetsForResponse(taskId),
     runtime: getHotelAssetVisionProviderMeta(),
   });
 }
@@ -557,13 +564,13 @@ export async function POST(request: NextRequest, context: RouteContext) {
       assetId: asset.assetId,
       taskId,
       ownerUserId: access.task.ownerUserId,
-      autoGroupOnFirstAnalysis: !replaceAsset,
+      autoGroupOnFirstAnalysis: false,
     });
 
     return NextResponse.json({
       task: access.task,
       asset,
-      assets: listTaskHotelAssets(taskId),
+      assets: listTaskHotelAssetsForResponse(taskId),
       runtime: getHotelAssetVisionProviderMeta(),
     });
   } catch (error) {
@@ -604,7 +611,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         task: access.task,
         asset,
         enhancedAssets,
-        assets: listTaskHotelAssets(taskId),
+        assets: listTaskHotelAssetsForResponse(taskId),
         runtime: getHotelAssetVisionProviderMeta(),
       });
     }
@@ -626,7 +633,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
       return NextResponse.json({
         task: access.task,
-        assets: listTaskHotelAssets(taskId),
+        assets: listTaskHotelAssetsForResponse(taskId),
         runtime: getHotelAssetVisionProviderMeta(),
       });
     }
@@ -685,7 +692,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     return NextResponse.json({
       task: access.task,
       asset: updated,
-      assets: listTaskHotelAssets(taskId),
+      assets: listTaskHotelAssetsForResponse(taskId),
       runtime: getHotelAssetVisionProviderMeta(),
     });
   } catch (error) {
@@ -716,7 +723,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     deleteTaskHotelAsset(assetId);
     return NextResponse.json({
       task: access.task,
-      assets: listTaskHotelAssets(taskId),
+      assets: listTaskHotelAssetsForResponse(taskId),
     });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "酒店素材删除失败" }, { status: 500 });

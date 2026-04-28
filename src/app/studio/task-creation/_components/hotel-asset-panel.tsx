@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { getHotelAssetDisplayOrder } from "../../../../lib/hotel-asset-ordering";
 import type { TaskHotelAssetRecord } from "../../../../lib/task-hotel-asset-store";
 import {
   usesCapturedMaterialFirstWorkflow,
@@ -107,9 +108,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
   const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading">("idle");
   const [replacingAssetId, setReplacingAssetId] = useState("");
   const [deletingAssetId, setDeletingAssetId] = useState("");
-  const [namingAssetId, setNamingAssetId] = useState("");
   const [enhancingAssetId, setEnhancingAssetId] = useState("");
-  const [draggingAssetId, setDraggingAssetId] = useState("");
   const [activeAssetId, setActiveAssetId] = useState("");
   const [previewAssetId, setPreviewAssetId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -199,27 +198,25 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
 
   const applyAssets = useCallback(
     (nextAssets: TaskHotelAssetRecord[]) => {
-      setAssets(nextAssets);
-      onAssetCountChange?.(nextAssets.length);
+      const orderedAssets = getHotelAssetDisplayOrder(nextAssets);
+      setAssets(orderedAssets);
+      onAssetCountChange?.(orderedAssets.length);
       setAssetDrafts((currentDrafts) => {
-        const nextDrafts = buildAssetDrafts(nextAssets);
-        for (const asset of nextAssets) {
+        const nextDrafts = buildAssetDrafts(orderedAssets);
+        for (const asset of orderedAssets) {
           const currentDraft = currentDrafts[asset.assetId];
           const currentSyncState = assetSyncStatesRef.current[asset.assetId];
-          if (
-            currentDraft &&
-            (currentSyncState?.phase === "scheduled" || currentSyncState?.phase === "saving")
-          ) {
+          if (currentDraft && (currentSyncState?.phase === "scheduled" || currentSyncState?.phase === "saving")) {
             nextDrafts[asset.assetId] = currentDraft;
           }
         }
         return nextDrafts;
       });
       setActiveAssetId((current) => {
-        if (nextAssets.length === 0) {
+        if (orderedAssets.length === 0) {
           return "";
         }
-        return nextAssets.some((asset) => asset.assetId === current) ? current : (nextAssets[0]?.assetId ?? "");
+        return orderedAssets.some((asset) => asset.assetId === current) ? current : (orderedAssets[0]?.assetId ?? "");
       });
     },
     [buildAssetDrafts, onAssetCountChange],
@@ -569,58 +566,6 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
     }
   }
 
-  async function handleRenameAsset(assetId: string) {
-    const draft = assetDraftsRef.current[assetId];
-    const assetIndex = assetsRef.current.findIndex((item) => item.assetId === assetId);
-    if (!draft || assetIndex < 0) {
-      return;
-    }
-
-    const nextDisplayName = sliceDisplayName(draft.displayName) || getDefaultDisplayName(assetIndex);
-    setAssetDrafts((current) => ({
-      ...current,
-      [assetId]: {
-        ...current[assetId],
-        displayName: nextDisplayName,
-      },
-    }));
-
-    setNamingAssetId(assetId);
-    setError(null);
-    try {
-      await patchAsset(
-        {
-          assetId,
-          displayName: nextDisplayName,
-        },
-        "图片名称更新失败",
-      );
-    } catch (renameError) {
-      setError(renameError instanceof Error ? renameError.message : "图片名称更新失败");
-    } finally {
-      setNamingAssetId("");
-    }
-  }
-
-  async function handleReorderAssets(nextAssets: TaskHotelAssetRecord[]) {
-    setAssets(nextAssets);
-    setError(null);
-    try {
-      await patchAsset(
-        {
-          assetOrders: nextAssets.map((asset, index) => ({
-            assetId: asset.assetId,
-            sortOrder: index,
-          })),
-        },
-        "图片排序更新失败",
-      );
-    } catch (reorderError) {
-      setError(reorderError instanceof Error ? reorderError.message : "图片排序更新失败");
-      await refreshAssets();
-    }
-  }
-
   async function handleDeleteAsset(assetId: string) {
     if (!taskId) {
       return;
@@ -693,22 +638,6 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
     }
   }
 
-  function moveAsset(assetId: string, targetAssetId: string) {
-    if (!assetId || assetId === targetAssetId) {
-      return;
-    }
-    const currentIndex = assets.findIndex((asset) => asset.assetId === assetId);
-    const targetIndex = assets.findIndex((asset) => asset.assetId === targetAssetId);
-    if (currentIndex < 0 || targetIndex < 0) {
-      return;
-    }
-
-    const nextAssets = [...assets];
-    const [movedAsset] = nextAssets.splice(currentIndex, 1);
-    nextAssets.splice(targetIndex, 0, movedAsset);
-    void handleReorderAssets(nextAssets);
-  }
-
   if (!supportsCapturedMaterialAssets) {
     return null;
   }
@@ -717,291 +646,248 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
     <section className="composer-card hotel-asset-panel-shell">
       <div className="hotel-asset-panel-heading">酒店实拍图片</div>
 
-        <div className="hotel-asset-panel-stack">
-          {error ? <div className="task-module-empty">{error}</div> : null}
+      <div className="hotel-asset-panel-stack">
+        {error ? <div className="task-module-empty">{error}</div> : null}
 
-          {taskId && loadStatus === "loading" ? <div className="task-module-empty">酒店素材加载中…</div> : null}
+        {taskId && loadStatus === "loading" ? <div className="task-module-empty">酒店素材加载中…</div> : null}
 
-          <section className="task-visual-shot-strip-card hotel-asset-strip-card">
-            <div className="task-visual-shot-strip-head">
-              <strong className="task-visual-section-title">图片上传</strong>
-            </div>
-            <div className="task-visual-shot-strip-list hotel-asset-strip-list">
-              {assets.map((asset, index) => {
-                const draft = assetDrafts[asset.assetId] ?? buildFallbackDraft(asset, index);
-                const isActive = activeAsset?.assetId === asset.assetId;
+        <section className="task-visual-shot-strip-card hotel-asset-strip-card">
+          <div className="task-visual-shot-strip-head">
+            <strong className="task-visual-section-title">图片上传</strong>
+            <span className="hotel-asset-strip-count">{`共 ${assets.length} 张图片`}</span>
+          </div>
+          <div className="task-visual-shot-strip-list hotel-asset-strip-list">
+            {assets.map((asset, index) => {
+              const draft = assetDrafts[asset.assetId] ?? buildFallbackDraft(asset, index);
+              const isActive = activeAsset?.assetId === asset.assetId;
 
-                return (
-                  <article
-                    key={asset.assetId}
-                    className={`task-visual-shot-strip-item hotel-asset-strip-item${isActive ? " active" : ""}${draggingAssetId === asset.assetId ? " dragging" : ""}`}
-                    draggable
-                    onDragStart={(event) => {
-                      setDraggingAssetId(asset.assetId);
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", asset.assetId);
-                    }}
-                    onDragEnd={() => setDraggingAssetId("")}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "move";
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const sourceAssetId = event.dataTransfer.getData("text/plain");
-                      setDraggingAssetId("");
-                      moveAsset(sourceAssetId, asset.assetId);
-                    }}
-                  >
-                    <div className="hotel-asset-strip-media-shell">
-                      <button
-                        className="task-visual-shot-strip-media hotel-asset-strip-media-button"
-                        type="button"
-                        onClick={() => setActiveAssetId(asset.assetId)}
-                      >
-                        <Image
-                          src={asset.fileUrl}
-                          alt={draft.displayName || asset.subjectSummary || asset.fileName}
-                          width={900}
-                          height={675}
-                          unoptimized
-                        />
-                      </button>
-                      <div className="hotel-asset-strip-overlay-actions">
-                        <label
-                          className={`hotel-asset-overlay-button${replacingAssetId === asset.assetId ? " disabled" : ""}`}
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          重新上传
-                          <input
-                            ref={(node) => {
-                              replaceInputRefs.current[asset.assetId] = node;
-                            }}
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            hidden
-                            disabled={Boolean(replacingAssetId) || uploadStatus === "uploading"}
-                            onChange={(event) =>
-                              void handleUploadFiles(Array.from(event.target.files ?? []), asset.assetId)
-                            }
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className="hotel-asset-overlay-button danger"
-                          disabled={deletingAssetId === asset.assetId}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleDeleteAsset(asset.assetId);
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </div>
-                    <input
-                      className="setting-input hotel-asset-name-input"
-                      value={draft.displayName}
-                      maxLength={6}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => {
-                        const nextValue = sliceDisplayName(event.target.value);
-                        setAssetDrafts((current) => ({
-                          ...current,
-                          [asset.assetId]: {
-                            ...draft,
-                            displayName: nextValue,
-                          },
-                        }));
-                      }}
-                      onBlur={() => {
-                        void handleRenameAsset(asset.assetId);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.currentTarget.blur();
-                        }
-                      }}
-                    />
-                    <span className="hotel-asset-strip-caption">
-                      {namingAssetId === asset.assetId
-                        ? "保存中…"
-                        : asset.reviewStatus === "pending"
-                          ? "场景识别中…"
-                          : sceneLabelMap[asset.sceneType]}
-                    </span>
-                  </article>
-                );
-              })}
-
-              <label
-                className={`task-visual-shot-strip-item hotel-asset-upload-tile${uploadStatus === "uploading" ? " uploading" : ""}`}
-              >
-                <div className="hotel-asset-upload-tile-plus">
-                  <span />
-                </div>
-                <span className="hotel-asset-upload-tile-text">
-                  {uploadStatus === "uploading" ? "上传中…" : hasPendingAssets ? "分析中…" : "点击上传图片"}
-                </span>
-                <input
-                  ref={uploadInputRef}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  multiple
-                  hidden
-                  disabled={uploadStatus === "uploading" || Boolean(replacingAssetId)}
-                  onChange={(event) => void handleUploadFiles(Array.from(event.target.files ?? []))}
-                />
-              </label>
-            </div>
-          </section>
-
-          {activeAsset ? (
-            <section className="hotel-asset-detail-card">
-              <div className="hotel-asset-detail-preview">
-                <button
-                  type="button"
-                  className="hotel-asset-detail-preview-button"
-                  onClick={() => setPreviewAssetId(activeAsset.assetId)}
+              return (
+                <article
+                  key={asset.assetId}
+                  className={`task-visual-shot-strip-item hotel-asset-strip-item${isActive ? " active" : ""}`}
                 >
-                  <div className="hotel-asset-detail-preview-media">
-                    <Image
-                      src={activeAsset.fileUrl}
-                      alt={
-                        assetDrafts[activeAsset.assetId]?.displayName ||
-                        activeAsset.subjectSummary ||
-                        activeAsset.fileName
-                      }
-                      fill
-                      sizes="(max-width: 1200px) 100vw, 300px"
-                      style={{ objectFit: "cover" }}
-                    />
-                  </div>
-                </button>
-              </div>
-              <div className="hotel-asset-detail-main">
-                <div className="hotel-asset-chip-row">
-                  <span className={`hotel-asset-review-chip ${getReviewTone(activeAsset.reviewStatus).tone}`}>
-                    {getReviewTone(activeAsset.reviewStatus).label}
-                  </span>
-                  <span className="hotel-asset-metric-chip">{`质量 ${activeAsset.qualityScore}`}</span>
-                  <span className="hotel-asset-metric-chip">{`商业 ${activeAsset.commercialScore}`}</span>
-                  <span className="hotel-asset-metric-chip">
-                    {activeAsset.canDirectI2V ? "可直接图生视频" : "建议先增强"}
-                  </span>
-                </div>
-
-                <div className="hotel-asset-metadata hotel-asset-detail-metadata">
-                  <strong>
-                    {assetDrafts[activeAsset.assetId]?.displayName || activeAsset.displayName || activeAsset.fileName}
-                  </strong>
-                  <span className="hotel-asset-meta-line">{activeAsset.subjectSummary || "待补充主体说明"}</span>
-                  <span className="hotel-asset-meta-line">
-                    构图：{activeAsset.compositionType || "未识别"} · 推荐景别：{activeAsset.recommendedShotScale}
-                  </span>
-                  <span className="hotel-asset-meta-line">
-                    标签：{activeAsset.tags.length ? activeAsset.tags.join(" / ") : "暂无"}
-                  </span>
-                </div>
-
-                <div className="hotel-asset-detail-grid">
-                  <div className="hotel-asset-detail-controls">
-                    <label className="setting-field hotel-asset-card-field hotel-asset-scene-field">
-                      <span>场景归类</span>
-                      <select
-                        className="setting-select hotel-asset-scene-select"
-                        value={assetDrafts[activeAsset.assetId]?.sceneType ?? activeAsset.sceneType}
-                        onChange={(event) =>
-                          updateAssetDraft(
-                            activeAsset.assetId,
-                            {
-                              sceneType: event.target.value as HotelAssetSceneType,
-                            },
-                            { flush: true },
-                          )
-                        }
-                        onBlur={() => {
-                          scheduleAssetAutoSync(activeAsset.assetId, { flush: true });
+                  <div className="hotel-asset-strip-media-shell">
+                    <button
+                      className="task-visual-shot-strip-media hotel-asset-strip-media-button"
+                      type="button"
+                      onClick={() => setActiveAssetId(asset.assetId)}
+                    >
+                      <Image
+                        src={asset.fileUrl}
+                        alt={draft.displayName || asset.subjectSummary || asset.fileName}
+                        width={900}
+                        height={675}
+                        unoptimized
+                      />
+                    </button>
+                    <div className="hotel-asset-strip-overlay-actions">
+                      <label
+                        className={`hotel-asset-overlay-button${replacingAssetId === asset.assetId ? " disabled" : ""}`}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        重新上传
+                        <input
+                          ref={(node) => {
+                            replaceInputRefs.current[asset.assetId] = node;
+                          }}
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          hidden
+                          disabled={Boolean(replacingAssetId) || uploadStatus === "uploading"}
+                          onChange={(event) =>
+                            void handleUploadFiles(Array.from(event.target.files ?? []), asset.assetId)
+                          }
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="hotel-asset-overlay-button danger"
+                        disabled={deletingAssetId === asset.assetId}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void handleDeleteAsset(asset.assetId);
                         }}
                       >
-                        {sceneOptions
-                          .filter((option) => option.value)
-                          .map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    <button
-                      type="button"
-                      className="btn-secondary small hotel-asset-ai-optimize-button"
-                      disabled={enhancingAssetId === activeAsset.assetId}
-                      onClick={() => void handleEnhanceAsset(activeAsset.assetId)}
-                    >
-                      {enhancingAssetId === activeAsset.assetId ? "优化中…" : "AI 优化图片"}
-                    </button>
+                        ×
+                      </button>
+                    </div>
                   </div>
-                  <label className="setting-field hotel-asset-card-field hotel-asset-detail-note-field">
-                    <span>图片优化提示词输入</span>
-                    <textarea
-                      className="prompt-box compact task-editor-textarea"
-                      value={assetDrafts[activeAsset.assetId]?.userNote ?? activeAsset.userNote}
+                  <span className="hotel-asset-sequence-label">{draft.displayName}</span>
+                  <span className="hotel-asset-strip-caption">
+                    {asset.reviewStatus === "pending" ? "场景识别中…" : sceneLabelMap[asset.sceneType]}
+                  </span>
+                </article>
+              );
+            })}
+
+            <label
+              className={`task-visual-shot-strip-item hotel-asset-upload-tile${uploadStatus === "uploading" ? " uploading" : ""}`}
+            >
+              <div className="hotel-asset-upload-tile-plus">
+                <span />
+              </div>
+              <span className="hotel-asset-upload-tile-text">
+                {uploadStatus === "uploading" ? "上传中…" : hasPendingAssets ? "分析中…" : "点击上传图片"}
+              </span>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                multiple
+                hidden
+                disabled={uploadStatus === "uploading" || Boolean(replacingAssetId)}
+                onChange={(event) => void handleUploadFiles(Array.from(event.target.files ?? []))}
+              />
+            </label>
+          </div>
+        </section>
+
+        {activeAsset ? (
+          <section className="hotel-asset-detail-card">
+            <div className="hotel-asset-detail-preview">
+              <button
+                type="button"
+                className="hotel-asset-detail-preview-button"
+                onClick={() => setPreviewAssetId(activeAsset.assetId)}
+              >
+                <div className="hotel-asset-detail-preview-media">
+                  <Image
+                    src={activeAsset.fileUrl}
+                    alt={
+                      assetDrafts[activeAsset.assetId]?.displayName ||
+                      activeAsset.subjectSummary ||
+                      activeAsset.fileName
+                    }
+                    fill
+                    sizes="(max-width: 1200px) 100vw, 300px"
+                    style={{ objectFit: "cover" }}
+                  />
+                </div>
+              </button>
+            </div>
+            <div className="hotel-asset-detail-main">
+              <div className="hotel-asset-chip-row">
+                <span className={`hotel-asset-review-chip ${getReviewTone(activeAsset.reviewStatus).tone}`}>
+                  {getReviewTone(activeAsset.reviewStatus).label}
+                </span>
+                <span className="hotel-asset-metric-chip">{`质量 ${activeAsset.qualityScore}`}</span>
+                <span className="hotel-asset-metric-chip">{`商业 ${activeAsset.commercialScore}`}</span>
+                <span className="hotel-asset-metric-chip">
+                  {activeAsset.canDirectI2V ? "可直接图生视频" : "建议先增强"}
+                </span>
+              </div>
+
+              <div className="hotel-asset-metadata hotel-asset-detail-metadata">
+                <strong>
+                  {assetDrafts[activeAsset.assetId]?.displayName || activeAsset.displayName || activeAsset.fileName}
+                </strong>
+                <span className="hotel-asset-meta-line">{activeAsset.subjectSummary || "待补充主体说明"}</span>
+                <span className="hotel-asset-meta-line">
+                  构图：{activeAsset.compositionType || "未识别"} · 推荐景别：{activeAsset.recommendedShotScale}
+                </span>
+                <span className="hotel-asset-meta-line">
+                  标签：{activeAsset.tags.length ? activeAsset.tags.join(" / ") : "暂无"}
+                </span>
+              </div>
+
+              <div className="hotel-asset-detail-grid">
+                <div className="hotel-asset-detail-controls">
+                  <label className="setting-field hotel-asset-card-field hotel-asset-scene-field">
+                    <span>场景归类</span>
+                    <select
+                      className="setting-select hotel-asset-scene-select"
+                      value={assetDrafts[activeAsset.assetId]?.sceneType ?? activeAsset.sceneType}
                       onChange={(event) =>
-                        updateAssetDraft(activeAsset.assetId, {
-                          userNote: event.target.value,
-                        })
+                        updateAssetDraft(
+                          activeAsset.assetId,
+                          {
+                            sceneType: event.target.value as HotelAssetSceneType,
+                          },
+                          { flush: true },
+                        )
                       }
                       onBlur={() => {
                         scheduleAssetAutoSync(activeAsset.assetId, { flush: true });
                       }}
-                      placeholder="可写想优化的方向，例如提高清晰度、增强自然光、保持真实酒店空间，不改变主体结构。"
-                    />
+                    >
+                      {sceneOptions
+                        .filter((option) => option.value)
+                        .map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                    </select>
                   </label>
-                </div>
-
-                {getAssetSyncMessage(activeAsset.assetId) ? (
-                  <div
-                    className={`hotel-asset-auto-sync-status hotel-asset-auto-sync-status--${assetSyncStates[activeAsset.assetId]?.phase ?? "idle"}`}
+                  <button
+                    type="button"
+                    className="btn-secondary small hotel-asset-ai-optimize-button"
+                    disabled={enhancingAssetId === activeAsset.assetId}
+                    onClick={() => void handleEnhanceAsset(activeAsset.assetId)}
                   >
-                    {getAssetSyncMessage(activeAsset.assetId)}
-                  </div>
-                ) : null}
-              </div>
-              <aside className="hotel-asset-enhancement-panel">
-                <div className="hotel-asset-enhancement-head">
-                  <strong>AI 优化结果</strong>
-                  <span>{activeEnhancedAssets.length ? `${activeEnhancedAssets.length}/4 张` : "待生成"}</span>
+                    {enhancingAssetId === activeAsset.assetId ? "优化中…" : "AI 优化图片"}
+                  </button>
                 </div>
-                {activeEnhancedAssets.length ? (
-                  <div className="hotel-asset-enhancement-grid">
-                    {activeEnhancedAssets.map((asset, index) => (
-                      <button
-                        key={asset.assetId}
-                        type="button"
-                        className="hotel-asset-enhancement-card"
-                        onClick={() => setActiveAssetId(asset.assetId)}
-                      >
-                        <span className="hotel-asset-enhancement-media">
-                          <Image
-                            src={asset.fileUrl}
-                            alt={asset.displayName || `优化图${index + 1}`}
-                            width={900}
-                            height={675}
-                            unoptimized
-                          />
-                        </span>
-                        <span>{asset.displayName || `优化图${index + 1}`}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="hotel-asset-enhancement-empty">点击 AI 优化图片后显示 4 张优化图</div>
-                )}
-              </aside>
-            </section>
-          ) : null}
-        </div>
+                <label className="setting-field hotel-asset-card-field hotel-asset-detail-note-field">
+                  <span>图片优化提示词输入</span>
+                  <textarea
+                    className="prompt-box compact task-editor-textarea"
+                    value={assetDrafts[activeAsset.assetId]?.userNote ?? activeAsset.userNote}
+                    onChange={(event) =>
+                      updateAssetDraft(activeAsset.assetId, {
+                        userNote: event.target.value,
+                      })
+                    }
+                    onBlur={() => {
+                      scheduleAssetAutoSync(activeAsset.assetId, { flush: true });
+                    }}
+                    placeholder="可写想优化的方向，例如提高清晰度、增强自然光、保持真实酒店空间，不改变主体结构。"
+                  />
+                </label>
+              </div>
+
+              {getAssetSyncMessage(activeAsset.assetId) ? (
+                <div
+                  className={`hotel-asset-auto-sync-status hotel-asset-auto-sync-status--${assetSyncStates[activeAsset.assetId]?.phase ?? "idle"}`}
+                >
+                  {getAssetSyncMessage(activeAsset.assetId)}
+                </div>
+              ) : null}
+            </div>
+            <aside className="hotel-asset-enhancement-panel">
+              <div className="hotel-asset-enhancement-head">
+                <strong>AI 优化结果</strong>
+                <span>{activeEnhancedAssets.length ? `${activeEnhancedAssets.length}/4 张` : "待生成"}</span>
+              </div>
+              {activeEnhancedAssets.length ? (
+                <div className="hotel-asset-enhancement-grid">
+                  {activeEnhancedAssets.map((asset, index) => (
+                    <button
+                      key={asset.assetId}
+                      type="button"
+                      className="hotel-asset-enhancement-card"
+                      onClick={() => setActiveAssetId(asset.assetId)}
+                    >
+                      <span className="hotel-asset-enhancement-media">
+                        <Image
+                          src={asset.fileUrl}
+                          alt={asset.displayName || `优化图${index + 1}`}
+                          width={900}
+                          height={675}
+                          unoptimized
+                        />
+                      </span>
+                      <span>{asset.displayName || `优化图${index + 1}`}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="hotel-asset-enhancement-empty">点击 AI 优化图片后显示 4 张优化图</div>
+              )}
+            </aside>
+          </section>
+        ) : null}
+      </div>
 
       {previewAsset ? (
         <div className="modal-overlay" role="presentation" onClick={() => setPreviewAssetId("")}>
@@ -1013,7 +899,9 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
           >
             <div className="modal-head">
               <div>
-                <h3>{assetDrafts[previewAsset.assetId]?.displayName || previewAsset.displayName || previewAsset.fileName}</h3>
+                <h3>
+                  {assetDrafts[previewAsset.assetId]?.displayName || previewAsset.displayName || previewAsset.fileName}
+                </h3>
                 <p className="modal-head-subtitle">
                   {previewAsset.reviewStatus === "pending"
                     ? "场景识别中…"

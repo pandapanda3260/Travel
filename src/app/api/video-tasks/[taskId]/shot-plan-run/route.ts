@@ -23,6 +23,7 @@ import {
   getActiveKeyMaterialWorkflow,
 } from "../../../../../lib/key-material-task-store";
 import { getVideoTask, patchVideoTask } from "../../../../../lib/video-task-store";
+import { getHotelAssetDisplayOrder } from "../../../../../lib/hotel-asset-ordering";
 import { listTaskHotelAssets } from "../../../../../lib/task-hotel-asset-store";
 import {
   hasVideoTaskSourceContent,
@@ -199,7 +200,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
       ...buildTaskCreationFallbackParameters(existingTask),
       ...(body.parameters ?? {}),
     });
-    const hotelAssets = usesCapturedMaterialFirstWorkflow(parameters.videoType) ? listTaskHotelAssets(taskId) : [];
+    const hotelAssets = usesCapturedMaterialFirstWorkflow(parameters.videoType)
+      ? getHotelAssetDisplayOrder(listTaskHotelAssets(taskId))
+      : [];
     if (!hasVideoTaskSourceContent(source) && hotelAssets.length === 0) {
       return NextResponse.json(
         { error: "请至少保留商品信息、主动提示词、参考视频素材或酒店实拍图中的一项内容后再生成镜头规划" },

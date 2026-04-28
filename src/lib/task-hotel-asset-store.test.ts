@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { getHotelAssetDisplayOrder } from "./hotel-asset-ordering";
 import {
   autoGroupTaskHotelAssetByScene,
   createTaskHotelAsset,
@@ -121,6 +122,38 @@ test("autoGroupTaskHotelAssetByScene 在没有同场景素材时会插入到对�
         ["卫浴1", 1],
         ["早餐1", 2],
       ],
+    );
+  } finally {
+    deleteTaskHotelAssetsByTaskId(taskId);
+  }
+});
+
+test("getHotelAssetDisplayOrder 会按图片编号恢复用户上传顺序", () => {
+  const taskId = createTaskId();
+
+  try {
+    createAsset(taskId, {
+      displayName: "图片3",
+      sceneType: "exterior",
+      fileUrl: "/video-tasks/demo/hotel-assets/3.jpg",
+      sortOrder: 0,
+    });
+    createAsset(taskId, {
+      displayName: "图片1",
+      sceneType: "room",
+      fileUrl: "/video-tasks/demo/hotel-assets/1.jpg",
+      sortOrder: 1,
+    });
+    createAsset(taskId, {
+      displayName: "图片2",
+      sceneType: "facility",
+      fileUrl: "/video-tasks/demo/hotel-assets/2.jpg",
+      sortOrder: 2,
+    });
+
+    assert.deepEqual(
+      getHotelAssetDisplayOrder(listTaskHotelAssets(taskId)).map((asset) => asset.displayName),
+      ["图片1", "图片2", "图片3"],
     );
   } finally {
     deleteTaskHotelAssetsByTaskId(taskId);
