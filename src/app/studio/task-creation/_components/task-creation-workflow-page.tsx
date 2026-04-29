@@ -12,6 +12,11 @@ import {
   usesSegmentLevelSubtitleSource,
 } from "../../../../lib/subtitle-plan-source";
 import {
+  buildSubtitleDisplayUnits,
+  normalizeSubtitleDisplayCues,
+  type SubtitleDisplayCueInput,
+} from "../../../../lib/subtitle-display";
+import {
   applyParameterSettingsToTaskCreationState,
   getDefaultParameterSettingsState,
   readParameterSettingsState,
@@ -90,6 +95,7 @@ import {
   type VideoTaskGeneratedVideoRecord,
   type VideoTaskRecord,
   type VideoTaskStatus,
+  type TimedWord,
 } from "../../../../lib/video-task-schema";
 import {
   getDefaultVideoTypeForTaskCreationWorkflowMode,
@@ -144,6 +150,9 @@ type TaskSubtitleAudioResult = {
     narrationText: string;
     voiceId?: string | null;
     audioUrl?: string | null;
+    audioDurationSeconds?: number | null;
+    words?: TimedWord[];
+    subtitleDisplayCues?: SubtitleDisplayCueInput[] | null;
   }>;
 };
 
@@ -329,74 +338,6 @@ function getSubtitleAudioClipLineText(clip: TaskSubtitleAudioResult["clips"][num
   return clip.narrationText || clip.subtitleText || "";
 }
 
-function chunkSubtitleAudioText(text: string, maxCharacters = 18) {
-  const characters = Array.from(text);
-  const chunks: string[] = [];
-
-  for (let index = 0; index < characters.length; index += maxCharacters) {
-    const chunk = characters
-      .slice(index, index + maxCharacters)
-      .join("")
-      .trim();
-    if (chunk) {
-      chunks.push(chunk);
-    }
-  }
-
-  return chunks;
-}
-
-function splitSubtitleAudioDisplayLines(text: string) {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
-  if (!normalized) {
-    return [];
-  }
-
-  const explicitLines = normalized
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (explicitLines.length > 1) {
-    return explicitLines.flatMap((line) => chunkSubtitleAudioText(line));
-  }
-
-  const clauses = (explicitLines[0] ?? normalized).match(/[^。！？!?；;，,、]+[。！？!?；;，,、]?/g) ?? [
-    explicitLines[0] ?? normalized,
-  ];
-  const lines: string[] = [];
-  let currentLine = "";
-
-  for (const clause of clauses) {
-    const trimmedClause = clause.trim();
-    if (!trimmedClause) {
-      continue;
-    }
-
-    if (Array.from(trimmedClause).length > 18) {
-      if (currentLine) {
-        lines.push(currentLine);
-        currentLine = "";
-      }
-      lines.push(...chunkSubtitleAudioText(trimmedClause));
-      continue;
-    }
-
-    const mergedLine = `${currentLine}${trimmedClause}`;
-    if (currentLine && Array.from(mergedLine).length > 18) {
-      lines.push(currentLine);
-      currentLine = trimmedClause;
-    } else {
-      currentLine = mergedLine;
-    }
-  }
-
-  if (currentLine) {
-    lines.push(currentLine);
-  }
-
-  return lines.length ? lines : chunkSubtitleAudioText(normalized);
-}
-
 function normalizeSubtitleAudioEditText(text: string) {
   const lines = text
     .replace(/\r\n/g, "\n")
@@ -410,6 +351,68 @@ function normalizeSubtitleAudioEditText(text: string) {
     }
     return /[。！？!?；;，,、]$/u.test(output) ? `${output}${line}` : `${output}，${line}`;
   }, "");
+}
+
+function parseSubtitleAudioDisplayCues(
+  text: string,
+  subtitleConfig: TaskCreationParameterState["compositionSubtitleConfig"],
+) {
+  const cueBlocks = text
+    .replace(/\r\n/g, "\n")
+    .split(/\n\s*\n/g)
+    .map((block) =>
+      block
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    )
+    .filter((lines) => lines.length > 0)
+    .map((lines) => ({
+      text: lines.join(""),
+      lines,
+    }));
+
+  return normalizeSubtitleDisplayCues(cueBlocks, subtitleConfig.maxCharsPerLine);
+}
+
+function getSubtitleDisplayCueSignature(cues: SubtitleDisplayCueInput[] | null | undefined) {
+  return JSON.stringify(
+    (cues ?? []).map((cue) => ({
+      text: cue.text ?? "",
+      lines: cue.lines ?? [],
+    })),
+  );
+}
+
+function buildSubtitleAudioDisplayUnits(
+  clip: TaskSubtitleAudioResult["clips"][number],
+  subtitleConfig: TaskCreationParameterState["compositionSubtitleConfig"],
+) {
+  const lineText = getSubtitleAudioClipLineText(clip);
+  if (!lineText.trim()) {
+    return [];
+  }
+
+  return buildSubtitleDisplayUnits({
+    text: lineText,
+    durationSeconds: clip.audioDurationSeconds ?? clip.durationSeconds,
+    words: clip.words ?? [],
+    maxCharsPerLine: subtitleConfig.maxCharsPerLine,
+    displayMode: subtitleConfig.displayMode,
+    trimEstimatedTail: true,
+    manualCues: clip.subtitleDisplayCues,
+  });
+}
+
+function buildSubtitleAudioEditText(
+  clip: TaskSubtitleAudioResult["clips"][number],
+  subtitleConfig: TaskCreationParameterState["compositionSubtitleConfig"],
+) {
+  const displayText = buildSubtitleAudioDisplayUnits(clip, subtitleConfig)
+    .map((unit) => unit.lines.join("\n"))
+    .join("\n\n")
+    .trim();
+  return displayText || getSubtitleAudioClipLineText(clip);
 }
 
 function normalizeSupportedVoiceId(
@@ -3472,7 +3475,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     editingSubtitleAudioClipIdRef.current = clip.id;
     skipSubtitleAudioBlurCommitRef.current = false;
     setEditingSubtitleAudioClipId(clip.id);
-    setEditingSubtitleAudioLineText(splitSubtitleAudioDisplayLines(getSubtitleAudioClipLineText(clip)).join("\n"));
+    setEditingSubtitleAudioLineText(buildSubtitleAudioEditText(clip, compositionSubtitleConfig));
     setError(null);
   }
 
@@ -3492,17 +3495,31 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     }
 
     const nextText = normalizeSubtitleAudioEditText(editingSubtitleAudioLineText);
+    const nextDisplayCues = parseSubtitleAudioDisplayCues(editingSubtitleAudioLineText, compositionSubtitleConfig);
+    const nextDisplayText = normalizeSubtitleAudioEditText(nextDisplayCues.map((cue) => cue.text ?? "").join(""));
     if (!nextText) {
       setError("台词不能为空");
       return;
     }
+    if (!nextDisplayCues.length || nextDisplayText !== nextText) {
+      setError("字幕分行内容需要与台词内容一致");
+      return;
+    }
 
-    if (nextText === normalizeSubtitleAudioEditText(getSubtitleAudioClipLineText(clip))) {
+    const currentText = normalizeSubtitleAudioEditText(getSubtitleAudioClipLineText(clip));
+    const currentDisplayCues = buildSubtitleAudioDisplayUnits(clip, compositionSubtitleConfig).map((unit) => ({
+      text: unit.text,
+      lines: unit.lines,
+    }));
+    const nextDisplaySignature = getSubtitleDisplayCueSignature(nextDisplayCues);
+    const currentDisplaySignature = getSubtitleDisplayCueSignature(currentDisplayCues);
+
+    if (nextText === currentText && nextDisplaySignature === currentDisplaySignature) {
       clearSubtitleAudioLineEditIfCurrent(clip.id);
       return;
     }
 
-    const saveSignature = `${clip.id}:${nextText}`;
+    const saveSignature = `${clip.id}:${nextText}:${nextDisplaySignature}`;
     if (subtitleAudioLineSaveInFlightRef.current.has(saveSignature)) {
       return;
     }
@@ -3521,6 +3538,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
           resultId: subtitleAudioResult.resultId,
           clipId: clip.id,
           narrationText: nextText,
+          subtitleDisplayCues: nextDisplayCues,
         }),
       });
       const data = (await response.json()) as SubtitleAudioLineUpdateResponse;
@@ -4554,7 +4572,10 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                 <div className="task-subtitle-audio-compact-list">
                                   {subtitleAudioResult.clips.map((clip) => {
                                     const lineText = getSubtitleAudioClipLineText(clip);
-                                    const subtitleDisplayLines = splitSubtitleAudioDisplayLines(lineText);
+                                    const subtitleDisplayUnits = buildSubtitleAudioDisplayUnits(
+                                      clip,
+                                      compositionSubtitleConfig,
+                                    );
                                     const isEditingLine = editingSubtitleAudioClipId === clip.id;
                                     const isSavingLine = savingSubtitleAudioClipIds.includes(clip.id);
                                     const storyboardBinding = storyboardBindingByShotIndex.get(clip.shotIndex);
@@ -4614,9 +4635,21 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                               />
                                             ) : (
                                               <span className="task-subtitle-audio-line-text">
-                                                {subtitleDisplayLines.length ? (
-                                                  subtitleDisplayLines.map((line, lineIndex) => (
-                                                    <span key={`${clip.id}-subtitle-line-${lineIndex}`}>{line}</span>
+                                                {subtitleDisplayUnits.length ? (
+                                                  subtitleDisplayUnits.map((unit, unitIndex) => (
+                                                    <span
+                                                      key={`${clip.id}-subtitle-unit-${unitIndex}`}
+                                                      className="task-subtitle-audio-display-unit"
+                                                    >
+                                                      {unit.lines.map((line, lineIndex) => (
+                                                        <span
+                                                          key={`${clip.id}-subtitle-unit-${unitIndex}-line-${lineIndex}`}
+                                                          className="task-subtitle-audio-display-line"
+                                                        >
+                                                          {line}
+                                                        </span>
+                                                      ))}
+                                                    </span>
                                                   ))
                                                 ) : (
                                                   <span>无台词</span>

@@ -1,4 +1,5 @@
 import type { VideoCompositionRecord } from "./video-composition-store";
+import type { SubtitleDisplayCueInput } from "./subtitle-display";
 import type { TimedWord } from "./video-task-schema";
 
 export type NarrationDraftClip = {
@@ -23,6 +24,7 @@ export type NarrationDraftClip = {
   voiceId?: string | null;
   audioUrl?: string | null;
   words?: TimedWord[];
+  subtitleDisplayCues?: SubtitleDisplayCueInput[] | null;
 };
 
 export type NarrationDraft = {

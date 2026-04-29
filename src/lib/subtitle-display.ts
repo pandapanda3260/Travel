@@ -13,8 +13,19 @@ export type SubtitleDisplayWord = {
 
 export type SubtitleDisplayUnit = {
   text: string;
+  lines: string[];
   startOffsetSeconds: number;
   endOffsetSeconds: number;
+};
+
+export type SubtitleDisplayCueInput = {
+  text?: string | null;
+  lines?: string[] | null;
+};
+
+export type SubtitleDisplayCue = {
+  text: string;
+  lines: string[];
 };
 
 export type SubtitleDisplayPlanEntry = {
@@ -35,6 +46,8 @@ const preciseSubtitleTrailingAllowanceSeconds = 0.12;
 const estimatedSubtitleTailTrimSeconds = 0.15;
 const subtitleCueGapSeconds = 0.04;
 const minSubtitleUnitDurationSeconds = 0.08;
+const maxSubtitleDisplayLines = 2;
+const subtitleLineMinDisplayCharacters = 3;
 const semanticInlineBoundaryWords = [
   "再去",
   "再看",
@@ -51,6 +64,10 @@ const semanticInlineBoundaryWords = [
   "先",
   "再",
 ];
+const displayLineBadPrefixPattern = /^(的|了|着|和|与|及|也|还|更|就|再|然后|接着|把|给|带|去|看|逛|到)/u;
+const displayLineBadEndingPattern = /(和|与|及|再|然后|接着|把|给|带|去|看|逛|到)$/u;
+const displayLinePreferredEndingPattern = /[，。！？；、：,.!?;]$/u;
+const displayLineTrailingSoftPunctuationPattern = /[，、,;；：]+$/u;
 
 function countSubtitleSpeechUnits(text: string) {
   const normalized = String(text ?? "").replace(punctuationOnlyPattern, "").trim();
@@ -64,6 +81,171 @@ function normalizeTimelineDuration(durationSeconds: number) {
 function normalizeDisplayBudget(maxCharsPerLine: number) {
   const numeric = Math.round(Number(maxCharsPerLine) || 12);
   return Math.max(1, numeric);
+}
+
+function cleanDisplayLine(text: string) {
+  return text.replace(/\s+/g, "").replace(displayLineTrailingSoftPunctuationPattern, "").trim();
+}
+
+function normalizeDisplayUnitText(text: string) {
+  return text.replace(/\s+/g, "").trim();
+}
+
+function splitTextByCharacterIndex(text: string, index: number) {
+  const chars = Array.from(text);
+  return [chars.slice(0, index).join(""), chars.slice(index).join("")] as const;
+}
+
+function scoreDisplayLineBreak(prefix: string, suffix: string, targetLength: number) {
+  const cleanPrefix = cleanDisplayLine(prefix);
+  const cleanSuffix = cleanDisplayLine(suffix);
+  const prefixLength = countSubtitleDisplayCharacters(cleanPrefix);
+  const suffixLength = countSubtitleDisplayCharacters(cleanSuffix);
+  let score = Math.abs(prefixLength - targetLength) + Math.abs(suffixLength - targetLength);
+
+  if (prefixLength < subtitleLineMinDisplayCharacters) {
+    score += 30;
+  }
+  if (suffixLength < subtitleLineMinDisplayCharacters) {
+    score += 30;
+  }
+  if (displayLineBadPrefixPattern.test(cleanSuffix)) {
+    score += 28;
+  }
+  if (displayLineBadEndingPattern.test(cleanPrefix)) {
+    score += 24;
+  }
+  if (displayLinePreferredEndingPattern.test(prefix)) {
+    score -= 12;
+  }
+
+  return score;
+}
+
+function findBestTwoLineBreakIndex(text: string, maxCharsPerLine: number) {
+  const chars = Array.from(text);
+  const totalDisplayLength = countSubtitleDisplayCharacters(text);
+  const targetLength = totalDisplayLength / 2;
+  let bestIndex = -1;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let index = 1; index < chars.length; index += 1) {
+    const [prefix, suffix] = splitTextByCharacterIndex(text, index);
+    const prefixLength = countSubtitleDisplayCharacters(prefix);
+    const suffixLength = countSubtitleDisplayCharacters(suffix);
+    if (prefixLength <= 0 || suffixLength <= 0) {
+      continue;
+    }
+    if (prefixLength > maxCharsPerLine || suffixLength > maxCharsPerLine) {
+      continue;
+    }
+
+    const score = scoreDisplayLineBreak(prefix, suffix, targetLength);
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  return bestIndex;
+}
+
+export function buildSubtitleDisplayLines(text: string, maxCharsPerLine: number, maxLines = maxSubtitleDisplayLines) {
+  const normalizedText = normalizeDisplayUnitText(text);
+  if (!normalizedText) {
+    return [] as string[];
+  }
+
+  const normalizedMaxCharsPerLine = normalizeDisplayBudget(maxCharsPerLine);
+  const normalizedMaxLines = Math.max(1, Math.round(Number(maxLines) || maxSubtitleDisplayLines));
+  if (countSubtitleDisplayCharacters(normalizedText) <= normalizedMaxCharsPerLine || normalizedMaxLines <= 1) {
+    return [cleanDisplayLine(normalizedText)].filter(Boolean);
+  }
+
+  const semanticLines = splitTextIntoPhrases(normalizedText, normalizedMaxCharsPerLine)
+    .map(cleanDisplayLine)
+    .filter(Boolean);
+  if (
+    semanticLines.length > 1 &&
+    semanticLines.length <= normalizedMaxLines &&
+    semanticLines.every((line) => countSubtitleDisplayCharacters(line) <= normalizedMaxCharsPerLine)
+  ) {
+    return semanticLines;
+  }
+
+  if (normalizedMaxLines === 2 && countSubtitleDisplayCharacters(normalizedText) <= normalizedMaxCharsPerLine * 2) {
+    const breakIndex = findBestTwoLineBreakIndex(normalizedText, normalizedMaxCharsPerLine);
+    if (breakIndex > 0) {
+      const [prefix, suffix] = splitTextByCharacterIndex(normalizedText, breakIndex);
+      const lines = [cleanDisplayLine(prefix), cleanDisplayLine(suffix)].filter(Boolean);
+      if (lines.length === 2 && lines.every((line) => countSubtitleDisplayCharacters(line) <= normalizedMaxCharsPerLine)) {
+        return lines;
+      }
+    }
+  }
+
+  return splitTextIntoPhrases(normalizedText, normalizedMaxCharsPerLine)
+    .flatMap((line) =>
+      countSubtitleDisplayCharacters(line) > normalizedMaxCharsPerLine
+        ? splitLongWordForDisplay(line, normalizedMaxCharsPerLine, { hasFollowingWord: true })
+        : [line],
+    )
+    .map(cleanDisplayLine)
+    .filter(Boolean)
+    .slice(0, normalizedMaxLines);
+}
+
+export function normalizeSubtitleDisplayCues(
+  cues: SubtitleDisplayCueInput[] | null | undefined,
+  maxCharsPerLine: number,
+) {
+  if (!cues?.length) {
+    return [] as SubtitleDisplayCue[];
+  }
+
+  const normalizedMaxCharsPerLine = normalizeDisplayBudget(maxCharsPerLine);
+  return cues
+    .map((cue) => {
+      const rawLines = Array.isArray(cue.lines)
+        ? cue.lines.map((line) => cleanDisplayLine(line)).filter(Boolean)
+        : [];
+      const text = normalizeDisplayUnitText(cue.text?.trim() || rawLines.join(""));
+      if (!text) {
+        return null;
+      }
+
+      const lines =
+        rawLines.length > 0 &&
+        rawLines.length <= maxSubtitleDisplayLines &&
+        rawLines.every((line) => countSubtitleDisplayCharacters(line) <= normalizedMaxCharsPerLine) &&
+        countSubtitleDisplayCharacters(rawLines.join("")) === countSubtitleDisplayCharacters(text)
+          ? rawLines
+          : buildSubtitleDisplayLines(text, normalizedMaxCharsPerLine, maxSubtitleDisplayLines);
+
+      if (!lines.length || lines.length > maxSubtitleDisplayLines) {
+        return null;
+      }
+
+      return {
+        text,
+        lines,
+      } satisfies SubtitleDisplayCue;
+    })
+    .filter((cue): cue is SubtitleDisplayCue => cue !== null);
+}
+
+export function formatSubtitleDisplayUnitText(unit: Pick<SubtitleDisplayUnit, "text" | "lines">) {
+  const lines = unit.lines?.map(cleanDisplayLine).filter(Boolean) ?? [];
+  return lines.length > 0 ? lines.join("\n") : cleanDisplayLine(unit.text);
+}
+
+function withSubtitleDisplayLines(unit: Omit<SubtitleDisplayUnit, "lines"> | SubtitleDisplayUnit, maxCharsPerLine: number) {
+  const text = normalizeDisplayUnitText(unit.text);
+  return {
+    ...unit,
+    text,
+    lines: buildSubtitleDisplayLines(text, maxCharsPerLine, maxSubtitleDisplayLines),
+  } satisfies SubtitleDisplayUnit;
 }
 
 function clampOffset(value: number, totalDurationSeconds: number) {
@@ -255,6 +437,7 @@ function buildWeightedPhraseUnits(phrases: string[], totalDurationSeconds: numbe
     return [
       {
         text: phrases[0]!,
+        lines: [phrases[0]!],
         startOffsetSeconds: 0,
         endOffsetSeconds: normalizeTimelineDuration(totalDurationSeconds),
       },
@@ -284,6 +467,7 @@ function buildWeightedPhraseUnits(phrases: string[], totalDurationSeconds: numbe
 
     return {
       text: phrase,
+      lines: [phrase],
       startOffsetSeconds,
       endOffsetSeconds: Math.max(startOffsetSeconds, endOffsetSeconds),
     } satisfies SubtitleDisplayUnit;
@@ -311,6 +495,7 @@ function buildWordTimedUnits(words: SubtitleDisplayWord[], totalDurationSeconds:
 
       return {
         text: word.word,
+        lines: [word.word],
         startOffsetSeconds,
         endOffsetSeconds: Math.min(normalizedDuration, Math.max(startOffsetSeconds + minDuration, endOffsetSeconds)),
       } satisfies SubtitleDisplayUnit;
@@ -368,14 +553,8 @@ export function splitSegmentWordTimelineBySubtitleEntries(
   );
 }
 
-function buildTextPhraseTimedUnits(
-  text: string,
-  words: SubtitleDisplayWord[],
-  maxCharsPerLine: number,
-  totalDurationSeconds: number,
-) {
+function buildPhraseTimedUnits(phrases: string[], words: SubtitleDisplayWord[], totalDurationSeconds: number) {
   const normalizedDuration = normalizeTimelineDuration(totalDurationSeconds);
-  const phrases = buildWordBoundaryPhrases(text, words, maxCharsPerLine);
   const wordDisplayTimeline = buildWordDisplayTimeline(words, normalizedDuration);
 
   if (!phrases.length || !wordDisplayTimeline.characters.length) {
@@ -405,6 +584,7 @@ function buildTextPhraseTimedUnits(
 
     units.push({
       text: phrase,
+      lines: [phrase],
       startOffsetSeconds: clampOffset(firstCharacter.startTime, normalizedDuration),
       endOffsetSeconds: clampOffset(Math.max(lastCharacter.endTime, firstCharacter.startTime + 0.08), normalizedDuration),
     });
@@ -413,22 +593,80 @@ function buildTextPhraseTimedUnits(
   return units;
 }
 
-function splitOversizedDisplayUnit(unit: SubtitleDisplayUnit, maxCharsPerLine: number): SubtitleDisplayUnit[] {
-  if (countSubtitleDisplayCharacters(unit.text) <= maxCharsPerLine) {
-    return [{ ...unit, text: unit.text.replace(/\s+/g, "").trim() }];
+function buildTextPhraseTimedUnits(
+  text: string,
+  words: SubtitleDisplayWord[],
+  maxCharsPerLine: number,
+  totalDurationSeconds: number,
+) {
+  return buildPhraseTimedUnits(buildWordBoundaryPhrases(text, words, maxCharsPerLine), words, totalDurationSeconds);
+}
+
+function buildManualSubtitleDisplayUnits(input: {
+  text: string;
+  displayCues: SubtitleDisplayCue[];
+  durationSeconds: number;
+  words?: SubtitleDisplayWord[] | null;
+  trimEstimatedTail?: boolean;
+}) {
+  const sourceText = normalizeDisplayUnitText(input.text);
+  const cueText = input.displayCues.map((cue) => cue.text).join("");
+  if (
+    !input.displayCues.length ||
+    countSubtitleDisplayCharacters(cueText) !== countSubtitleDisplayCharacters(sourceText)
+  ) {
+    return null;
   }
 
-  const phrases = splitTextIntoPhrases(unit.text, maxCharsPerLine);
-  if (phrases.length <= 1) {
-    return [{ ...unit, text: phrases[0] ?? unit.text.replace(/\s+/g, "").trim() }];
+  const normalizedDuration = normalizeTimelineDuration(input.durationSeconds);
+  const phrases = input.displayCues.map((cue) => cue.text);
+  const words = input.words?.length ? input.words : null;
+  const wordTimedUnits = words ? buildPhraseTimedUnits(phrases, words, normalizedDuration) : [];
+  const baseUnits =
+    wordTimedUnits.length === input.displayCues.length && hasDisplayTextCoverage(wordTimedUnits, sourceText)
+      ? wordTimedUnits
+      : buildWeightedPhraseUnits(phrases, normalizedDuration);
+
+  return normalizeSubtitleCueTiming(
+    baseUnits.map((unit, index) => ({
+      text: input.displayCues[index]?.text ?? unit.text,
+      lines: input.displayCues[index]?.lines ?? unit.lines,
+      startOffsetSeconds: unit.startOffsetSeconds,
+      endOffsetSeconds: unit.endOffsetSeconds,
+    })),
+    {
+      totalDurationSeconds: normalizedDuration,
+      words,
+      trimEstimatedTail: input.trimEstimatedTail,
+    },
+  );
+}
+
+function splitOversizedDisplayUnit(unit: SubtitleDisplayUnit, maxCharsPerLine: number): SubtitleDisplayUnit[] {
+  const text = normalizeDisplayUnitText(unit.text);
+  const maxCharsPerCue = maxCharsPerLine * maxSubtitleDisplayLines;
+  if (countSubtitleDisplayCharacters(text) <= maxCharsPerCue) {
+    return [withSubtitleDisplayLines({ ...unit, text }, maxCharsPerLine)];
   }
+
+  const phrases = splitTextIntoPhrases(text, maxCharsPerCue);
+  const safePhrases =
+    phrases.length > 1
+      ? phrases
+      : splitLongWordForDisplay(text, maxCharsPerCue, { hasFollowingWord: false });
 
   const durationSeconds = Math.max(0, unit.endOffsetSeconds - unit.startOffsetSeconds);
-  return buildWeightedPhraseUnits(phrases, durationSeconds).map((phraseUnit) => ({
-    text: phraseUnit.text,
-    startOffsetSeconds: unit.startOffsetSeconds + phraseUnit.startOffsetSeconds,
-    endOffsetSeconds: unit.startOffsetSeconds + phraseUnit.endOffsetSeconds,
-  }));
+  return buildWeightedPhraseUnits(safePhrases, durationSeconds).flatMap((phraseUnit) =>
+    splitOversizedDisplayUnit(
+      {
+        text: phraseUnit.text,
+        lines: phraseUnit.lines,
+        startOffsetSeconds: unit.startOffsetSeconds + phraseUnit.startOffsetSeconds,
+        endOffsetSeconds: unit.startOffsetSeconds + phraseUnit.endOffsetSeconds,
+      },
+      maxCharsPerLine,
+    ),
+  );
 }
 
 function normalizeDisplayUnits(
@@ -446,6 +684,7 @@ function normalizeDisplayUnits(
 
       return {
         text,
+        lines: unit.lines?.length ? unit.lines : buildSubtitleDisplayLines(text, maxCharsPerLine),
         startOffsetSeconds,
         endOffsetSeconds: Math.max(startOffsetSeconds, endOffsetSeconds),
       } satisfies SubtitleDisplayUnit;
@@ -503,6 +742,7 @@ export function buildSubtitleDisplayUnits(input: {
   maxCharsPerLine: number;
   displayMode: SubtitleDisplayMode;
   trimEstimatedTail?: boolean;
+  manualCues?: SubtitleDisplayCueInput[] | null;
 }) {
   const text = String(input.text ?? "").trim();
   if (!text) {
@@ -512,6 +752,18 @@ export function buildSubtitleDisplayUnits(input: {
   const normalizedDuration = normalizeTimelineDuration(input.durationSeconds);
   const words = input.words?.length ? input.words : null;
   const maxCharsPerLine = normalizeDisplayBudget(input.maxCharsPerLine);
+  const maxCharsPerCue = maxCharsPerLine * maxSubtitleDisplayLines;
+  const manualDisplayCues = normalizeSubtitleDisplayCues(input.manualCues, maxCharsPerLine);
+  const manualDisplayUnits = buildManualSubtitleDisplayUnits({
+    text,
+    displayCues: manualDisplayCues,
+    durationSeconds: normalizedDuration,
+    words,
+    trimEstimatedTail: input.trimEstimatedTail,
+  });
+  if (manualDisplayUnits) {
+    return manualDisplayUnits;
+  }
 
   if (input.displayMode === "word_by_word" && words) {
     const wordTimedUnits = buildWordTimedUnits(words, normalizedDuration);
@@ -519,7 +771,7 @@ export function buildSubtitleDisplayUnits(input: {
       normalizeDisplayUnits(
         hasDisplayTextCoverage(wordTimedUnits, text)
           ? wordTimedUnits
-          : buildWeightedPhraseUnits(splitTextIntoPhrases(text, maxCharsPerLine), normalizedDuration),
+          : buildWeightedPhraseUnits(splitTextIntoPhrases(text, maxCharsPerCue), normalizedDuration),
         maxCharsPerLine,
         normalizedDuration,
       ),
@@ -532,12 +784,12 @@ export function buildSubtitleDisplayUnits(input: {
   }
 
   if (words) {
-    const textTimedUnits = buildTextPhraseTimedUnits(text, words, maxCharsPerLine, normalizedDuration);
+    const textTimedUnits = buildTextPhraseTimedUnits(text, words, maxCharsPerCue, normalizedDuration);
     return normalizeSubtitleCueTiming(
       normalizeDisplayUnits(
         hasDisplayTextCoverage(textTimedUnits, text)
           ? textTimedUnits
-          : buildWeightedPhraseUnits(splitTextIntoPhrases(text, maxCharsPerLine), normalizedDuration),
+          : buildWeightedPhraseUnits(splitTextIntoPhrases(text, maxCharsPerCue), normalizedDuration),
         maxCharsPerLine,
         normalizedDuration,
       ),
@@ -549,7 +801,7 @@ export function buildSubtitleDisplayUnits(input: {
     );
   }
 
-  const phrases = splitTextIntoPhrases(text, maxCharsPerLine);
+  const phrases = splitTextIntoPhrases(text, maxCharsPerCue);
   return normalizeSubtitleCueTiming(
     normalizeDisplayUnits(
       buildWeightedPhraseUnits(phrases.length > 0 ? phrases : [text], normalizedDuration),

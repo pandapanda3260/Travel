@@ -3232,6 +3232,10 @@ textarea {
   transition: all 0.2s ease;
 }
 
+.task-subtitle-preview-text span {
+  display: block;
+}
+
 .task-subtitle-preview-pager {
   display: flex;
   align-items: center;
@@ -7870,6 +7874,25 @@ textarea {
 }
 
 .task-subtitle-audio-line-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-subtitle-audio-line-text .task-subtitle-audio-display-unit {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.task-subtitle-audio-line-text .task-subtitle-audio-display-unit + .task-subtitle-audio-display-unit {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(126, 141, 192, 0.2);
+}
+
+.task-subtitle-audio-line-text .task-subtitle-audio-display-line {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -25,6 +25,7 @@ import {
 import { listConstraintPrompts } from "./constraint-prompt-store";
 import {
   buildSubtitleDisplayUnits,
+  formatSubtitleDisplayUnitText,
   normalizeSubtitleCueTiming,
   splitSegmentWordTimelineBySubtitleEntries,
 } from "./subtitle-display";
@@ -1383,7 +1384,7 @@ test("buildSubtitleDisplayUnits 会在无词级时间时按文本权重切分且
   );
 });
 
-test("buildSubtitleDisplayUnits 会把超长整句拆成单行字幕且不丢字", () => {
+test("buildSubtitleDisplayUnits 会把可容纳的完整语义块显示为两行且不丢字", () => {
   const sourceText = "北京玩五天，有接送住得也舒服，省心不少";
   const units = buildSubtitleDisplayUnits({
     text: sourceText,
@@ -1393,15 +1394,102 @@ test("buildSubtitleDisplayUnits 会把超长整句拆成单行字幕且不丢字
   });
 
   assert.deepEqual(
-    units.map((item) => item.text),
-    ["北京玩五天", "有接送住得也舒服", "省心不少"],
+    units.map((item) => ({ text: item.text, lines: item.lines })),
+    [
+      {
+        text: "北京玩五天，有接送住得也舒服",
+        lines: ["北京玩五天", "有接送住得也舒服"],
+      },
+      { text: "省心不少", lines: ["省心不少"] },
+    ],
   );
-  assert.equal(units.every((item) => !item.text.includes("\n")), true);
-  assert.equal(units.every((item) => countSubtitleDisplayCharacters(item.text) <= 8), true);
+  assert.equal(units.every((item) => !item.lines.join("").includes("\n")), true);
+  assert.equal(units.every((item) => item.lines.length <= 2), true);
+  assert.equal(units.every((item) => item.lines.every((line) => countSubtitleDisplayCharacters(line) <= 8)), true);
   assert.equal(countSubtitleDisplayCharacters(units.map((item) => item.text).join("")), 17);
   assert.equal(countSubtitleDisplayCharacters(units.map((item) => item.text).join("")), countSubtitleDisplayCharacters(sourceText));
   assert.equal(units[0]!.startOffsetSeconds, 0);
   assert.equal(Math.abs(units[units.length - 1]!.endOffsetSeconds - 3.4) < 0.001, true);
+  assert.equal(
+    units.every((item, index) => index === 0 || item.startOffsetSeconds >= units[index - 1]!.endOffsetSeconds),
+    true,
+  );
+});
+
+test("buildSubtitleDisplayUnits 会把完整语义字幕保留为同一屏两行字幕块", () => {
+  const sourceText = "这家不是来睡一晚的车到门口就有度假感";
+  const units = buildSubtitleDisplayUnits({
+    text: sourceText,
+    durationSeconds: 3.2,
+    maxCharsPerLine: 12,
+    displayMode: "full_sentence",
+  });
+
+  assert.equal(units.length, 1);
+  assert.equal(units[0]!.text, sourceText);
+  assert.equal(units[0]!.lines.length, 2);
+  assert.equal(units[0]!.lines.every((line) => countSubtitleDisplayCharacters(line) <= 12), true);
+  assert.equal(countSubtitleDisplayCharacters(units[0]!.lines.join("")), countSubtitleDisplayCharacters(sourceText));
+  assert.equal(units[0]!.startOffsetSeconds, 0);
+  assert.equal(Math.abs(units[0]!.endOffsetSeconds - 3.2) < 0.001, true);
+});
+
+test("formatSubtitleDisplayUnitText 会按同一屏物理行输出换行文本", () => {
+  const unit = buildSubtitleDisplayUnits({
+    text: "这家不是来睡一晚的车到门口就有度假感",
+    durationSeconds: 3.2,
+    maxCharsPerLine: 12,
+    displayMode: "full_sentence",
+  })[0]!;
+
+  assert.equal(formatSubtitleDisplayUnitText(unit), unit.lines.join("\n"));
+  assert.equal(formatSubtitleDisplayUnitText(unit).split("\n").length, 2);
+});
+
+test("buildSubtitleDisplayUnits 会优先使用手动字幕显示分块且不改台词文本", () => {
+  const sourceText = "先立住到达感再讲清套餐权益最后提醒用户预订";
+  const units = buildSubtitleDisplayUnits({
+    text: sourceText,
+    durationSeconds: 4,
+    maxCharsPerLine: 10,
+    displayMode: "full_sentence",
+    manualCues: [
+      { lines: ["先立住到达感", "再讲清套餐权益"] },
+      { lines: ["最后提醒用户预订"] },
+    ],
+  });
+
+  assert.deepEqual(
+    units.map((unit) => unit.lines),
+    [["先立住到达感", "再讲清套餐权益"], ["最后提醒用户预订"]],
+  );
+  assert.equal(
+    countSubtitleDisplayCharacters(units.map((unit) => unit.text).join("")),
+    countSubtitleDisplayCharacters(sourceText),
+  );
+  assert.equal(units[0]!.startOffsetSeconds, 0);
+  assert.equal(Math.abs(units[units.length - 1]!.endOffsetSeconds - 4) < 0.001, true);
+});
+
+test("buildSubtitleDisplayUnits 超过两行容量时才拆成多个字幕块且不丢字", () => {
+  const sourceText = "先把酒店到达感立住，再讲清亲子活动和套餐权益，最后提醒用户尽早预订";
+  const units = buildSubtitleDisplayUnits({
+    text: sourceText,
+    durationSeconds: 6,
+    maxCharsPerLine: 8,
+    displayMode: "full_sentence",
+  });
+
+  assert.equal(units.length > 1, true);
+  assert.equal(units.every((unit) => unit.lines.length >= 1 && unit.lines.length <= 2), true);
+  assert.equal(
+    units.every((unit) => unit.lines.every((line) => countSubtitleDisplayCharacters(line) <= 8)),
+    true,
+  );
+  assert.equal(
+    countSubtitleDisplayCharacters(units.map((unit) => unit.text).join("")),
+    countSubtitleDisplayCharacters(sourceText),
+  );
   assert.equal(
     units.every((item, index) => index === 0 || item.startOffsetSeconds >= units[index - 1]!.endOffsetSeconds),
     true,
@@ -1434,11 +1522,11 @@ test("buildSubtitleDisplayUnits 会按词级时间把单行字幕对齐到音频
   assert.deepEqual(
     units.map((item) => [item.text, Number(item.startOffsetSeconds.toFixed(2)), Number(item.endOffsetSeconds.toFixed(2))]),
     [
-      ["北京玩五天", 0, 0.8],
-      ["有接送住得也舒服", 0.8, 2.08],
+      ["北京玩五天，有接送住得也舒服", 0, 2.08],
       ["省心不少", 2.08, 2.82],
     ],
   );
+  assert.deepEqual(units[0]!.lines, ["北京玩五天", "有接送住得也舒服"]);
 });
 
 test("buildSubtitleDisplayUnits 会把短句起点对齐到词块内部字符时间", () => {
@@ -1455,11 +1543,9 @@ test("buildSubtitleDisplayUnits 会把短句起点对齐到词块内部字符时
 
   assert.deepEqual(
     units.map((item) => [item.text, Number(item.startOffsetSeconds.toFixed(2)), Number(item.endOffsetSeconds.toFixed(2))]),
-    [
-      ["带家人照着这条走", 0, 1.78],
-      ["更省心", 1.78, 2.4],
-    ],
+    [["带家人照着这条走更省心", 0, 2.4]],
   );
+  assert.deepEqual(units[0]!.lines, ["带家人照着这条走", "更省心"]);
 });
 
 test("buildSubtitleDisplayUnits 会按真实词块时间避免短句字幕延迟", () => {
@@ -1475,11 +1561,10 @@ test("buildSubtitleDisplayUnits 会按真实词块时间避免短句字幕延迟
     ],
   });
 
-  assert.deepEqual(units.map((item) => item.text), ["节奏正合适", "带家人照着这条走", "更省心"]);
+  assert.deepEqual(units.map((item) => item.text), ["节奏正合适带家人照着这条走更省心"]);
+  assert.deepEqual(units[0]!.lines, ["节奏正合适带家人", "照着这条走更省心"]);
   assert.equal(Number(units[0]!.startOffsetSeconds.toFixed(2)), 0.2);
-  assert.equal(Number(units[1]!.startOffsetSeconds.toFixed(2)), 1.1);
-  assert.equal(Number(units[2]!.startOffsetSeconds.toFixed(2)), 2.88);
-  assert.equal(Number(units[2]!.endOffsetSeconds.toFixed(2)), 3.5);
+  assert.equal(Number(units[0]!.endOffsetSeconds.toFixed(2)), 3.5);
   assert.equal(
     units.every((item, index) => index === 0 || item.startOffsetSeconds >= units[index - 1]!.endOffsetSeconds),
     true,
@@ -1497,11 +1582,11 @@ test("buildSubtitleDisplayUnits 无词级时间时会按真实音频时长切分
   assert.deepEqual(
     units.map((item) => [item.text, Number(item.startOffsetSeconds.toFixed(2)), Number(item.endOffsetSeconds.toFixed(2))]),
     [
-      ["天安门故宫逛下来", 0, 1.94],
-      ["再去什刹海放松", 1.94, 3.68],
-      ["节奏正合适", 3.68, 5.02],
+      ["天安门故宫逛下来，再去什刹海放松", 0, 3.59],
+      ["节奏正合适", 3.59, 5.02],
     ],
   );
+  assert.deepEqual(units[0]!.lines, ["天安门故宫逛下来", "再去什刹海放松"]);
 });
 
 test("normalizeSubtitleCueTiming 会按词级结束时间收口避免字幕拖尾", () => {
@@ -1537,11 +1622,8 @@ test("buildSubtitleDisplayUnits 会为估算时间轴保留轻微间隔并收短
     trimEstimatedTail: true,
   });
 
-  assert.equal(units.length > 1, true);
-  assert.equal(
-    units.every((item, index) => index === units.length - 1 || item.endOffsetSeconds <= units[index + 1]!.startOffsetSeconds - 0.039),
-    true,
-  );
+  assert.equal(units.length, 1);
+  assert.deepEqual(units[0]!.lines, ["第一句读完了", "第二句接上来"]);
   assert.equal(Number(units[units.length - 1]!.endOffsetSeconds.toFixed(2)), 2.85);
 });
 

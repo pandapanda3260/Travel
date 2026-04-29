@@ -43,6 +43,10 @@ import {
   syncNarrationClipsIntoSubtitlePlan,
   usesSegmentLevelSubtitleSource,
 } from "../../../../../lib/subtitle-plan-source";
+import {
+  normalizeSubtitleDisplayCues,
+  type SubtitleDisplayCueInput,
+} from "../../../../../lib/subtitle-display";
 import { buildDirectorPlanFromTaskData, getTaskDirectorPlan } from "../../../../../lib/video-task-director";
 import { validateNarrationResult } from "../../../../../lib/generation-validator";
 import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
@@ -91,6 +95,7 @@ type UpdateSubtitleAudioLineRequest = {
   resultId?: string;
   clipId?: string;
   narrationText?: string;
+  subtitleDisplayCues?: SubtitleDisplayCueInput[];
 };
 
 type SubtitleAudioApiSettings = {

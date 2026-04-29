@@ -8,6 +8,7 @@ import { getFfmpegLocalRuntime } from "../../../../../lib/local-service-runtime"
 import { writeSrtSubtitleFile } from "../../../../../lib/subtitle-export";
 import {
   buildSubtitleDisplayUnits,
+  formatSubtitleDisplayUnitText,
   splitSegmentWordTimelineBySubtitleEntries,
 } from "../../../../../lib/subtitle-display";
 import { findNarrationClipsForSegment } from "../../../../../lib/video-composition-timeline";
@@ -189,6 +190,7 @@ function buildSrtTextFromTimeline(
     startAtSeconds: number;
     durationSeconds: number;
     words: NarrationDraftClip["words"];
+    subtitleDisplayCues?: NarrationDraftClip["subtitleDisplayCues"];
   }>,
   subtitleConfig: SubtitleConfig,
 ) {
@@ -203,12 +205,13 @@ function buildSrtTextFromTimeline(
       maxCharsPerLine: subtitleConfig.maxCharsPerLine,
       displayMode: subtitleConfig.displayMode,
       trimEstimatedTail: true,
+      manualCues: item.subtitleDisplayCues,
     });
 
     for (const unit of displayUnits) {
       const start = item.startAtSeconds + unit.startOffsetSeconds;
       const end = item.startAtSeconds + unit.endOffsetSeconds;
-      blocks.push(`${cueIndex}\n${toSrtTimestamp(start)} --> ${toSrtTimestamp(end)}\n${unit.text}`);
+      blocks.push(`${cueIndex}\n${toSrtTimestamp(start)} --> ${toSrtTimestamp(end)}\n${formatSubtitleDisplayUnitText(unit)}`);
       cueIndex += 1;
     }
   }
@@ -646,6 +649,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
                   words: clip.words?.length
                     ? clip.words
                     : ((fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"]),
+                  subtitleDisplayCues: clip.subtitleDisplayCues ?? null,
                   narrationClip: clip,
                 }))
               : entry.subtitleEntries.map((subtitle, index) => ({
@@ -659,6 +663,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
                   hasVoice: false,
                   audioUrl: null,
                   words: (fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"],
+                  subtitleDisplayCues: null,
                   narrationClip: null,
                 }));
 
@@ -808,6 +813,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
               fallbackDurationSeconds: entry.durationSeconds ?? entry.entry.segmentDuration,
             }),
             words: entry.words,
+            subtitleDisplayCues: entry.subtitleDisplayCues,
           };
         })
         .filter(
@@ -818,6 +824,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
             startAtSeconds: number;
             durationSeconds: number;
             words: NarrationDraftClip["words"];
+            subtitleDisplayCues?: NarrationDraftClip["subtitleDisplayCues"];
           } => Boolean(item),
         );
       const srtText =

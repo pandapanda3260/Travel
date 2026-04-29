@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { buildSubtitleDisplayUnits, splitSegmentWordTimelineBySubtitleEntries } from "../../../../lib/subtitle-display";
+import type { SubtitleDisplayCueInput } from "../../../../lib/subtitle-display";
 import {
   getSubtitleToneStyle,
   getSubtitleFontFamilyNames,
@@ -37,11 +38,13 @@ export type SubtitlePreviewNarrationClip = {
   narrationText: string;
   subtitleText: string;
   words?: TimedWord[];
+  subtitleDisplayCues?: SubtitleDisplayCueInput[] | null;
 };
 
 type SubtitlePreviewEntry = {
   id: string;
   text: string;
+  lines: string[];
   thumbnailUrl: string | null;
   startAtSeconds: number;
   durationSeconds: number;
@@ -111,6 +114,7 @@ function buildSubtitlePreviewEntries(
           return displayUnits.map((unit, unitIndex) => ({
             id: `material-${material.segmentId}-${index + 1}-${unitIndex + 1}`,
             text: unit.text,
+            lines: unit.lines,
             thumbnailUrl: material.thumbnailUrl ?? null,
             startAtSeconds: entry.startAtSeconds + unit.startOffsetSeconds,
             durationSeconds: unit.endOffsetSeconds - unit.startOffsetSeconds,
@@ -133,6 +137,7 @@ function buildSubtitlePreviewEntries(
         return displayUnits.map((unit, unitIndex) => ({
           id: `plan-${segment.segmentId}-${index + 1}-${unitIndex + 1}`,
           text: unit.text,
+          lines: unit.lines,
           thumbnailUrl: null,
           startAtSeconds: entry.startAtSeconds + unit.startOffsetSeconds,
           durationSeconds: unit.endOffsetSeconds - unit.startOffsetSeconds,
@@ -162,12 +167,14 @@ function buildSubtitlePreviewEntries(
       maxCharsPerLine: subtitleConfig.maxCharsPerLine,
       displayMode: subtitleConfig.displayMode,
       trimEstimatedTail: true,
+      manualCues: clip.subtitleDisplayCues,
     });
 
     displayUnits.forEach((unit, index) => {
       entries.push({
         id: `${clip.id}-display-${index + 1}`,
         text: unit.text,
+        lines: unit.lines,
         thumbnailUrl: material?.thumbnailUrl ?? null,
         startAtSeconds: clip.startAtSeconds + unit.startOffsetSeconds,
         durationSeconds: unit.endOffsetSeconds - unit.startOffsetSeconds,
@@ -231,8 +238,9 @@ function getSubtitlePreviewStyle(
         : "transparent",
     padding: subtitleConfig.stylePreset === "shadow" ? "8px 10px" : undefined,
     borderRadius: subtitleConfig.stylePreset === "shadow" ? "4px" : undefined,
-    whiteSpace: "nowrap",
+    whiteSpace: "pre-line",
     textAlign: "center",
+    lineHeight: 1.22,
   };
 }
 
@@ -321,7 +329,11 @@ export function SubtitlePreviewPanel({
                   className="task-subtitle-preview-text"
                   style={getSubtitlePreviewStyle(subtitleConfig, aspectRatio, previewHeight)}
                 >
-                  {activeSubtitlePreviewEntry.text}
+                  {activeSubtitlePreviewEntry.lines.length
+                    ? activeSubtitlePreviewEntry.lines.map((line, index) => (
+                        <span key={`${activeSubtitlePreviewEntry.id}-line-${index}`}>{line}</span>
+                      ))
+                    : activeSubtitlePreviewEntry.text}
                 </div>
               </div>
             </div>
