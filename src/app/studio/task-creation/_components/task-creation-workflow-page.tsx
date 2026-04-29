@@ -309,31 +309,6 @@ function getTaskCreateStatusMeta(status: TaskCreateStatus, hasExistingTask = fal
   }
 }
 
-const commercialPhaseDisplayLabels: Record<string, string> = {
-  attention_hook: "停留钩子",
-  identity_confirmation: "身份确认",
-  opportunity_offer: "机会抛出",
-  core_benefit: "核心利益",
-  benefit_stack: "权益轰炸",
-  evidence_proof: "素材证明",
-  value_anchor: "价值锚定",
-  risk_reversal: "风险解除",
-  action_close: "行动收口",
-  route_correction: "认知纠偏",
-  itinerary_delivery: "路线交付",
-  atmosphere_memory: "氛围记忆",
-  opening_hook: "开篇钩子",
-  commercial_info: "信息建立",
-  package_value: "套餐卖点",
-  purchase_advice: "购买建议",
-  closing: "收尾转化",
-  experience: "体验展开",
-};
-
-function getCommercialPhaseDisplayLabel(phase: string | null | undefined) {
-  return phase ? (commercialPhaseDisplayLabels[phase] ?? phase) : "商业任务";
-}
-
 function getReadingCheckMeta(text: string, targetDurationSeconds: number) {
   const estimatedSeconds = estimateNarrationReadingSeconds(text);
   const overflowSeconds = Number((estimatedSeconds - targetDurationSeconds).toFixed(1));
@@ -886,29 +861,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       return null;
     }
 
-    const boundMaterialCount = storyboardPlan.materialIntents.filter(
-      (asset) => asset.mappedShotIndexes.length > 0,
-    ).length;
-    const aiFallbackCount = storyboardPlan.shotBindings.filter((binding) => binding.needsAiFallback).length;
-
     return {
-      beatCount: storyboardPlan.beats.length,
-      materialCount: storyboardPlan.materialIntents.length,
-      boundMaterialCount,
-      shotBindingCount: storyboardPlan.shotBindings.length,
-      aiFallbackCount,
-      strategyLabel: storyboardPlan.commercialPlan?.strategyLabel ?? "商业故事板",
-      commercialScore: storyboardPlan.commercialPlan?.score.totalScore ?? null,
-      commercialFindingCount: storyboardPlan.commercialPlan?.score.findings.length ?? 0,
+      boundMaterialCount: storyboardPlan.materialIntents.filter((asset) => asset.mappedShotIndexes.length > 0).length,
     };
   }, [storyboardPlan]);
   const storyboardBindingByShotIndex = useMemo(
     () => new Map((storyboardPlan?.shotBindings ?? []).map((binding) => [binding.shotIndex, binding])),
     [storyboardPlan],
-  );
-  const storyShotByIndex = useMemo(
-    () => new Map((selectedTask?.directorPlan?.storyShots ?? []).map((shot) => [shot.shotIndex, shot])),
-    [selectedTask?.directorPlan?.storyShots],
   );
   const subtitlePreviewMaterials = useMemo(
     () =>
@@ -4148,7 +4107,11 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                       <div className="task-plan-content-stack">
                         <div className="task-plan-detail-entry">
                           <div className="task-plan-detail-entry-copy">
-                            <strong>{selectedTaskCapturedMaterialFirst ? "成片结构与镜头计划展示页" : "故事板与镜头计划展示页"}</strong>
+                            <strong>
+                              {selectedTaskCapturedMaterialFirst
+                                ? "成片结构与镜头计划展示页"
+                                : "故事板与镜头计划展示页"}
+                            </strong>
                             <span>
                               {selectedTaskCapturedMaterialFirst
                                 ? "查看商业打法、成交节奏、素材证据绑定、台词字幕和时间参数。"
@@ -4158,6 +4121,14 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                           <div className="task-plan-detail-entry-meta">
                             {shotPlanDisplay ? (
                               <>
+                                {storyboardPlan ? (
+                                  <Link
+                                    className="task-plan-detail-entry-meta-link"
+                                    href={`/studio/task-creation/${selectedTask.taskId}/shot-plan`}
+                                  >
+                                    商业故事板
+                                  </Link>
+                                ) : null}
                                 <span>{`${shotPlanDisplay.renderSegmentCount} 个片段`}</span>
                                 <span>{`${shotPlanDisplay.shots.length} 个镜头`}</span>
                                 <span>
@@ -4179,124 +4150,6 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             详情查看与编辑
                           </Link>
                         </div>
-                        {storyboardPlan && storyboardSummary ? (
-                          <details className="task-shot-plan-panel task-storyboard-panel" open>
-                            <summary className="task-shot-plan-panel-summary">
-                              <div className="task-shot-plan-panel-title">
-                                <strong>{`商业故事板 · ${storyboardSummary.strategyLabel}`}</strong>
-                                <span>{storyboardPlan.narrativeSummary}</span>
-                              </div>
-                              <div className="task-shot-plan-panel-metrics">
-                                {storyboardSummary.commercialScore != null ? (
-                                  <span>{`商业推进 ${storyboardSummary.commercialScore}/100`}</span>
-                                ) : null}
-                                <span>{`${storyboardSummary.beatCount} 个叙事段`}</span>
-                                <span>{`${storyboardSummary.boundMaterialCount}/${storyboardSummary.materialCount} 素材已绑定`}</span>
-                                <span>{`${storyboardSummary.shotBindingCount} 个镜头映射`}</span>
-                                {storyboardSummary.commercialFindingCount ? (
-                                  <span className="danger">{`${storyboardSummary.commercialFindingCount} 项商业提醒`}</span>
-                                ) : null}
-                                {storyboardSummary.aiFallbackCount ? (
-                                  <span className="danger">{`${storyboardSummary.aiFallbackCount} 个 AI 补镜头`}</span>
-                                ) : null}
-                              </div>
-                              <span className="task-shot-plan-panel-toggle task-subtitle-audio-detail-toggle">
-                                <span>展开</span>
-                                <span className="task-subtitle-audio-detail-toggle-icon is-open" aria-hidden="true" />
-                              </span>
-                            </summary>
-                            <div className="task-shot-plan-panel-body task-storyboard-body">
-                              {storyboardPlan.commercialPlan ? (
-                                <div className="task-storyboard-commercial-strip">
-                                  <div className="task-storyboard-commercial-score">
-                                    <span>商业推进</span>
-                                    <strong>{`${storyboardPlan.commercialPlan.score.totalScore}/100`}</strong>
-                                  </div>
-                                  <div className="task-storyboard-commercial-copy">
-                                    <strong>{storyboardPlan.commercialPlan.strategyLabel}</strong>
-                                    <span>{storyboardPlan.commercialPlan.coreHook}</span>
-                                  </div>
-                                  <div className="task-storyboard-commercial-path">
-                                    {storyboardPlan.commercialPlan.decisionPath.map((item) => (
-                                      <span key={item}>{item}</span>
-                                    ))}
-                                  </div>
-                                </div>
-                              ) : null}
-                              {storyboardPlan.warnings.length ? (
-                                <div className="notice-bar compact inline task-storyboard-warning">
-                                  <strong>待确认</strong>
-                                  <span>
-                                    {storyboardSummary.aiFallbackCount
-                                      ? `${storyboardSummary.aiFallbackCount} 个镜头需要补充可用素材，建议先确认对应图片是否缺失。`
-                                      : "素材和镜头已按叙事顺序整理，可进入详情微调。"}
-                                  </span>
-                                </div>
-                              ) : null}
-                              <div className="task-storyboard-beat-grid">
-                                {storyboardPlan.beats.map((beat) => (
-                                  <article key={beat.beatId} className="task-storyboard-beat-card">
-                                    <div className="task-storyboard-card-head">
-                                      <strong>{beat.title}</strong>
-                                      <span>{beat.durationRangeLabel}</span>
-                                    </div>
-                                    <p>{beat.goal}</p>
-                                    <div className="task-storyboard-chip-row">
-                                      <span>{`镜头 ${beat.targetShotIndexes.join("、")}`}</span>
-                                    </div>
-                                  </article>
-                                ))}
-                              </div>
-                              <div className="task-storyboard-map-board">
-                                {storyboardPlan.shotBindings.map((binding) => {
-                                  const storyShot = storyShotByIndex.get(binding.shotIndex);
-                                  const displayLine =
-                                    storyShot?.commercialIntent ||
-                                    storyShot?.subtitleText ||
-                                    storyShot?.narrationText ||
-                                    binding.narrationGoal ||
-                                    binding.subtitleGoal;
-                                  const phaseLabel = getCommercialPhaseDisplayLabel(storyShot?.commercialPhase);
-
-                                  return (
-                                    <article
-                                      key={`storyboard-binding-${binding.shotIndex}`}
-                                      className={`task-storyboard-map-row${binding.needsAiFallback ? " needs-fallback" : ""}`}
-                                    >
-                                      <div className="task-storyboard-map-index">
-                                        <strong>{`镜头 ${binding.shotIndex}`}</strong>
-                                        <span>
-                                          {storyShot
-                                            ? (formatDurationSecondsLabel(storyShot.durationSeconds) ??
-                                              `${storyShot.durationSeconds} 秒`)
-                                            : "待确认"}
-                                        </span>
-                                      </div>
-                                      <div className="task-storyboard-map-copy">
-                                        <strong>{`${phaseLabel} · ${storyShot?.title || binding.primaryAssetLabel}`}</strong>
-                                        <span>{displayLine}</span>
-                                      </div>
-                                      <div className="task-storyboard-map-goal">
-                                        <span>{binding.primaryAssetLabel}</span>
-                                        {storyShot?.evidenceTarget ? <span>{storyShot.evidenceTarget}</span> : null}
-                                        <span
-                                          className={`task-storyboard-map-state${binding.needsAiFallback ? " needs-fallback" : ""}`}
-                                        >
-                                          {binding.needsAiFallback ? "AI 补镜头" : "实拍素材"}
-                                        </span>
-                                      </div>
-                                    </article>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          </details>
-                        ) : (
-                          <div className="notice-bar compact inline task-storyboard-warning">
-                            <strong>故事板待生成</strong>
-                            <span>重新生成镜头计划后，会自动补充叙事段落、素材意图和图片镜头绑定说明。</span>
-                          </div>
-                        )}
                       </div>
                       <div className="task-create-parameter-stack task-plan-parameter-stack">
                         <section className="task-inline-parameter-group">
