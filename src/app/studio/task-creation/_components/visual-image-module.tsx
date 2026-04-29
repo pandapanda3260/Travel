@@ -254,6 +254,25 @@ export function VisualImageModule({
     [narrationClips],
   );
   const activeNarrationClip = activeShot ? (narrationClipByShotIndex.get(activeShot.shotIndex) ?? null) : null;
+  const activeShotPrimaryCandidate = useMemo(() => {
+    if (!activeShot) {
+      return null;
+    }
+    return (
+      activeShot.selectedCandidate ??
+      activeShot.candidates.find((candidate) => candidate.candidateId === activeShot.selectedCandidateId) ??
+      null
+    );
+  }, [activeShot]);
+  const activeShotSecondaryCandidates = useMemo(() => {
+    if (!activeShot) {
+      return [];
+    }
+    if (!capturedMaterialFirst || !activeShotPrimaryCandidate) {
+      return activeShot.candidates;
+    }
+    return activeShot.candidates.filter((candidate) => candidate.candidateId !== activeShotPrimaryCandidate.candidateId);
+  }, [activeShot, activeShotPrimaryCandidate, capturedMaterialFirst]);
   const previewShot = useMemo(
     () => (previewImage ? (shots.find((shot) => shot.shotIndex === previewImage.shotIndex) ?? null) : null),
     [previewImage, shots],
@@ -729,6 +748,118 @@ export function VisualImageModule({
     setPreviewImage({ shotIndex: previewShot.shotIndex, candidateId: nextCandidate.candidateId, mode: "candidate" });
   }
 
+  function renderShotContextPanel(shot: VisualImageShot, narrationClip: VisualWorkbenchNarrationClip | null) {
+    return (
+      <div className="task-visual-shot-context-panel">
+        <div className="task-visual-shot-context-item">
+          <strong>成交任务</strong>
+          <span>{getCommercialPhaseDisplayLabel(shot.commercialPhase)}</span>
+        </div>
+        <div className="task-visual-shot-context-item">
+          <strong>素材</strong>
+          <span>
+            {shot.primaryAssetLabel ?? shot.assetSubjectSummary ?? (shot.needsAiFallback ? "AI 补镜头" : "素材待确认")}
+          </span>
+        </div>
+        <div className="task-visual-shot-context-item">
+          <strong>表达</strong>
+          <span>
+            {shot.commercialIntent || shot.narrationGoal || shot.subtitleGoal || shot.narrationText || "待确认"}
+          </span>
+        </div>
+        {shot.evidenceTarget ? (
+          <div className="task-visual-shot-context-item">
+            <strong>证明点</strong>
+            <span>{shot.evidenceTarget}</span>
+          </div>
+        ) : null}
+        <div className="task-visual-shot-context-item">
+          <strong>台词</strong>
+          <span>{shot.subtitleText || shot.narrationText || "无台词"}</span>
+        </div>
+        <div className="task-visual-shot-context-item">
+          <strong>音频</strong>
+          <span>{narrationClip?.audioUrl ? "音频已生成" : narrationClip ? "台词已生成，音频待生成" : "暂无音频"}</span>
+        </div>
+        <div className="task-visual-shot-context-item">
+          <strong>时长</strong>
+          <span>
+            {shot.durationSeconds
+              ? (formatDurationSecondsLabel(shot.durationSeconds) ?? `${shot.durationSeconds} 秒`)
+              : "待确认"}
+          </span>
+        </div>
+        {shot.bindingReason || shot.userIntentPreserved ? (
+          <div className="task-visual-shot-context-item wide">
+            <strong>确认重点</strong>
+            <span>{[shot.bindingReason, shot.userIntentPreserved].filter(Boolean).join("；")}</span>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderCandidateCard(shot: VisualImageShot, candidate: VisualImageCandidate) {
+    const isRecommended = candidate.candidateId === shot.recommendedCandidateId;
+    const isSelected = candidate.candidateId === shot.selectedCandidateId;
+    const regenerationReasons = buildVisualImageCandidateRegenerationReasons(candidate);
+    const showRegenerationReason = shouldShowVisualImageCandidateRegenerationReason(candidate);
+    return (
+      <article
+        key={candidate.candidateId}
+        className={`task-visual-shot-candidate ${isSelected ? "selected" : ""} ${
+          showRegenerationReason ? "needs-regeneration" : ""
+        }`}
+      >
+        <button
+          className="task-visual-shot-candidate-trigger image-preview-trigger"
+          type="button"
+          onClick={() => openPreview(shot.shotIndex, candidate.candidateId, "candidate")}
+        >
+          <Image
+            src={candidate.imageUrl}
+            alt={`镜头 ${shot.shotIndex} 候选图`}
+            width={1200}
+            height={900}
+            loading={isSelected ? "eager" : "lazy"}
+            unoptimized
+          />
+        </button>
+        <div className="task-visual-shot-candidate-foot">
+          <button
+            className={`btn-pill task-visual-shot-select-button ${isSelected ? "is-selected" : ""}`}
+            type="button"
+            disabled={isSelected || submittingShotIndex === shot.shotIndex || generatingShotIndex === shot.shotIndex}
+            onClick={() => void handleSelectCandidate(shot.shotIndex, candidate.candidateId)}
+          >
+            {isSelected ? "✓ 已选择" : "选择这一张"}
+          </button>
+          <div className="task-visual-shot-candidate-tags">
+            {candidate.source === "uploaded" ? (
+              <span className="task-visual-shot-score">用户上传</span>
+            ) : isRecommended ? (
+              <span className="task-visual-shot-recommended">✓ 系统推荐</span>
+            ) : showRegenerationReason ? (
+              <span className="task-visual-shot-warning">建议重生</span>
+            ) : null}
+          </div>
+        </div>
+        {showRegenerationReason ? (
+          <div className="task-visual-shot-regeneration-reason">
+            <strong>为什么建议重生</strong>
+            <ul>
+              {(regenerationReasons.length ? regenerationReasons : ["视觉自检未通过，建议重新生成该候选图。"]).map(
+                (reason) => (
+                  <li key={reason}>{reason}</li>
+                ),
+              )}
+            </ul>
+          </div>
+        ) : null}
+      </article>
+    );
+  }
+
   if (!task) {
     return <div className="task-module-empty">完成字幕音频制作后，这里会按镜头生成视觉图片并供你逐张确认。</div>;
   }
@@ -864,139 +995,37 @@ export function VisualImageModule({
                     </button>
                   </div>
                 </div>
-                <div className="task-visual-shot-context-panel">
-                  <div className="task-visual-shot-context-item">
-                    <strong>成交任务</strong>
-                    <span>{getCommercialPhaseDisplayLabel(activeShot.commercialPhase)}</span>
-                  </div>
-                  <div className="task-visual-shot-context-item">
-                    <strong>素材</strong>
-                    <span>
-                      {activeShot.primaryAssetLabel ??
-                        activeShot.assetSubjectSummary ??
-                        (activeShot.needsAiFallback ? "AI 补镜头" : "素材待确认")}
-                    </span>
-                  </div>
-                  <div className="task-visual-shot-context-item">
-                    <strong>表达</strong>
-                    <span>
-                      {activeShot.commercialIntent ||
-                        activeShot.narrationGoal ||
-                        activeShot.subtitleGoal ||
-                        activeShot.narrationText ||
-                        "待确认"}
-                    </span>
-                  </div>
-                  {activeShot.evidenceTarget ? (
-                    <div className="task-visual-shot-context-item">
-                      <strong>证明点</strong>
-                      <span>{activeShot.evidenceTarget}</span>
+                {capturedMaterialFirst ? (
+                  <div className="task-visual-shot-confirmation-layout">
+                    <div className="task-visual-shot-confirmation-media">
+                      {activeShotPrimaryCandidate ? (
+                        renderCandidateCard(activeShot, activeShotPrimaryCandidate)
+                      ) : (
+                        <div className="task-visual-shot-candidate-empty">
+                          {workflowLocked || visualStageRunning
+                            ? "当前镜头图组生成中。"
+                            : "这里会展示所选镜头的 6 张候选图。"}
+                        </div>
+                      )}
                     </div>
-                  ) : null}
-                  <div className="task-visual-shot-context-item">
-                    <strong>台词</strong>
-                    <span>{activeShot.subtitleText || activeShot.narrationText || "无台词"}</span>
+                    {renderShotContextPanel(activeShot, activeNarrationClip)}
                   </div>
-                  <div className="task-visual-shot-context-item">
-                    <strong>音频</strong>
-                    <span>
-                      {activeNarrationClip?.audioUrl
-                        ? "音频已生成"
-                        : activeNarrationClip
-                          ? "台词已生成，音频待生成"
-                          : "暂无音频"}
-                    </span>
+                ) : (
+                  renderShotContextPanel(activeShot, activeNarrationClip)
+                )}
+                {activeShotSecondaryCandidates.length ? (
+                  <div className="task-visual-shot-candidate-list">
+                    {activeShotSecondaryCandidates.map((candidate) => renderCandidateCard(activeShot, candidate))}
                   </div>
-                  <div className="task-visual-shot-context-item">
-                    <strong>时长</strong>
-                    <span>
-                      {activeShot.durationSeconds
-                        ? (formatDurationSecondsLabel(activeShot.durationSeconds) ?? `${activeShot.durationSeconds} 秒`)
-                        : "待确认"}
-                    </span>
-                  </div>
-                  {activeShot.bindingReason || activeShot.userIntentPreserved ? (
-                    <div className="task-visual-shot-context-item wide">
-                      <strong>确认重点</strong>
-                      <span>{[activeShot.bindingReason, activeShot.userIntentPreserved].filter(Boolean).join("；")}</span>
-                    </div>
-                  ) : null}
-                </div>
-                <div className="task-visual-shot-candidate-list">
-                  {activeShot.candidates.length ? (
-                    activeShot.candidates.map((candidate) => {
-                      const isRecommended = candidate.candidateId === activeShot.recommendedCandidateId;
-                      const isSelected = candidate.candidateId === activeShot.selectedCandidateId;
-                      const regenerationReasons = buildVisualImageCandidateRegenerationReasons(candidate);
-                      const showRegenerationReason = shouldShowVisualImageCandidateRegenerationReason(candidate);
-                      return (
-                        <article
-                          key={candidate.candidateId}
-                          className={`task-visual-shot-candidate ${isSelected ? "selected" : ""} ${
-                            showRegenerationReason ? "needs-regeneration" : ""
-                          }`}
-                        >
-                          <button
-                            className="task-visual-shot-candidate-trigger image-preview-trigger"
-                            type="button"
-                            onClick={() => openPreview(activeShot.shotIndex, candidate.candidateId, "candidate")}
-                          >
-                            <Image
-                              src={candidate.imageUrl}
-                              alt={`镜头 ${activeShot.shotIndex} 候选图`}
-                              width={1200}
-                              height={900}
-                              loading={isSelected ? "eager" : "lazy"}
-                              unoptimized
-                            />
-                          </button>
-                          <div className="task-visual-shot-candidate-foot">
-                            <button
-                              className={`btn-pill task-visual-shot-select-button ${isSelected ? "is-selected" : ""}`}
-                              type="button"
-                              disabled={
-                                isSelected ||
-                                submittingShotIndex === activeShot.shotIndex ||
-                                generatingShotIndex === activeShot.shotIndex
-                              }
-                              onClick={() => void handleSelectCandidate(activeShot.shotIndex, candidate.candidateId)}
-                            >
-                              {isSelected ? "✓ 已选择" : "选择这一张"}
-                            </button>
-                            <div className="task-visual-shot-candidate-tags">
-                              {candidate.source === "uploaded" ? (
-                                <span className="task-visual-shot-score">用户上传</span>
-                              ) : isRecommended ? (
-                                <span className="task-visual-shot-recommended">✓ 系统推荐</span>
-                              ) : showRegenerationReason ? (
-                                <span className="task-visual-shot-warning">建议重生</span>
-                              ) : null}
-                            </div>
-                          </div>
-                          {showRegenerationReason ? (
-                            <div className="task-visual-shot-regeneration-reason">
-                              <strong>为什么建议重生</strong>
-                              <ul>
-                                {(regenerationReasons.length
-                                  ? regenerationReasons
-                                  : ["视觉自检未通过，建议重新生成该候选图。"]
-                                ).map((reason) => (
-                                  <li key={reason}>{reason}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
-                        </article>
-                      );
-                    })
-                  ) : (
+                ) : !capturedMaterialFirst || !activeShotPrimaryCandidate ? (
+                  <div className="task-visual-shot-candidate-list">
                     <div className="task-visual-shot-candidate-empty">
                       {workflowLocked || visualStageRunning
                         ? "当前镜头图组生成中。"
                         : "这里会展示所选镜头的 6 张候选图。"}
                     </div>
-                  )}
-                </div>
+                  </div>
+                ) : null}
               </section>
             ) : null}
           </>

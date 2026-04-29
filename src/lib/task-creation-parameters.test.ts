@@ -1594,6 +1594,7 @@ test("normalizeSubtitleCueTiming 会按词级结束时间收口避免字幕拖�
     [
       {
         text: "读完就收",
+        lines: ["读完就收"],
         startOffsetSeconds: 0,
         endOffsetSeconds: 2.8,
       },

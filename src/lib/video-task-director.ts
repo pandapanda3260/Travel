@@ -516,6 +516,10 @@ function buildFallbackStoryShot(input: {
     normalizeInlineText(input.planItem?.narrationHint) ||
     normalizeInlineText(input.narrationText) ||
     `${input.segmentIndex}号片段亮点`;
+  const narrationText = normalizeNarrationText(input.planItem?.sourceSpokenText || input.narrationText);
+  const subtitleText = normalizeNarrationText(
+    input.planItem?.sourceSubtitleText || input.planItem?.sourceSpokenText || input.narrationText,
+  );
 
   return {
     shotId: `shot-${input.shotIndex}`,
@@ -542,8 +546,8 @@ function buildFallbackStoryShot(input: {
     narrationHint,
     imagePrompt: normalizeInlineText(input.planItem?.img2imgPrompt) || normalizeInlineText(input.imagePrompt) || sceneDescription,
     videoPrompt: normalizeInlineText(input.planItem?.i2vPrompt) || normalizeInlineText(input.videoPrompt) || sceneDescription,
-    narrationText: normalizeNarrationText(input.narrationText),
-    subtitleText: normalizeNarrationText(input.narrationText),
+    narrationText,
+    subtitleText,
     startAtSeconds: input.planItem?.startAtSeconds,
     endAtSeconds: input.planItem?.endAtSeconds,
     functionTag: input.planItem?.functionTag,
@@ -552,6 +556,13 @@ function buildFallbackStoryShot(input: {
     commercialIntent: input.planItem?.commercialIntent ?? null,
     evidenceTarget: input.planItem?.evidenceTarget ?? null,
     conversionRole: input.planItem?.conversionRole ?? null,
+    narrationBeatId: input.planItem?.narrationBeatId ?? null,
+    narrationPhase: input.planItem?.narrationPhase ?? null,
+    narrationIntent: input.planItem?.narrationIntent ?? null,
+    sourceSpokenText: input.planItem?.sourceSpokenText ?? null,
+    sourceSubtitleText: input.planItem?.sourceSubtitleText ?? null,
+    narrationEstimatedDurationSeconds: input.planItem?.narrationEstimatedDurationSeconds ?? null,
+    targetMaterialIds: input.planItem?.targetMaterialIds,
     shotScale: input.planItem?.shotScale,
     compositionHint: input.planItem?.compositionHint,
     rhythmTag: input.planItem?.rhythmTag,
@@ -674,17 +685,24 @@ export function buildDirectorPlanFromTaskData(input: {
       });
       let rawShotNarrationText = "";
       if (shotHasVoice || shotHasSubtitle) {
-        if (!segmentNarrationAssigned && voicedShotCount <= 1) {
+        if (planItem?.sourceSpokenText?.trim()) {
+          rawShotNarrationText = planItem.sourceSpokenText;
+        } else if (!segmentNarrationAssigned && voicedShotCount <= 1) {
           rawShotNarrationText = segmentNarrationBlock;
           segmentNarrationAssigned = true;
         }
       }
-      const fallbackNarration = normalizeInlineText(planItem?.narrationHint) || `镜头${shotIndex}亮点`;
+      const fallbackNarration =
+        normalizeInlineText(planItem?.sourceSubtitleText) ||
+        normalizeInlineText(planItem?.narrationHint) ||
+        `镜头${shotIndex}亮点`;
       const shotNarrationText =
         shotHasVoice || shotHasSubtitle
           ? trimNarrationToDuration(
               rawShotNarrationText || fallbackNarration,
-              planItem?.durationSeconds && planItem.durationSeconds > 0
+              planItem?.narrationEstimatedDurationSeconds && planItem.narrationEstimatedDurationSeconds > 0
+                ? planItem.narrationEstimatedDurationSeconds
+                : planItem?.durationSeconds && planItem.durationSeconds > 0
                 ? planItem.durationSeconds
                 : shotDurationSeconds,
               fallbackNarration,
@@ -768,7 +786,8 @@ export function buildDirectorPlanFromTaskData(input: {
     const segmentHasSubtitle = segmentShots.some((shot) => shot.hasSubtitle);
     const segmentRequiresLipSync = segmentShots.some((shot) => shot.requiresLipSync);
     const cueAnchorShot = segmentShots.find((shot) => shot.hasVoice || shot.hasSubtitle) ?? segmentShots[0] ?? null;
-    const useSegmentLevelNarration = voicedShotCount > 1 || Boolean(normalizedSegmentNarrationBlock);
+    const useSegmentLevelNarration =
+      !normalizedShotPlan?.realPhotoNarrationBlueprint && (voicedShotCount > 1 || Boolean(normalizedSegmentNarrationBlock));
 
     const multiPrompt =
       segmentMode === "multi_shot_montage"
@@ -809,7 +828,7 @@ export function buildDirectorPlanFromTaskData(input: {
     renderSegments.push(renderSegment);
 
     let shotAccumulatedSeconds = accumulatedSeconds;
-    if (useSegmentSubtitleSource && (segmentHasVoice || segmentHasSubtitle)) {
+    if (!normalizedShotPlan?.realPhotoNarrationBlueprint && useSegmentSubtitleSource && (segmentHasVoice || segmentHasSubtitle)) {
       audioCues.push({
         cueId: `cue-segment-${segmentIndex}`,
         cueIndex: audioCues.length + 1,
@@ -825,7 +844,11 @@ export function buildDirectorPlanFromTaskData(input: {
         requiresLipSync: segmentRequiresLipSync,
         voiceId: null,
         narrationText: segmentNarrationText,
-        subtitleText: segmentNarrationText,
+        subtitleText: cueAnchorShot?.sourceSubtitleText || segmentNarrationText,
+        narrationBeatId: cueAnchorShot?.narrationBeatId ?? null,
+        narrationPhase: cueAnchorShot?.narrationPhase ?? null,
+        sourceSpokenText: cueAnchorShot?.sourceSpokenText ?? segmentNarrationText,
+        sourceSubtitleText: cueAnchorShot?.sourceSubtitleText ?? segmentNarrationText,
         audioUrl: null,
         words: [],
       });
@@ -839,6 +862,12 @@ export function buildDirectorPlanFromTaskData(input: {
               : useSegmentLevelNarration
                 ? ""
                 : shot.narrationText || "";
+          const cueSubtitleText =
+            isCueAnchor && useSegmentLevelNarration
+              ? cueAnchorShot?.sourceSubtitleText || segmentNarrationText
+              : useSegmentLevelNarration
+                ? ""
+                : shot.sourceSubtitleText || shot.subtitleText || cueNarrationText;
           audioCues.push({
             cueId: `cue-shot-${shot.shotIndex}`,
             cueIndex: audioCues.length + 1,
@@ -854,7 +883,11 @@ export function buildDirectorPlanFromTaskData(input: {
             requiresLipSync: shot.requiresLipSync,
             voiceId: null,
             narrationText: cueNarrationText,
-            subtitleText: cueNarrationText,
+            subtitleText: cueSubtitleText,
+            narrationBeatId: shot.narrationBeatId ?? null,
+            narrationPhase: shot.narrationPhase ?? null,
+            sourceSpokenText: shot.sourceSpokenText ?? cueNarrationText,
+            sourceSubtitleText: shot.sourceSubtitleText ?? cueSubtitleText,
             audioUrl: null,
             words: [],
           });

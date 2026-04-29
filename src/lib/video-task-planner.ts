@@ -40,6 +40,7 @@ import {
   syncNarrationScriptIntoSubtitlePlan,
   usesSegmentLevelSubtitleSource,
 } from "./subtitle-plan-source";
+import { extractBestJsonObject } from "./llm-json";
 import { buildDirectorPlanFromTaskData, buildDraftBundleFromDirectorPlan } from "./video-task-director";
 import { deriveVideoTaskStructure } from "./video-task-structure";
 import { getVideoTypeCategoryPrompt, getVideoTypeAddonPrompt } from "./video-type-prompts";
@@ -56,6 +57,12 @@ import {
   applyMainCharacterAppearancePolicy,
   getMainCharacterAppearancePolicy,
 } from "./main-character-appearance-policy";
+import {
+  buildFallbackRealPhotoNarrationBlueprint,
+  buildRealPhotoMaterialBrief,
+  buildShotPlanFromRealPhotoNarrationBlueprint,
+  normalizeRealPhotoNarrationBlueprintCandidate,
+} from "./real-photo-narration-workflow";
 import {
   getVideoTaskWorkflowKind,
   getVideoTaskTypeProfile,
@@ -979,6 +986,7 @@ export function validateShotPlan(
 
   if (
     profile.hasVoice &&
+    !isRealPhotoNarrationFirstPlan(plan, parameters) &&
     parameters.video.segmentMode !== "single_speaking" &&
     parameters.video.segmentMode !== "single_action" &&
     plan.shots.length >= 4
@@ -1278,7 +1286,11 @@ function buildFallbackDraftBundleFromShotPlan(
     : normalizedPlan.shots
         .map(
           (shot) =>
-            `镜头${shot.shotIndex}：${shot.hasVoice === false && shot.hasSubtitle === false ? "" : sanitizeNarrationText(shot.narrationHint)}`,
+            `镜头${shot.shotIndex}：${
+              shot.hasVoice === false && shot.hasSubtitle === false
+                ? ""
+                : sanitizeNarrationText(shot.sourceSpokenText || shot.narrationHint)
+            }`,
         )
         .join("\n");
 
@@ -2061,6 +2073,195 @@ export type DraftBundleWithShotPlan = {
   directorPlan: VideoTaskDirectorPlan;
 };
 
+function isRealPhotoNarrationFirstPlan(plan: ShotPlan | null | undefined, parameters: VideoTaskParameterBundle) {
+  return usesCapturedMaterialFirstWorkflow(parameters.video.videoType) && Boolean(plan?.realPhotoNarrationBlueprint);
+}
+
+function buildRealPhotoNarrationBlueprintSystemPrompt(videoType: VideoTaskVideoType) {
+  return [
+    "你是商业短视频的叙事导演和真人口播编剧。当前是实拍素材成片工作流，必须先生成表达和台词，再由台词反推镜头。",
+    "",
+    "核心目标：让视频像真实探店/推荐博主在说话，而不是 AI 按镜头硬凑字幕。",
+    "",
+    "必须遵守：",
+    "1. 不要一上来就堆卖点。开篇先制造停留理由、真实疑问或判断场景。",
+    "2. 叙事骨架有 60 分作用力：它是引导，不是旅行社式硬模板。允许根据素材自然调整，但不能结构异常。",
+    "3. 先写 spokenText，再决定该句对应哪张图。每句台词必须有对应素材证据。",
+    "4. 镜头数不得超过可用素材数；素材多于镜头时筛选，素材少时减少镜头。",
+    "5. spokenText 要像真人短视频口播：具体、短句、有承接，不要宣传片腔、不要空泛形容词。",
+    "6. subtitleText 是屏幕字幕摘要，不必逐字复述 spokenText。",
+    "7. targetMaterialIds 只能使用输入里给出的 assetId，不要编造。",
+    "",
+    `视频类型：${videoType}`,
+    "",
+    "只输出 JSON 对象，不要 Markdown，不要解释。格式：",
+    JSON.stringify(
+      {
+        narrativeSummary: "整体讲述逻辑",
+        speakingStyle: "口播风格",
+        targetAudience: "目标用户",
+        coreQuestion: "本视频回答的核心购买问题",
+        materialStrategy: "素材如何服务台词",
+        beats: [
+          {
+            phase: "opening_hook",
+            title: "阶段标题",
+            intent: "这一句在商业叙事中的作用",
+            spokenText: "真人口播台词",
+            subtitleText: "屏幕字幕摘要",
+            targetMaterialIds: ["asset-id"],
+            materialReason: "为什么这张素材证明这句台词",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  ].join("\n");
+}
+
+function buildRealPhotoNarrationBlueprintUserContent(input: {
+  source: VideoTaskSource;
+  parameters: VideoTaskParameterBundle;
+  materialBrief: ReturnType<typeof buildRealPhotoMaterialBrief>;
+  fallbackBlueprint: ReturnType<typeof buildFallbackRealPhotoNarrationBlueprint>;
+}) {
+  return JSON.stringify(
+    {
+      productInfo: {
+        title: input.source.productInfoTitle ?? "",
+        snapshot: input.source.productInfoSnapshot,
+      },
+      userPrompt: input.source.userPrompt,
+      optimizedUserPrompt: input.source.optimizedUserPrompt ?? "",
+      referenceVideo: {
+        materialId: input.source.videoMaterialId,
+        name: input.source.videoMaterialName,
+        templatePrompt: input.source.videoTemplatePrompt,
+      },
+      parameters: {
+        expectedDurationRange: input.parameters.video.expectedDurationRange,
+        requestedStoryShotCount: input.parameters.video.storyShotCount,
+        requestedSegmentCount: input.parameters.video.segmentCount,
+        aspectRatio: input.parameters.video.aspectRatio,
+        generateAudio: input.parameters.video.generateAudio,
+        enableSubtitle: input.parameters.audio.enableSubtitle,
+      },
+      materialBrief: input.materialBrief,
+      fallbackStructureForReference: input.fallbackBlueprint,
+    },
+    null,
+    2,
+  );
+}
+
+async function buildCapturedMaterialNarrationFirstShotPlan(input: {
+  source: VideoTaskSource;
+  parameters: VideoTaskParameterBundle;
+  liveEnabled: boolean;
+  hotelAssets?: TaskHotelAssetRecord[];
+}) {
+  const materialBrief = buildRealPhotoMaterialBrief({
+    source: input.source,
+    hotelAssets: input.hotelAssets ?? [],
+  });
+  const fallbackBlueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: input.source,
+    parameters: input.parameters,
+    materialBrief,
+  });
+  let narrationBlueprint = fallbackBlueprint;
+
+  if (input.liveEnabled) {
+    try {
+      const content = await callTaskGenerationLlm({
+        systemPrompt: buildRealPhotoNarrationBlueprintSystemPrompt(input.parameters.video.videoType),
+        userContent: buildRealPhotoNarrationBlueprintUserContent({
+          source: input.source,
+          parameters: input.parameters,
+          materialBrief,
+          fallbackBlueprint,
+        }),
+        temperature: 0.52,
+        maxCompletionTokens: 4200,
+      });
+      const json = content ? extractBestJsonObject(content, ["beats"]) : null;
+      const parsed = json ? (JSON.parse(json) as unknown) : null;
+      narrationBlueprint = normalizeRealPhotoNarrationBlueprintCandidate({
+        candidate: parsed,
+        fallback: fallbackBlueprint,
+        materialBrief,
+      });
+    } catch {
+      narrationBlueprint = fallbackBlueprint;
+    }
+  }
+
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint: narrationBlueprint,
+    materialBrief,
+    parameters: input.parameters,
+  });
+
+  shotPlan.validationErrors = validateShotPlan(shotPlan, input.source, input.parameters);
+  return shotPlan;
+}
+
+async function generateCapturedMaterialNarrationFirstDraftBundle(input: {
+  source: VideoTaskSource;
+  parameters: VideoTaskParameterBundle;
+  liveEnabled: boolean;
+  progressTracker?: WeightedProgressTracker | null;
+  options?: {
+    hotelAssets?: TaskHotelAssetRecord[];
+    referenceVideoMaterial?: VideoMaterialRecord | null;
+  };
+}): Promise<DraftBundleWithShotPlan> {
+  input.progressTracker?.start("skeleton", "理解实拍素材并生成台词蓝图...");
+  let shotPlan = await buildCapturedMaterialNarrationFirstShotPlan({
+    source: input.source,
+    parameters: input.parameters,
+    liveEnabled: input.liveEnabled,
+    hotelAssets: input.options?.hotelAssets ?? [],
+  });
+  shotPlan = attachCapturedMaterialStoryboardPlan({
+    source: input.source,
+    parameters: input.parameters,
+    shotPlan,
+    hotelAssets: input.options?.hotelAssets ?? [],
+    referenceVideoMaterial: input.options?.referenceVideoMaterial ?? null,
+  });
+  input.progressTracker?.complete("skeleton", "台词蓝图与镜头计划完成");
+
+  input.progressTracker?.skip("repair_1", "叙事优先流程跳过旧镜头修复轮次 1");
+  input.progressTracker?.skip("repair_2", "叙事优先流程跳过旧镜头修复轮次 2");
+  input.progressTracker?.skip("visual_enrichment", "实拍素材已绑定镜头，跳过旧视觉扩写");
+  input.progressTracker?.skip("subject_enrichment", "实拍素材已保留原始主体，跳过旧人物扩写");
+  input.progressTracker?.skip("subtitle_enrichment", "字幕来自台词蓝图，跳过旧字幕反推");
+
+  input.progressTracker?.start("prompt_generation", "整理叙事与画面提示词...");
+  const draftBundle = buildFallbackDraftBundleFromShotPlan(shotPlan, input.parameters);
+  input.progressTracker?.complete("prompt_generation", "叙事与画面提示词完成");
+
+  input.progressTracker?.skip("narration_polish", "台词已在蓝图阶段生成，跳过旧台词二次生成");
+  input.progressTracker?.skip("narration_repair", "视频时长后续跟随音频，跳过按固定镜头时长压缩台词");
+
+  input.progressTracker?.start("build_director_plan", "整理镜头计划...");
+  const directorPlan = buildDirectorPlanFromTaskData({
+    draftBundle,
+    shotPlan,
+    parameters: input.parameters,
+  });
+  input.progressTracker?.complete("build_director_plan", "镜头计划已保存");
+  input.progressTracker?.finish("镜头计划生成完成");
+
+  return {
+    draftBundle: buildDraftBundleFromDirectorPlan(directorPlan),
+    shotPlan,
+    directorPlan,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Shot Plan Enrichment Steps (2-4)
 // ---------------------------------------------------------------------------
@@ -2440,15 +2641,21 @@ function attachCapturedMaterialStoryboardPlan(input: {
     return input.shotPlan;
   }
 
+  const storyboard = buildTaskStoryboardPlan({
+    source: input.source,
+    parameters: input.parameters,
+    shotPlan: input.shotPlan,
+    hotelAssets: input.hotelAssets ?? [],
+    referenceVideoMaterial: input.referenceVideoMaterial ?? null,
+  });
+
   return {
     ...input.shotPlan,
-    storyboard: buildTaskStoryboardPlan({
-      source: input.source,
-      parameters: input.parameters,
-      shotPlan: input.shotPlan,
-      hotelAssets: input.hotelAssets ?? [],
-      referenceVideoMaterial: input.referenceVideoMaterial ?? null,
-    }),
+    storyboard: {
+      ...storyboard,
+      realPhotoMaterialBrief: input.shotPlan.realPhotoMaterialBrief,
+      realPhotoNarrationBlueprint: input.shotPlan.realPhotoNarrationBlueprint,
+    },
   };
 }
 
@@ -2465,6 +2672,16 @@ export async function generateVideoTaskDraftBundle(
   const progressTracker = createDraftBundleProgressTracker(onProgress, parameters);
 
   try {
+    if (usesCapturedMaterialFirstWorkflow(parameters.video.videoType)) {
+      return await generateCapturedMaterialNarrationFirstDraftBundle({
+        source,
+        parameters,
+        liveEnabled: runtime.liveEnabled,
+        progressTracker,
+        options,
+      });
+    }
+
     if (!runtime.liveEnabled) {
       progressTracker?.start("skeleton", "当前模型离线，切换本地兜底...");
       let fallbackPlan = buildFallbackShotPlan(source, parameters);

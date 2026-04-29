@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { NarrationDraftClip } from "./narration";
 import type { NarrationResultRecord } from "./narration-result-store";
 import { joinRuntimePublicStoragePath } from "./runtime-storage";
+import { normalizeSubtitleDisplayCues } from "./subtitle-display";
+import { countSubtitleDisplayCharacters } from "./subtitle-text-utils";
 
 export type SubtitleCue = {
   cueId: string;
@@ -136,10 +138,10 @@ export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[])
   const effectiveStartMap = buildEffectiveClipStartMap(clips);
 
   return clips
-    .map((clip, index) => {
+    .flatMap((clip, index) => {
       const text = normalizeCueText(clip.subtitleText || clip.narrationText || "");
       if (!text) {
-        return null;
+        return [];
       }
 
       const startAtSeconds = effectiveStartMap.get(index) ?? getSafeSeconds(clip.startAtSeconds);
@@ -148,6 +150,39 @@ export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[])
       const computedEndAtSeconds = clip.words?.length
         ? Math.max(startAtSeconds + 0.8, startAtSeconds + wordEndTime)
         : startAtSeconds + durationSeconds;
+      const manualDisplayCues = normalizeSubtitleDisplayCues(clip.subtitleDisplayCues, 16);
+      const manualDisplayText = manualDisplayCues.map((cue) => cue.text).join("");
+      if (
+        manualDisplayCues.length > 0 &&
+        countSubtitleDisplayCharacters(manualDisplayText) === countSubtitleDisplayCharacters(text)
+      ) {
+        const totalWeight = manualDisplayCues.reduce(
+          (sum, cue) => sum + Math.max(1, countSubtitleDisplayCharacters(cue.text)),
+          0,
+        );
+        let cursor = startAtSeconds;
+
+        return manualDisplayCues.map((cue, cueIndex) => {
+          const isLastCue = cueIndex === manualDisplayCues.length - 1;
+          const cueDuration = isLastCue
+            ? computedEndAtSeconds - cursor
+            : (computedEndAtSeconds - startAtSeconds) *
+              (Math.max(1, countSubtitleDisplayCharacters(cue.text)) / totalWeight);
+          const cueStartAtSeconds = cursor;
+          const cueEndAtSeconds = isLastCue ? computedEndAtSeconds : cursor + cueDuration;
+          cursor = cueEndAtSeconds;
+
+          return {
+            cueId: `cue-${index + 1}-${cueIndex + 1}`,
+            text: cue.lines.join("\n"),
+            startAtSeconds: cueStartAtSeconds,
+            endAtSeconds: cueEndAtSeconds,
+            bindToSegmentId: clip.bindToSegmentId ?? null,
+            characterFocus: clip.characterFocus,
+            sourceClipId: clip.id,
+          } satisfies SubtitleCue;
+        });
+      }
 
       return {
         cueId: `cue-${index + 1}`,
@@ -159,7 +194,6 @@ export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[])
         sourceClipId: clip.id,
       } satisfies SubtitleCue;
     })
-    .filter((item): item is SubtitleCue => Boolean(item))
     .sort((left, right) => left.startAtSeconds - right.startAtSeconds)
     .map((cue, index, allCues) => {
       const nextCue = allCues[index + 1];

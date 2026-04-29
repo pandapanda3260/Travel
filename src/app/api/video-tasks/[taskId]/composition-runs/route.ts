@@ -797,36 +797,39 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
       const narrationTrackClipMap = new Map(narrationTrackClips.map((clip) => [clip.id, clip]));
       const subtitleTimeline = timedNarrationEntries
-        .map((entry) => {
+        .flatMap((entry) => {
           if (!entry.hasSubtitle || !entry.subtitleText.trim()) {
-            return null;
+            return [];
           }
 
           const narrationTrackClip = narrationTrackClipMap.get(`${taskId}-narration-${entry.id}`);
-          return {
-            subtitleText: entry.subtitleText,
-            startAtSeconds: entry.compositionStartAtSeconds,
-            durationSeconds: resolveSubtitleSpeechDuration({
+          return [
+            {
+              subtitleText: entry.subtitleText,
+              startAtSeconds: entry.compositionStartAtSeconds,
+              durationSeconds: resolveSubtitleSpeechDuration({
+                words: entry.words,
+                audioDurationSeconds: entry.audioDurationSeconds,
+                audioWindowDurationSeconds: narrationTrackClip?.durationSeconds,
+                fallbackDurationSeconds: entry.durationSeconds ?? entry.entry.segmentDuration,
+              }),
               words: entry.words,
-              audioDurationSeconds: entry.audioDurationSeconds,
-              audioWindowDurationSeconds: narrationTrackClip?.durationSeconds,
-              fallbackDurationSeconds: entry.durationSeconds ?? entry.entry.segmentDuration,
-            }),
-            words: entry.words,
-            subtitleDisplayCues: entry.subtitleDisplayCues,
-          };
-        })
-        .filter(
-          (
-            item,
-          ): item is {
+              subtitleDisplayCues: entry.subtitleDisplayCues,
+            } satisfies {
+              subtitleText: string;
+              startAtSeconds: number;
+              durationSeconds: number;
+              words: NarrationDraftClip["words"];
+              subtitleDisplayCues?: NarrationDraftClip["subtitleDisplayCues"];
+            },
+          ];
+        }) satisfies Array<{
             subtitleText: string;
             startAtSeconds: number;
             durationSeconds: number;
             words: NarrationDraftClip["words"];
             subtitleDisplayCues?: NarrationDraftClip["subtitleDisplayCues"];
-          } => Boolean(item),
-        );
+          }>;
       const srtText =
         subtitleConfig.enabled && subtitleTimeline.length > 0
           ? buildSrtTextFromTimeline(subtitleTimeline, subtitleConfig)

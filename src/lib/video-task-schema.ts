@@ -202,6 +202,13 @@ export type ShotPlanItem = {
   commercialIntent?: string | null;
   evidenceTarget?: string | null;
   conversionRole?: string | null;
+  narrationBeatId?: string | null;
+  narrationPhase?: RealPhotoNarrationPhase | null;
+  narrationIntent?: string | null;
+  sourceSpokenText?: string | null;
+  sourceSubtitleText?: string | null;
+  narrationEstimatedDurationSeconds?: number | null;
+  targetMaterialIds?: string[];
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;
@@ -311,9 +318,76 @@ export type StoryboardShotBinding = {
   needsAiFallback: boolean;
 };
 
+export type RealPhotoNarrationPhase =
+  | "opening_hook"
+  | "context_setup"
+  | "material_evidence"
+  | "offer_value"
+  | "action_close";
+
+export type RealPhotoMaterialPriority = "hero" | "core" | "support" | "backup";
+
+export type RealPhotoMaterialBriefItem = {
+  assetId: string;
+  displayName: string;
+  sourceType: VideoTaskAssetSourceType | "user_video";
+  sceneType?: HotelAssetSceneType | null;
+  subjectSummary: string;
+  tags: string[];
+  originalUserIntent: string;
+  analysisSummary: string;
+  recommendedRole: string;
+  priority: RealPhotoMaterialPriority;
+  sortOrder: number;
+  qualityScore: number;
+  commercialScore: number;
+  fileUrl?: string | null;
+  canDirectI2V: boolean;
+  needEnhancement: boolean;
+};
+
+export type RealPhotoMaterialBrief = {
+  version: 1;
+  productSummary: string;
+  userIntentSummary: string;
+  templateSummary: string;
+  items: RealPhotoMaterialBriefItem[];
+  warnings: string[];
+  generatedAt: string;
+};
+
+export type RealPhotoNarrationBeat = {
+  beatId: string;
+  phase: RealPhotoNarrationPhase;
+  title: string;
+  intent: string;
+  spokenText: string;
+  subtitleText: string;
+  estimatedDurationSeconds: number;
+  targetMaterialIds: string[];
+  materialReason: string;
+  structureStrength: "soft" | "medium" | "strong";
+};
+
+export type RealPhotoNarrationBlueprint = {
+  version: 1;
+  structureInfluenceScore: number;
+  narrativeSummary: string;
+  speakingStyle: string;
+  targetAudience: string;
+  coreQuestion: string;
+  beats: RealPhotoNarrationBeat[];
+  totalEstimatedDurationSeconds: number;
+  materialStrategy: string;
+  warnings: string[];
+  generatedAt: string;
+};
+
 export type TaskStoryboardPlan = {
   version: 1;
   commercialPlan?: TaskCommercialPlan;
+  realPhotoMaterialBrief?: RealPhotoMaterialBrief;
+  realPhotoNarrationBlueprint?: RealPhotoNarrationBlueprint;
   narrativeSummary: string;
   speakingStyle: string;
   editingGuidance: string;
@@ -335,6 +409,8 @@ export type ShotPlan = {
   narrativeCurves?: ShotPlanNarrativeCurves;
   subtitlePlan?: SegmentSubtitlePlan[];
   storyboard?: TaskStoryboardPlan;
+  realPhotoMaterialBrief?: RealPhotoMaterialBrief;
+  realPhotoNarrationBlueprint?: RealPhotoNarrationBlueprint;
 };
 
 export type DirectorStoryShot = {
@@ -372,6 +448,13 @@ export type DirectorStoryShot = {
   commercialIntent?: string | null;
   evidenceTarget?: string | null;
   conversionRole?: string | null;
+  narrationBeatId?: string | null;
+  narrationPhase?: RealPhotoNarrationPhase | null;
+  narrationIntent?: string | null;
+  sourceSpokenText?: string | null;
+  sourceSubtitleText?: string | null;
+  narrationEstimatedDurationSeconds?: number | null;
+  targetMaterialIds?: string[];
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;
@@ -441,6 +524,10 @@ export type DirectorAudioCue = {
   voiceId: string | null;
   narrationText: string;
   subtitleText: string;
+  narrationBeatId?: string | null;
+  narrationPhase?: RealPhotoNarrationPhase | null;
+  sourceSpokenText?: string | null;
+  sourceSubtitleText?: string | null;
   audioUrl?: string | null;
   words?: TimedWord[];
 };

@@ -1081,6 +1081,32 @@ textarea {
   background: rgba(248, 250, 255, 0.72);
 }
 
+.task-visual-shot-confirmation-layout {
+  display: grid;
+  grid-template-columns: calc(260px * 9 / 16) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+
+.task-visual-shot-confirmation-media {
+  min-width: 0;
+}
+
+.task-visual-shot-confirmation-media .task-visual-shot-candidate {
+  width: calc(260px * 9 / 16);
+}
+
+.task-visual-shot-confirmation-media .task-visual-shot-candidate-trigger {
+  width: calc(260px * 9 / 16);
+  height: 260px;
+}
+
+.task-visual-shot-confirmation-layout .task-visual-shot-context-panel {
+  min-height: 260px;
+  align-content: start;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .task-visual-shot-context-item {
   display: grid;
   gap: 3px;
@@ -1981,6 +2007,16 @@ textarea {
   }
 
   .task-visual-shot-context-panel {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .task-visual-shot-confirmation-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .task-visual-shot-confirmation-layout .task-visual-shot-context-panel {
     grid-template-columns: 1fr;
   }
 }

@@ -106,6 +106,19 @@ type SubtitleAudioApiSettings = {
   enableSubtitle: boolean;
 };
 
+function getClipLineText(clip: NarrationDraftClip) {
+  return clip.narrationText || clip.subtitleText || "";
+}
+
+function getSubtitleDisplayCueSignature(cues: SubtitleDisplayCueInput[] | null | undefined) {
+  return JSON.stringify(
+    (cues ?? []).map((cue) => ({
+      text: cue.text ?? "",
+      lines: cue.lines ?? [],
+    })),
+  );
+}
+
 export type SubtitleAudioRunPayload = {
   task: ReturnType<typeof getVideoTask> | null;
   result: Awaited<ReturnType<typeof patchNarrationResult>> | ReturnType<typeof createNarrationResult> | null;
@@ -626,8 +639,9 @@ function buildNarrationDraftFromDirectorPlan(input: {
           audioDurationSeconds: null,
           characterFocus: boundSegment?.hasTalent ? "主角" : "旁白",
           visualFocus: anchorShot?.sceneDescription ?? boundSegment?.videoPrompt ?? `片段 ${segPlan.segmentIndex}`,
-          narrationText: sub.text,
-          subtitleText: sub.text,
+          narrationText: anchorShot?.sourceSpokenText || sub.text,
+          subtitleText: anchorShot?.sourceSubtitleText || sub.text,
+          spokenText: anchorShot?.sourceSpokenText || null,
           note: `片段 ${segPlan.segmentIndex} | 情绪: ${emotion} | 语速: ${speechRate}字/秒 | 覆盖镜头: ${sub.coveredShotIndexes.join(",")}`,
           hasVoice,
           hasSubtitle,
@@ -655,8 +669,9 @@ function buildNarrationDraftFromDirectorPlan(input: {
         audioDurationSeconds: cue.audioDurationSeconds ?? null,
         characterFocus: boundSegment?.hasTalent ? "主角" : "旁白",
         visualFocus: boundSegment?.videoPrompt ?? boundSegment?.imagePrompt ?? `片段 ${cue.targetSegmentIndex}`,
-        narrationText: cue.narrationText,
-        subtitleText: cue.subtitleText,
+        narrationText: cue.sourceSpokenText || cue.narrationText,
+        subtitleText: cue.sourceSubtitleText || cue.subtitleText,
+        spokenText: cue.sourceSpokenText || null,
         note: `片段 ${cue.targetSegmentIndex}${cue.requiresLipSync ? "（需口型）" : ""}`,
         hasVoice: cue.hasVoice,
         hasSubtitle: cue.hasSubtitle,
@@ -672,9 +687,11 @@ function buildNarrationDraftFromDirectorPlan(input: {
     title: `${input.title} · 音频字幕草案`,
     sourcePrompt: input.narrationScript,
     totalDurationSeconds: input.directorPlan.totalDurationSeconds,
-    strategySummary: hasSubtitlePlan
-      ? "按 subtitlePlan 精确时间轴生成口播/字幕单元，字幕时间与镜头边界对齐。"
-      : "按 legacy audioCues 兜底生成口播/字幕单元；新链路应优先使用 subtitlePlan。",
+    strategySummary: input.directorPlan.storyboard?.realPhotoNarrationBlueprint
+      ? "按实拍叙事蓝图生成口播/字幕单元，视频片段时长后续跟随音频自然展开。"
+      : hasSubtitlePlan
+        ? "按 subtitlePlan 精确时间轴生成口播/字幕单元，字幕时间与镜头边界对齐。"
+        : "按 legacy audioCues 兜底生成口播/字幕单元；新链路应优先使用 subtitlePlan。",
     clips,
   } satisfies NarrationDraft;
 }
@@ -1077,15 +1094,9 @@ async function executeSubtitleAudioLineUpdate(input: {
   const taskId = input.taskId;
   const task = getVideoTask(taskId) ?? input.task;
   const clipId = input.body.clipId?.trim();
-  const nextText = sanitizeNarrationText(input.body.narrationText ?? "", {
-    stripLeadingDayPrefix: true,
-  });
 
   if (!clipId) {
     throw new Error("缺少要修改的台词片段");
-  }
-  if (!nextText) {
-    throw new Error("台词不能为空");
   }
 
   const latestResult = getLatestTaskNarrationResult(taskId);
@@ -1105,6 +1116,42 @@ async function executeSubtitleAudioLineUpdate(input: {
   }
 
   const targetClip = currentResult.clips[targetClipIndex];
+  const currentText = sanitizeNarrationText(getClipLineText(targetClip), {
+    stripLeadingDayPrefix: true,
+  });
+  const nextText = sanitizeNarrationText(input.body.narrationText ?? currentText, {
+    stripLeadingDayPrefix: true,
+  });
+  const nextDisplayCues = normalizeSubtitleDisplayCues(
+    input.body.subtitleDisplayCues,
+    task.parameters.composition.subtitleConfig.maxCharsPerLine,
+  );
+  const hasDisplayCueUpdate = Array.isArray(input.body.subtitleDisplayCues);
+  const nextDisplayText = sanitizeNarrationText(nextDisplayCues.map((cue) => cue.text).join(""), {
+    stripLeadingDayPrefix: true,
+  });
+
+  if (!nextText) {
+    throw new Error("台词不能为空");
+  }
+  if (hasDisplayCueUpdate && (!nextDisplayCues.length || nextDisplayText !== nextText)) {
+    throw new Error("字幕分行内容需要与台词内容一致");
+  }
+
+  const currentDisplaySignature = getSubtitleDisplayCueSignature(targetClip.subtitleDisplayCues);
+  const nextDisplaySignature = getSubtitleDisplayCueSignature(nextDisplayCues);
+  const textChanged = nextText !== currentText;
+  const displayCuesChanged = hasDisplayCueUpdate && nextDisplaySignature !== currentDisplaySignature;
+  if (!textChanged && !displayCuesChanged) {
+    return {
+      task,
+      result: currentResult,
+      validation: validateNarrationResult(currentResult, task),
+      runtime: loadLatestTaskSubtitleAudioPayload(taskId).runtime,
+      updatedClipId: clipId,
+    };
+  }
+
   const storyboardEnabled = task.parameters.audio.storyboardEnabled;
   const unifiedVoiceId = storyboardEnabled ? null : task.parameters.audio.voiceId || null;
   const audioApiSettings = normalizeSubtitleAudioApiSettings(undefined, {
@@ -1145,11 +1192,12 @@ async function executeSubtitleAudioLineUpdate(input: {
     ...targetClip,
     narrationText: targetClip.hasVoice === false ? "" : nextText,
     subtitleText: targetClip.hasSubtitle === false ? "" : nextText,
-    spokenText: null,
+    subtitleDisplayCues: hasDisplayCueUpdate ? nextDisplayCues : textChanged ? null : targetClip.subtitleDisplayCues,
+    spokenText: textChanged ? null : targetClip.spokenText,
     voiceId: targetVoiceId,
-    audioUrl: null,
-    audioDurationSeconds: null,
-    words: [],
+    audioUrl: textChanged ? null : targetClip.audioUrl,
+    audioDurationSeconds: textChanged ? null : targetClip.audioDurationSeconds,
+    words: textChanged ? [] : targetClip.words,
   } satisfies NarrationDraftClip;
 
   return runWithModelUsageContext(
@@ -1160,14 +1208,16 @@ async function executeSubtitleAudioLineUpdate(input: {
       objectId: `${taskId}:${clipId}`,
     },
     async () => {
-      const synthesizedClip = await synthesizeNarrationClip(
-        editedClip,
-        unifiedVoiceId,
-        taskId,
-        audioApiSettings,
-        task.parameters.video.videoType,
-        editedClip.shotIndex ? (deliveryStrategyMap.get(editedClip.shotIndex) ?? null) : null,
-      );
+      const synthesizedClip = textChanged
+        ? await synthesizeNarrationClip(
+            editedClip,
+            unifiedVoiceId,
+            taskId,
+            audioApiSettings,
+            task.parameters.video.videoType,
+            editedClip.shotIndex ? (deliveryStrategyMap.get(editedClip.shotIndex) ?? null) : null,
+          )
+        : editedClip;
       const latestResultForPatch = getLatestTaskNarrationResult(taskId);
       const resultForPatch =
         latestResultForPatch?.resultId === currentResult.resultId ? latestResultForPatch : currentResult;
