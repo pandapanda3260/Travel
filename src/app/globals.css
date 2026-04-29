@@ -11477,6 +11477,7 @@ button.setting-select.active::after {
   flex-direction: column;
   gap: 16px;
   flex: 1;
+  padding-bottom: 20px;
 }
 .admin-nav-section {
   display: flex;
