@@ -3502,7 +3502,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       return;
     }
     if (!nextDisplayCues.length || nextDisplayText !== nextText) {
-      setError("字幕分行内容需要与台词内容一致");
+      setError("上屏字幕句内容需要与台词内容一致");
       return;
     }
 
@@ -4677,7 +4677,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                                           ) : null}
                                           {isEditingLine ? (
                                             <span className="task-subtitle-audio-impact-note">
-                                              确认后同步本镜头字幕、配音和后续视频生成。
+                                              空行分隔上屏字幕句；改台词会同步本镜头配音，只调字幕行会复用原音频。
                                             </span>
                                           ) : null}
                                         </div>

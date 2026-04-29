@@ -473,7 +473,10 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
       }
 
       const segmentDuration = clampSeedanceSegmentDurationSeconds(
-        shotDefinition.durationSeconds || narrationClip.durationSeconds || task.parameters.video.durationSeconds,
+        naturalNarrationDuration ||
+          shotDefinition.durationSeconds ||
+          narrationClip.durationSeconds ||
+          task.parameters.video.durationSeconds,
       );
 
       const seedancePrompt = buildSeedanceSegmentPrompt({

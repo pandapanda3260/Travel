@@ -11,21 +11,25 @@ export type SubtitleDisplayWord = {
   endTime: number;
 };
 
+export type SubtitleDisplayLine = string;
+
+// SubtitleDisplayUnit 表示一次上屏字幕句；lines 是屏幕上实际显示的字幕行。
 export type SubtitleDisplayUnit = {
   text: string;
-  lines: string[];
+  lines: SubtitleDisplayLine[];
   startOffsetSeconds: number;
   endOffsetSeconds: number;
 };
 
+// 手动确认后的上屏字幕句输入。空行分隔不同上屏字幕句，lines 保留句内字幕行。
 export type SubtitleDisplayCueInput = {
   text?: string | null;
-  lines?: string[] | null;
+  lines?: SubtitleDisplayLine[] | null;
 };
 
 export type SubtitleDisplayCue = {
   text: string;
-  lines: string[];
+  lines: SubtitleDisplayLine[];
 };
 
 export type SubtitleDisplayPlanEntry = {

@@ -7,6 +7,7 @@ import {
   buildShotPlanFromRealPhotoNarrationBlueprint,
   normalizeRealPhotoNarrationBlueprintCandidate,
 } from "./real-photo-narration-workflow";
+import { resolveTaskClipPayloadDurationSeconds } from "./task-clip-store";
 import { buildDirectorPlanFromTaskData } from "./video-task-director";
 import { validateShotPlan } from "./video-task-planner";
 import type { TaskHotelAssetRecord } from "./task-hotel-asset-store";
@@ -283,4 +284,25 @@ test("director plan 使用叙事蓝图 spokenText 作为口播源，而不是短
   assert.equal(directorPlan.storyShots[0]?.subtitleText, shotPlan.shots[0]?.sourceSubtitleText);
   assert.equal(directorPlan.audioCues[0]?.narrationText, shotPlan.shots[0]?.sourceSpokenText);
   assert.equal(directorPlan.audioCues[0]?.sourceSpokenText, shotPlan.shots[0]?.sourceSpokenText);
+});
+
+test("片段展示时长优先采用实际音频时长，其次才是计划镜头时长", () => {
+  assert.equal(
+    resolveTaskClipPayloadDurationSeconds({
+      recordDurationSeconds: null,
+      audioDurationSeconds: 8.4,
+      plannedDurationSeconds: 5,
+      fallbackDurationSeconds: 4,
+    }),
+    8.4,
+  );
+  assert.equal(
+    resolveTaskClipPayloadDurationSeconds({
+      recordDurationSeconds: 6.2,
+      audioDurationSeconds: 8.4,
+      plannedDurationSeconds: 5,
+      fallbackDurationSeconds: 4,
+    }),
+    6.2,
+  );
 });

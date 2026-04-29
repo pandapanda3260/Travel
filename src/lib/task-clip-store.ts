@@ -312,6 +312,25 @@ export function parseTaskClipShots(task: VideoTaskRecord, narrationResult?: Narr
   });
 }
 
+function normalizePositiveDuration(value: number | null | undefined) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function resolveTaskClipPayloadDurationSeconds(input: {
+  recordDurationSeconds?: number | null;
+  audioDurationSeconds?: number | null;
+  plannedDurationSeconds?: number | null;
+  fallbackDurationSeconds: number;
+}) {
+  return (
+    normalizePositiveDuration(input.recordDurationSeconds) ??
+    normalizePositiveDuration(input.audioDurationSeconds) ??
+    normalizePositiveDuration(input.plannedDurationSeconds) ??
+    Math.max(1, input.fallbackDurationSeconds)
+  );
+}
+
 export function listTaskClipShots(taskId?: string) {
   const records = taskId ? readStore().filter((record) => record.taskId === taskId) : readStore();
   return records.sort((left, right) => left.segmentIndex - right.segmentIndex);
@@ -432,7 +451,12 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         videoPrompt: resolvedRecord?.videoPrompt ?? definition.videoPrompt,
         subtitleText: resolvedRecord?.subtitleText ?? definition.narrationClip?.subtitleText ?? "",
         narrationText: resolvedRecord?.narrationText ?? definition.narrationClip?.narrationText ?? "",
-        durationSeconds: resolvedRecord?.durationSeconds ?? definition.narrationClip?.durationSeconds ?? task.parameters.video.durationSeconds,
+        durationSeconds: resolveTaskClipPayloadDurationSeconds({
+          recordDurationSeconds: resolvedRecord?.durationSeconds,
+          audioDurationSeconds: definition.narrationClip?.audioDurationSeconds,
+          plannedDurationSeconds: definition.narrationClip?.durationSeconds,
+          fallbackDurationSeconds: task.parameters.video.durationSeconds,
+        }),
         visualImageSessionId: resolvedRecord?.visualImageSessionId ?? null,
         visualImageUrl: resolvedRecord?.visualImageUrl ?? null,
         wordTimeline: resolvedRecord?.wordTimeline ?? definition.narrationClip?.words ?? [],

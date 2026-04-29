@@ -445,7 +445,7 @@ async function buildCompositionPayload(taskId: string, options?: { readOnly?: bo
           ? "无需单独字幕轨"
           : narrationResult?.subtitleSrtUrl
             ? "独立字幕时间轴已就绪"
-            : "将按第三步字幕主时间轴切分显示",
+            : "将按第三步上屏字幕句时间轴显示",
       narrationReady,
       narrationSourceLabel:
         voiceSegments.length === 0

@@ -1384,7 +1384,7 @@ test("buildSubtitleDisplayUnits 会在无词级时间时按文本权重切分且
   );
 });
 
-test("buildSubtitleDisplayUnits 会把可容纳的完整语义块显示为两行且不丢字", () => {
+test("buildSubtitleDisplayUnits 会把可容纳的完整语义句拆成最多两个字幕行且不丢字", () => {
   const sourceText = "北京玩五天，有接送住得也舒服，省心不少";
   const units = buildSubtitleDisplayUnits({
     text: sourceText,
@@ -1416,7 +1416,7 @@ test("buildSubtitleDisplayUnits 会把可容纳的完整语义块显示为两行
   );
 });
 
-test("buildSubtitleDisplayUnits 会把完整语义字幕保留为同一屏两行字幕块", () => {
+test("buildSubtitleDisplayUnits 会把完整语义句保留为同一上屏字幕句的两个字幕行", () => {
   const sourceText = "这家不是来睡一晚的车到门口就有度假感";
   const units = buildSubtitleDisplayUnits({
     text: sourceText,
@@ -1434,7 +1434,7 @@ test("buildSubtitleDisplayUnits 会把完整语义字幕保留为同一屏两行
   assert.equal(Math.abs(units[0]!.endOffsetSeconds - 3.2) < 0.001, true);
 });
 
-test("formatSubtitleDisplayUnitText 会按同一屏物理行输出换行文本", () => {
+test("formatSubtitleDisplayUnitText 会按同一上屏字幕句的字幕行输出换行文本", () => {
   const unit = buildSubtitleDisplayUnits({
     text: "这家不是来睡一晚的车到门口就有度假感",
     durationSeconds: 3.2,
@@ -1446,7 +1446,7 @@ test("formatSubtitleDisplayUnitText 会按同一屏物理行输出换行文本",
   assert.equal(formatSubtitleDisplayUnitText(unit).split("\n").length, 2);
 });
 
-test("buildSubtitleDisplayUnits 会优先使用手动字幕显示分块且不改台词文本", () => {
+test("buildSubtitleDisplayUnits 会优先使用手动上屏字幕句且不改台词文本", () => {
   const sourceText = "先立住到达感再讲清套餐权益最后提醒用户预订";
   const units = buildSubtitleDisplayUnits({
     text: sourceText,
@@ -1471,7 +1471,7 @@ test("buildSubtitleDisplayUnits 会优先使用手动字幕显示分块且不改
   assert.equal(Math.abs(units[units.length - 1]!.endOffsetSeconds - 4) < 0.001, true);
 });
 
-test("buildSubtitleDisplayUnits 超过两行容量时才拆成多个字幕块且不丢字", () => {
+test("buildSubtitleDisplayUnits 超过两个字幕行容量时才拆成多个上屏字幕句且不丢字", () => {
   const sourceText = "先把酒店到达感立住，再讲清亲子活动和套餐权益，最后提醒用户尽早预订";
   const units = buildSubtitleDisplayUnits({
     text: sourceText,

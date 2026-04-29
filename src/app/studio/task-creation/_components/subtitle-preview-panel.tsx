@@ -225,6 +225,7 @@ function getSubtitlePreviewStyle(
     left: `${ratioToPercent(subtitleConfig.horizontalPositionRatio)}%`,
     bottom: `${ratioToPercent(subtitleConfig.positionOffsetRatio)}%`,
     transform: "translateX(-50%)",
+    width: "max-content",
     maxWidth: "calc(100% - 20px)",
     color: subtitleConfig.textColor,
     fontFamily: getSubtitleFontFamilyNames(subtitleConfig.fontFamily).previewFontFamily,
@@ -238,7 +239,7 @@ function getSubtitlePreviewStyle(
         : "transparent",
     padding: subtitleConfig.stylePreset === "shadow" ? "8px 10px" : undefined,
     borderRadius: subtitleConfig.stylePreset === "shadow" ? "4px" : undefined,
-    whiteSpace: "pre-line",
+    whiteSpace: "normal",
     textAlign: "center",
     lineHeight: 1.22,
   };

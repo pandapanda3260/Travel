@@ -1135,7 +1135,7 @@ async function executeSubtitleAudioLineUpdate(input: {
     throw new Error("台词不能为空");
   }
   if (hasDisplayCueUpdate && (!nextDisplayCues.length || nextDisplayText !== nextText)) {
-    throw new Error("字幕分行内容需要与台词内容一致");
+    throw new Error("上屏字幕句内容需要与台词内容一致");
   }
 
   const currentDisplaySignature = getSubtitleDisplayCueSignature(targetClip.subtitleDisplayCues);

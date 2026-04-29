@@ -3264,12 +3264,14 @@ textarea {
   z-index: 2;
   text-align: center;
   line-height: 1.5;
-  word-break: break-all;
+  overflow-wrap: normal;
+  word-break: keep-all;
   transition: all 0.2s ease;
 }
 
 .task-subtitle-preview-text span {
   display: block;
+  white-space: nowrap;
 }
 
 .task-subtitle-preview-pager {
