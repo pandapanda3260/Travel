@@ -1,93 +1,34 @@
+import { Suspense } from "react";
+
 import { PageBrandTitle } from "../../_components/page-brand-title";
 import { formatDateTime } from "../../../lib/auth-display";
 import { requireUserPageSession } from "../../../lib/auth-session";
-import { getMemberCenterPayload, isMemberCenterEnabled } from "../../../lib/member-service";
+import { getCommercialCreditAccountPayload, getCommercialProductsPayload } from "../../../lib/commercial-billing-service";
+import { listCommercialOrdersByUserId } from "../../../lib/commercial-order-service";
+import { CommercialProductActions } from "./commercial-product-actions";
 
 export const dynamic = "force-dynamic";
 
-function formatMemberStatus(status: string) {
-  switch (status) {
-    case "active":
-      return "正常";
-    case "grace":
-      return "观察期";
-    case "frozen":
-      return "冻结";
-    case "merged":
-      return "已合并";
-    default:
-      return status;
-  }
+function formatCredits(value: number) {
+  return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-const pointsSettledBenefitKeys = new Set([
-  "daily_video_tasks",
-  "video_material_limit",
-  "product_archive_limit",
-  "voice_clone_limit",
-]);
-
-function formatBenefitValue(value: string | number | boolean, unit: string | null, benefitKey?: string) {
-  if (benefitKey && pointsSettledBenefitKeys.has(benefitKey)) {
-    return "按积分结算";
-  }
-  if (typeof value === "boolean") {
-    return value ? "已启用" : "未启用";
-  }
-  if (value === "unlimited") {
-    return "按积分结算";
-  }
-  if (typeof value === "string" && unit) {
-    const numericValue = Number(value);
-    if (!Number.isFinite(numericValue)) {
-      return value;
-    }
-  }
-  if (unit) {
-    return `${value}${unit}`;
-  }
-  return String(value);
+function MembershipPageFallback() {
+  return (
+    <main className="shell">
+      <section className="content member-center-page settings-console-page">
+        <section className="panel member-empty-panel">套餐与积分加载中...</section>
+      </section>
+    </main>
+  );
 }
 
-export default async function MembershipPage() {
+async function MembershipPageContent() {
   const session = await requireUserPageSession();
-
-  if (!isMemberCenterEnabled()) {
-    return (
-      <main className="shell">
-        <section className="content member-center-page">
-          <section className="panel member-empty-panel">会员中心暂未开放。</section>
-        </section>
-      </main>
-    );
-  }
-  const payload = getMemberCenterPayload(session.userId);
-
-  if (!payload) {
-    return (
-      <main className="shell">
-        <section className="content member-center-page">
-          <section className="panel member-empty-panel">会员信息加载失败，请稍后重试。</section>
-        </section>
-      </main>
-    );
-  }
-
-  const {
-    user,
-    profile,
-    level,
-    levels,
-    nextLevel,
-    benefits,
-    growthRules,
-    pointRules,
-    pointsAccount,
-    growthRecords,
-    pointRecords,
-    levelChanges,
-    grantedBenefits,
-  } = payload;
+  const products = getCommercialProductsPayload();
+  const account = getCommercialCreditAccountPayload(session.userId);
+  const orders = listCommercialOrdersByUserId(session.userId, 10);
+  const activeMembership = account.activeMembership;
 
   return (
     <main className="shell">
@@ -95,7 +36,7 @@ export default async function MembershipPage() {
         <section className="header-panel member-header-panel settings-console-header">
           <header className="topbar">
             <div className="topbar-main compact">
-              <PageBrandTitle pageName="Membership Center" />
+              <PageBrandTitle pageName="套餐与积分" />
             </div>
           </header>
         </section>
@@ -103,209 +44,82 @@ export default async function MembershipPage() {
         <section className="member-hero panel settings-console-hero membership-hero">
           <div className="member-hero-main">
             <div className="member-hero-copy-stack">
-              <span className="settings-section-kicker">当前会员</span>
-              <h2>
-                {level.levelCode} {level.name}
-              </h2>
+              <span className="settings-section-kicker">商业账户</span>
+              <h2>{activeMembership?.planName ?? "未开通套餐"}</h2>
               <p className="member-hero-copy">
-                {user.nickname}
-                {user.certificationLabel ? ` · ${user.certificationLabel}` : ""}
-                {user.maskedPhone ? ` · ${user.maskedPhone}` : ""}
+                {session.user.nickname}
+                {session.user.certificationLabel ? ` · ${session.user.certificationLabel}` : ""}
+              </p>
+              <p className="member-hero-copy">
+                {activeMembership ? `有效期至 ${formatDateTime(activeMembership.endAt)}` : "开通会员后可使用高成本生成能力"}
               </p>
             </div>
             <div className="member-pill-row">
-              <span className="member-pill accent">{formatMemberStatus(profile.memberStatus)}</span>
-              <span className="member-pill">{level.badgeLabel}</span>
+              <span className="member-pill accent">{activeMembership ? "会员有效" : "未开通"}</span>
+              <span className="member-pill">积分结算</span>
             </div>
           </div>
 
           <div className="member-stat-grid settings-metric-grid">
             <article className="member-stat-card">
-              <span>当前成长值</span>
-              <strong>{profile.effectiveGrowthValue}</strong>
-              <p>累计 {profile.lifetimeGrowthValue}</p>
+              <span>可用积分</span>
+              <strong>{formatCredits(account.balance.availableCredits)}</strong>
+              <p>可用于视频等高成本生成</p>
             </article>
             <article className="member-stat-card">
-              <span>当前积分</span>
-              <strong>{pointsAccount?.availablePoints ?? 0}</strong>
-              <p>累计 {pointsAccount?.lifetimePoints ?? 0}</p>
+              <span>冻结积分</span>
+              <strong>{formatCredits(account.balance.frozenCredits)}</strong>
+              <p>生成中任务占用</p>
             </article>
             <article className="member-stat-card">
-              <span>下一等级</span>
-              <strong>{nextLevel ? `${nextLevel.levelCode} ${nextLevel.name}` : "已满级"}</strong>
-              <p>{nextLevel ? `还差 ${profile.nextLevelGap} 成长值` : "当前已是最高等级"}</p>
+              <span>累计购买</span>
+              <strong>{formatCredits(account.balance.lifetimePurchasedCredits)}</strong>
+              <p>会员与积分包到账总量</p>
             </article>
             <article className="member-stat-card">
-              <span>观察期</span>
-              <strong>{profile.graceExpireAt ? formatDateTime(profile.graceExpireAt) : "正常"}</strong>
-              <p>{profile.memberStatus === "grace" ? "需补足保级成长值" : level.description}</p>
+              <span>累计消耗</span>
+              <strong>{formatCredits(account.balance.lifetimeUsedCredits)}</strong>
+              <p>成功生成后确认扣除</p>
             </article>
           </div>
         </section>
 
-        <section className="member-card-grid settings-section-grid">
-          <article className="panel member-surface">
-            <div className="panel-header compact">
-              <h3>当前权益</h3>
-              <span className="table-meta">{benefits.length} 项</span>
-            </div>
-            <div className="member-benefit-grid">
-              {benefits.map((benefit) => (
-                <div key={benefit.benefitKey} className="member-benefit-card">
-                  <div className="member-benefit-head">
-                    <strong>{benefit.name}</strong>
-                    <span>{benefit.sourceType === "grant" ? "发放" : "等级"}</span>
-                  </div>
-                  <b>{formatBenefitValue(benefit.value, benefit.unit, benefit.benefitKey)}</b>
-                </div>
-              ))}
-            </div>
-          </article>
+        <CommercialProductActions products={products} initialOrders={orders} />
 
-          <article className="panel member-surface">
-            <div className="panel-header compact">
-              <h3>成长与积分</h3>
-            </div>
-            <div className="member-rule-stack">
-              <div className="member-section-head">
-                <strong>成长规则</strong>
-                <span>{growthRules.length} 项</span>
+        <section className="panel member-surface usage-detail-card">
+          <div className="panel-header compact">
+            <h3>商业积分流水</h3>
+            <span className="table-meta">{account.transactions.length} 条</span>
+          </div>
+          <div className="member-record-list compact">
+            {account.transactions.slice(0, 20).map((record) => (
+              <div key={record.transactionId} className="member-record-item">
+                <div>
+                  <strong>{record.remark || record.eventType}</strong>
+                  <span>
+                    {record.featureCode ?? record.sourceType}
+                    {record.taskId ? ` · 任务 ${record.taskId}` : ""}
+                  </span>
+                  <span>{formatDateTime(record.createdAt)}</span>
+                </div>
+                <b className={record.changeCredits >= 0 ? "positive" : "negative"}>
+                  {record.changeCredits >= 0 ? "+" : ""}
+                  {formatCredits(record.changeCredits)}
+                </b>
               </div>
-              <div className="member-rule-list">
-                {growthRules.map((rule) => (
-                  <div key={rule.ruleCode} className="member-rule-item">
-                    <div>
-                      <strong>{rule.name}</strong>
-                      <span>{rule.description}</span>
-                    </div>
-                    <b>+{rule.growthValue}</b>
-                  </div>
-                ))}
-              </div>
-              <div className="member-section-head">
-                <strong>积分规则</strong>
-                <span>{pointRules.length} 项</span>
-              </div>
-              <div className="member-rule-list">
-                {pointRules.map((rule) => (
-                  <div key={rule.ruleCode} className="member-rule-item">
-                    <div>
-                      <strong>{rule.name}</strong>
-                      <span>{rule.description}</span>
-                    </div>
-                    <b>+{rule.pointValue}</b>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </article>
-        </section>
-
-        <section className="member-card-grid settings-section-grid">
-          <article className="panel member-surface">
-            <div className="panel-header compact">
-              <h3>成长流水</h3>
-            </div>
-            <div className="member-record-list">
-              {growthRecords.map((record) => (
-                <div key={record.growthId} className="member-record-item">
-                  <div>
-                    <strong>{record.remark || record.eventType}</strong>
-                    <span>
-                      {formatDateTime(record.createdAt)}
-                      {record.expireAt ? ` · ${formatDateTime(record.expireAt)} 到期` : ""}
-                    </span>
-                  </div>
-                  <b className={record.effectiveValue >= 0 ? "positive" : "negative"}>
-                    {record.effectiveValue >= 0 ? "+" : ""}
-                    {record.effectiveValue}
-                  </b>
-                </div>
-              ))}
-              {growthRecords.length === 0 ? <div className="member-empty-inline">暂无成长记录</div> : null}
-            </div>
-          </article>
-
-          <article id="points-records" className="panel member-surface" style={{ scrollMarginTop: 96 }}>
-            <div className="panel-header compact">
-              <h3>积分流水</h3>
-            </div>
-            <div className="member-record-list">
-              {pointRecords.map((record) => (
-                <div key={record.pointId} className="member-record-item">
-                  <div>
-                    <strong>{record.remark || record.eventType}</strong>
-                    <span>
-                      {formatDateTime(record.createdAt)}
-                      {record.expireAt ? ` · ${formatDateTime(record.expireAt)} 到期` : ""}
-                    </span>
-                  </div>
-                  <b className={record.changeValue >= 0 ? "positive" : "negative"}>
-                    {record.changeValue >= 0 ? "+" : ""}
-                    {record.changeValue}
-                  </b>
-                </div>
-              ))}
-              {pointRecords.length === 0 ? <div className="member-empty-inline">暂无积分记录</div> : null}
-            </div>
-          </article>
-        </section>
-
-        <section className="member-card-grid settings-section-grid">
-          <article className="panel member-surface">
-            <div className="panel-header compact">
-              <h3>等级与补发</h3>
-            </div>
-            <div className="member-record-list">
-              {levelChanges.map((change) => (
-                <div key={change.changeId} className="member-record-item">
-                  <div>
-                    <strong>
-                      {change.fromLevelCode ?? "初始化"} → {change.toLevelCode}
-                    </strong>
-                    <span>{formatDateTime(change.createdAt)}</span>
-                  </div>
-                  <b>{change.reasonDetail}</b>
-                </div>
-              ))}
-              {grantedBenefits.slice(0, 4).map((grant) => (
-                <div key={grant.grantId} className="member-record-item subtle">
-                  <div>
-                    <strong>{grant.benefitName}</strong>
-                    <span>
-                      {formatDateTime(grant.startAt)}
-                      {grant.expireAt ? ` · ${formatDateTime(grant.expireAt)} 失效` : ""}
-                    </span>
-                  </div>
-                  <b>{grant.benefitValue}</b>
-                </div>
-              ))}
-              {levelChanges.length === 0 && grantedBenefits.length === 0 ? (
-                <div className="member-empty-inline">暂无等级变更和额外权益记录</div>
-              ) : null}
-            </div>
-          </article>
-
-          <article className="panel member-surface">
-            <div className="panel-header compact">
-              <h3>等级门槛</h3>
-            </div>
-            <div className="member-rule-list">
-              {levels.map((item) => (
-                <div key={item.levelCode} className="member-rule-item">
-                  <div>
-                    <strong>
-                      {item.levelCode} {item.name}
-                    </strong>
-                    <span>保级 {item.retainThreshold}</span>
-                  </div>
-                  <b>{item.upgradeThreshold}</b>
-                </div>
-              ))}
-            </div>
-          </article>
+            ))}
+            {account.transactions.length === 0 ? <div className="member-empty-inline">暂无商业积分流水</div> : null}
+          </div>
         </section>
       </section>
     </main>
+  );
+}
+
+export default function MembershipPage() {
+  return (
+    <Suspense fallback={<MembershipPageFallback />}>
+      <MembershipPageContent />
+    </Suspense>
   );
 }

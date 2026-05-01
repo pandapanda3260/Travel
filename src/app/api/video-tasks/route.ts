@@ -6,7 +6,6 @@ import { createProgressStream } from "../../../lib/progress-stream";
 import { directorPrimaryStepActionKeys } from "../../../lib/director-step-actions";
 import { grantGrowthForEvent } from "../../../lib/member-service";
 import { runWithModelUsageContext } from "../../../lib/model-usage-context";
-import { grantPointsForEvent } from "../../../lib/points-service";
 import { getTaskCreationIndexPayload } from "../../../lib/task-creation-index-data";
 import { getTaskGenerationRuntime } from "../../../lib/task-generation-runtime";
 import { buildPlanningSourceWithOptimizedPrompt } from "../../../lib/video-task-prompt-optimizer";
@@ -173,7 +172,12 @@ export async function GET(request: NextRequest) {
 
   try {
     const includeVoiceOptions = request.nextUrl.searchParams.get("includeVoiceOptions") !== "0";
-    const payload = await getTaskCreationIndexPayload({ includeVoiceOptions, userId: session.userId });
+    const resumePendingVideoJobs = request.nextUrl.searchParams.get("resumePendingVideoJobs") !== "0";
+    const payload = await getTaskCreationIndexPayload({
+      includeVoiceOptions,
+      resumePendingVideoJobs,
+      userId: session.userId,
+    });
     return NextResponse.json(payload);
   } catch (error) {
     return NextResponse.json(
@@ -273,14 +277,6 @@ export async function POST(request: NextRequest) {
     }
 
     grantGrowthForEvent({
-      userId: session.userId,
-      eventType: "video_task_create",
-      sourceType: "rule",
-      sourceBizId: task.taskId,
-      idempotentKey: `video_task_create:${task.taskId}`,
-      remark: "创建视频任务",
-    });
-    grantPointsForEvent({
       userId: session.userId,
       eventType: "video_task_create",
       sourceType: "rule",

@@ -3,9 +3,10 @@ export function shouldSyncTaskSelectionFromUrl(input: {
   taskIds: string[];
   selectedTaskId: string;
   isNewTaskDraftMode: boolean;
+  isExplicitNewTaskDraftMode?: boolean;
 }) {
-  const { taskIdFromUrl, taskIds, selectedTaskId, isNewTaskDraftMode } = input;
-  if (isNewTaskDraftMode) {
+  const { taskIdFromUrl, taskIds, selectedTaskId, isNewTaskDraftMode, isExplicitNewTaskDraftMode } = input;
+  if (isNewTaskDraftMode && isExplicitNewTaskDraftMode) {
     return false;
   }
 
@@ -14,6 +15,94 @@ export function shouldSyncTaskSelectionFromUrl(input: {
   }
 
   return selectedTaskId !== taskIdFromUrl;
+}
+
+export function resolveTaskSelectionAfterIndexReady(input: {
+  taskIdFromUrl: string | null | undefined;
+  taskIds: string[];
+  selectedTaskId: string;
+  isNewTaskDraftMode: boolean;
+  isExplicitNewTaskDraftMode?: boolean;
+  lastSelectedTaskId?: string | null;
+}) {
+  const taskIds = new Set(input.taskIds);
+  if (input.isNewTaskDraftMode && input.isExplicitNewTaskDraftMode) {
+    return "";
+  }
+
+  if (input.taskIdFromUrl && taskIds.has(input.taskIdFromUrl)) {
+    return input.taskIdFromUrl;
+  }
+
+  if (input.selectedTaskId && taskIds.has(input.selectedTaskId)) {
+    return input.selectedTaskId;
+  }
+
+  if (input.lastSelectedTaskId && taskIds.has(input.lastSelectedTaskId)) {
+    return input.lastSelectedTaskId;
+  }
+
+  return input.taskIds[0] ?? "";
+}
+
+export function shouldDeferTaskIdUrlSync(input: {
+  isDraftHydrated: boolean;
+  isTaskIndexReady: boolean;
+  isNewTaskDraftMode: boolean;
+  isExplicitNewTaskDraftMode?: boolean;
+  taskIdFromUrl: string | null | undefined;
+  taskIds: string[];
+  selectedTaskId: string;
+}) {
+  if (!input.taskIdFromUrl) {
+    return false;
+  }
+
+  if (!input.isDraftHydrated || !input.isTaskIndexReady) {
+    return true;
+  }
+
+  if (input.isNewTaskDraftMode && input.isExplicitNewTaskDraftMode) {
+    return false;
+  }
+
+  if (!input.taskIds.length) {
+    return true;
+  }
+
+  return (
+    input.taskIds.includes(input.taskIdFromUrl) &&
+    (input.selectedTaskId !== input.taskIdFromUrl || input.isNewTaskDraftMode)
+  );
+}
+
+export function shouldAllowHotelAssetInputTaskEnsure(input: {
+  isDraftHydrated: boolean;
+  isTaskIndexReady: boolean;
+  isNewTaskDraftMode: boolean;
+  isExplicitNewTaskDraftMode?: boolean;
+  taskIdFromUrl: string | null | undefined;
+  taskIds: string[];
+  selectedTaskId: string;
+  lastSelectedTaskId?: string | null;
+}) {
+  if (!input.isDraftHydrated || !input.isTaskIndexReady) {
+    return false;
+  }
+
+  if (input.selectedTaskId && input.taskIds.includes(input.selectedTaskId)) {
+    return true;
+  }
+
+  if (input.isNewTaskDraftMode && input.isExplicitNewTaskDraftMode) {
+    return true;
+  }
+
+  if (input.taskIdFromUrl || input.lastSelectedTaskId) {
+    return false;
+  }
+
+  return true;
 }
 
 export function shouldResumeTaskCreationDraft(input: {

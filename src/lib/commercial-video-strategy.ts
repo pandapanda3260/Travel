@@ -312,7 +312,7 @@ const guideBeatTemplates: Array<Omit<CommercialBeatPlanItem, "targetShotIndexes"
     goal: "按时间、地点或步骤交付可执行路线。",
     targetWindow: "中段",
     userQuestion: "具体怎么安排？",
-    recommendedCopyMove: "一天/一站一个小结论，字幕提炼地点和动作。",
+    recommendedCopyMove: "一天/一站一个小结论，字幕必须沿用同一句完整口播。",
     strength: "must",
   },
   {

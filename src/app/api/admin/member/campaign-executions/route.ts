@@ -60,6 +60,17 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const detail = getMemberCampaignExecutionDetailForAdmin(body.batchId.trim());
+    if (detail?.batch.grantType === "points") {
+      return NextResponse.json(
+        {
+          error: "旧积分活动批次已下线，不能继续重试或回滚积分流水。",
+          code: "LEGACY_POINTS_DISABLED",
+        },
+        { status: 410 },
+      );
+    }
+
     let result = null;
     if (body.action === "retry_failed") {
       result = retryFailedMemberCampaignExecutionBatchForAdmin(body.batchId.trim(), { adminId: session.adminId });

@@ -495,6 +495,7 @@ export function VisualImageModule({
     onPrimaryActionChange({
       label: primaryActionLabel,
       isRunning: visualStageRunning || isInitialVisualListLoading,
+      busyDisplay: isInitialVisualListLoading ? "status" : "progress",
       progressPercent: batchProgressPercent,
       canRun: !blockedReason,
       blockedReason,
@@ -991,7 +992,11 @@ export function VisualImageModule({
                       disabled={generatingShotIndex === activeShot.shotIndex || generationMutationLocked}
                       onClick={() => void handleGenerateShot(activeShot.shotIndex)}
                     >
-                      {generatingShotIndex === activeShot.shotIndex ? "重新生成中..." : "重新生成一批"}
+                      {generatingShotIndex === activeShot.shotIndex
+                        ? "生成中..."
+                        : activeShot.candidates.length > 0
+                          ? "重新生成一批"
+                          : "生成一批"}
                     </button>
                   </div>
                 </div>

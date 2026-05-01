@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { PageBrandTitle } from "../../_components/page-brand-title";
+import { RouteLoadingShell } from "../../_components/route-loading-shell";
 import { formatDateTime, formatLoginType, formatUserSecurityAction, formatUserStatus } from "../../../lib/auth-display";
 import type { UserAccountOverview } from "../../../lib/auth-service";
 
@@ -298,13 +299,7 @@ export function AccountPageClient() {
 
   if (loading || !overview) {
     return (
-      <main className="shell">
-        <section className="content">
-          <section className="panel auth-dashboard-panel">
-            <div className="auth-empty-state">账号信息加载中...</div>
-          </section>
-        </section>
-      </main>
+      <RouteLoadingShell pageName="Account Management" title="账号信息加载中..." description="正在同步当前账号和登录设备。" />
     );
   }
 

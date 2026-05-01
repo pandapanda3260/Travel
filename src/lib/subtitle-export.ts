@@ -5,6 +5,8 @@ import type { NarrationDraftClip } from "./narration";
 import type { NarrationResultRecord } from "./narration-result-store";
 import { joinRuntimePublicStoragePath } from "./runtime-storage";
 import { normalizeSubtitleDisplayCues } from "./subtitle-display";
+import { resolveNarrationClipWordTimestamps } from "./audio-alignment";
+import { resolveNarrationClipSubtitleText } from "./subtitle-text-contract";
 import { countSubtitleDisplayCharacters } from "./subtitle-text-utils";
 
 export type SubtitleCue = {
@@ -139,15 +141,16 @@ export function buildSubtitleCuesFromNarrationClips(clips: NarrationDraftClip[])
 
   return clips
     .flatMap((clip, index) => {
-      const text = normalizeCueText(clip.subtitleText || clip.narrationText || "");
+      const text = normalizeCueText(resolveNarrationClipSubtitleText(clip));
       if (!text) {
         return [];
       }
 
       const startAtSeconds = effectiveStartMap.get(index) ?? getSafeSeconds(clip.startAtSeconds);
       const durationSeconds = Math.max(0.8, getSafeSeconds(clip.audioDurationSeconds ?? clip.durationSeconds, 2));
-      const wordEndTime = clip.words?.length ? Math.max(...clip.words.map((word) => getSafeSeconds(word.endTime))) : 0;
-      const computedEndAtSeconds = clip.words?.length
+      const words = resolveNarrationClipWordTimestamps(clip);
+      const wordEndTime = words.length ? Math.max(...words.map((word) => getSafeSeconds(word.endTime))) : 0;
+      const computedEndAtSeconds = words.length
         ? Math.max(startAtSeconds + 0.8, startAtSeconds + wordEndTime)
         : startAtSeconds + durationSeconds;
       const manualDisplayCues = normalizeSubtitleDisplayCues(clip.subtitleDisplayCues, 16);

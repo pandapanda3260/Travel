@@ -19,24 +19,39 @@ process.on("exit", () => {
 
 let modulesPromise: Promise<{
   authStore: any;
+  commercialCreditLedger: any;
+  commercialOrderService: any;
   modelUsageService: any;
-  pointsService: any;
 }> | null = null;
 
 function loadModules() {
   if (!modulesPromise) {
     modulesPromise = Promise.all([
       import("./auth-store"),
+      import("./commercial-credit-ledger"),
+      import("./commercial-order-service"),
       import("./model-usage-service"),
-      import("./points-service"),
-    ]).then(([authStore, modelUsageService, pointsService]) => ({
+    ]).then(([authStore, commercialCreditLedger, commercialOrderService, modelUsageService]) => ({
       authStore,
+      commercialCreditLedger,
+      commercialOrderService,
       modelUsageService,
-      pointsService,
     }));
   }
 
   return modulesPromise;
+}
+
+function activateCommercialMembership(commercialOrderService: any, userId: string, suffix: string) {
+  const { order } = commercialOrderService.createCommercialOrder({
+    userId,
+    productCode: "travel_light_monthly",
+    idempotencyKey: `model-usage-commercial-order:${suffix}`,
+  });
+  commercialOrderService.fulfillCommercialOrder({
+    orderId: order.orderId,
+    idempotencyKey: `model-usage-commercial-fulfill:${suffix}`,
+  });
 }
 
 function createAuthUser(authStore: any, userId: string) {
@@ -97,30 +112,25 @@ test("strict usage preflight blocks provider calls without pricing", async () =>
   );
 });
 
-test("strict usage preflight blocks estimated usage when balance is insufficient", async () => {
+test("strict usage preflight no longer uses legacy points balance as a blocking gate", async () => {
   const { authStore, modelUsageService } = await loadModules();
-  const userId = "user-insufficient-balance";
+  const userId = "user-legacy-balance-ignored";
   createAuthUser(authStore, userId);
   const previousEnforceBalance = process.env.USAGE_BILLING_ENFORCE_BALANCE;
   process.env.USAGE_BILLING_ENFORCE_BALANCE = "true";
 
   try {
-    assert.throws(
-      () =>
-        modelUsageService.runWithModelUsageContext({ userId }, () =>
-          modelUsageService.assertModelUsagePreflight({
-            serviceName: "image.generate",
-            pricingKey: "doubao.seedream.5.0",
-            estimatedMetrics: {
-              imageCount: 1,
-              requestCount: 1,
-            },
-          }),
-        ),
-      (error) => {
-        assertBillingError(error, "INSUFFICIENT_POINTS_BALANCE");
-        return true;
-      },
+    assert.doesNotThrow(() =>
+      modelUsageService.runWithModelUsageContext({ userId }, () =>
+        modelUsageService.assertModelUsagePreflight({
+          serviceName: "image.generate",
+          pricingKey: "doubao.seedream.5.0",
+          estimatedMetrics: {
+            imageCount: 1,
+            requestCount: 1,
+          },
+        }),
+      ),
     );
   } finally {
     if (previousEnforceBalance === undefined) {
@@ -131,9 +141,9 @@ test("strict usage preflight blocks estimated usage when balance is insufficient
   }
 });
 
-test("recordModelUsage writes charged usage and point deduction", async () => {
-  const { authStore, modelUsageService, pointsService } = await loadModules();
-  const userId = "user-model-usage-charge";
+test("recordModelUsage writes charged usage without legacy points side effects", async () => {
+  const { authStore, modelUsageService } = await loadModules();
+  const userId = "user-model-usage-audit-only";
   createAuthUser(authStore, userId);
 
   const record = modelUsageService.runWithModelUsageContext(
@@ -157,15 +167,144 @@ test("recordModelUsage writes charged usage and point deduction", async () => {
 
   assert.equal(record.status, "charged");
   assert.equal(record.amountRmb, 0.44);
-  assert.equal(record.pointsCost, 44);
+  assert.equal(record.pointsCost, 47.52);
 
-  const pointsPayload = pointsService.getPointsPayload(userId);
-  assert.equal(pointsPayload.account.availablePoints, -44);
-  assert.equal(pointsPayload.records[0].eventType, "model_usage_charge");
+  const usagePayload = modelUsageService.getUserModelUsagePayload(userId);
+  assert.equal("pointsAccount" in usagePayload, false);
+  assert.equal(usagePayload.commercialBalance.availableCredits, 0);
+  assert.equal(usagePayload.records[0].usageId, record.usageId);
+});
+
+test("strict usage preflight ignores legacy daily user point limit", async () => {
+  const { authStore, modelUsageService } = await loadModules();
+  const userId = "user-daily-limit-ignored";
+  createAuthUser(authStore, userId);
+
+  modelUsageService.runWithModelUsageContext({ userId }, () =>
+    modelUsageService.recordModelUsage({
+      pricingKey: "doubao.seedream.5.0",
+      serviceName: "image.generate",
+      provider: "volcengine",
+      modelId: "doubao-seedream-5-0-260128",
+      metrics: { imageCount: 1, requestCount: 1 },
+      requestId: "daily-limit-ignored-used",
+      remark: "旧日限额回归测试",
+    }),
+  );
+
+  const previousDailyLimit = process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
+  process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = "1";
+  try {
+    assert.doesNotThrow(() =>
+      modelUsageService.runWithModelUsageContext({ userId }, () =>
+        modelUsageService.assertModelUsagePreflight({
+          serviceName: "image.generate",
+          pricingKey: "doubao.seedream.5.0",
+          estimatedMetrics: {
+            imageCount: 1,
+            requestCount: 1,
+          },
+        }),
+      ),
+    );
+  } finally {
+    if (previousDailyLimit === undefined) {
+      delete process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
+    } else {
+      process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = previousDailyLimit;
+    }
+  }
+});
+
+test("commercial model usage bridge freezes before provider call and confirms after successful usage record", async () => {
+  const { authStore, commercialCreditLedger, commercialOrderService, modelUsageService } = await loadModules();
+  const userId = "user-commercial-model-usage";
+  createAuthUser(authStore, userId);
+  activateCommercialMembership(commercialOrderService, userId, "bridge-success");
+
+  const result = modelUsageService.runWithModelUsageContext(
+    {
+      userId,
+      routePath: "/test/commercial-model-usage",
+      objectType: "test",
+      objectId: "commercial-object-1",
+      requestId: "commercial-request-1",
+    },
+    () => {
+      const prepared = modelUsageService.prepareCommercialModelUsageCharge({
+        pricingKey: "doubao.seedream.5.0",
+        serviceName: "image.generate",
+        estimatedMetrics: { imageCount: 1, requestCount: 1 },
+      });
+      assert.equal(prepared.freeze.frozenCredits, 34);
+
+      const record = modelUsageService.confirmCommercialModelUsageCharge(prepared, {
+        pricingKey: "doubao.seedream.5.0",
+        serviceName: "image.generate",
+        provider: "volcengine",
+        modelId: "doubao-seedream-5-0-260128",
+        metrics: { imageCount: 1, requestCount: 1 },
+        requestId: "commercial-provider-request-1",
+        remark: "商业图片用量测试",
+      });
+      return { prepared, record };
+    },
+  );
+
+  const freeze = commercialCreditLedger.getCommercialCreditFreezeById(result.prepared.freeze.freezeId);
+  const transactions = commercialCreditLedger.listCreditTransactionsByUserId(userId);
+
+  assert.equal(result.record.status, "charged");
+  assert.equal(result.record.amountRmb, 0.22);
+  assert.equal(freeze.status, "confirmed");
+  assert.equal(transactions.some((item: any) => item.changeCredits === -34 && item.realCostRmb === 0.22), true);
+});
+
+test("commercial model usage bridge releases frozen credits when provider call fails", async () => {
+  const { authStore, commercialCreditLedger, commercialOrderService, modelUsageService } = await loadModules();
+  const userId = "user-commercial-model-usage-failed";
+  createAuthUser(authStore, userId);
+  activateCommercialMembership(commercialOrderService, userId, "bridge-failed");
+
+  const prepared = modelUsageService.runWithModelUsageContext(
+    {
+      userId,
+      routePath: "/test/commercial-model-usage",
+      objectType: "test",
+      objectId: "commercial-object-failed",
+      requestId: "commercial-request-failed",
+    },
+    () =>
+      modelUsageService.prepareCommercialModelUsageCharge({
+        pricingKey: "doubao.seedream.5.0",
+        serviceName: "image.generate",
+        estimatedMetrics: { imageCount: 1, requestCount: 1 },
+      }),
+  );
+
+  modelUsageService.releaseCommercialModelUsageCharge(prepared, "provider_failed");
+  const freeze = commercialCreditLedger.getCommercialCreditFreezeById(prepared.freeze.freezeId);
+  const balance = commercialCreditLedger.getCommercialCreditBalance(userId);
+
+  assert.equal(freeze.status, "released");
+  assert.equal(balance.availableCredits, 10_000);
+  assert.equal(balance.frozenCredits, 0);
+});
+
+test("estimateTextModelUsageMetrics gives a conservative preflight estimate for LLM calls", async () => {
+  const { modelUsageService } = await loadModules();
+  const metrics = modelUsageService.estimateTextModelUsageMetrics({
+    inputText: "这是一段用于生成旅行视频脚本的中文提示词",
+    maxOutputTokens: 1800,
+  });
+
+  assert.equal(metrics.requestCount, 1);
+  assert.equal(metrics.outputTokens, 1800);
+  assert.equal(metrics.inputTokens > 0, true);
 });
 
 test("seedream 4.5 resolves pricing and records image usage", async () => {
-  const { authStore, modelUsageService, pointsService } = await loadModules();
+  const { authStore, modelUsageService } = await loadModules();
   const userId = "user-model-usage-seedream45";
   createAuthUser(authStore, userId);
 
@@ -195,14 +334,15 @@ test("seedream 4.5 resolves pricing and records image usage", async () => {
 
   assert.equal(record.status, "charged");
   assert.equal(record.amountRmb, 0.22);
-  assert.equal(record.pointsCost, 22);
+  assert.equal(record.pointsCost, 23.76);
 
-  const pointsPayload = pointsService.getPointsPayload(userId);
-  assert.equal(pointsPayload.account.availablePoints, -22);
+  const usagePayload = modelUsageService.getUserModelUsagePayload(userId);
+  assert.equal("pointsAccount" in usagePayload, false);
+  assert.equal(usagePayload.records.some((item: any) => item.usageId === record.usageId), true);
 });
 
-test("recordModelUsage is idempotent across usage and point ledgers", async () => {
-  const { authStore, modelUsageService, pointsService } = await loadModules();
+test("recordModelUsage is idempotent across usage audit records", async () => {
+  const { authStore, modelUsageService } = await loadModules();
   const userId = "user-model-usage-idempotent";
   createAuthUser(authStore, userId);
 
@@ -231,64 +371,8 @@ test("recordModelUsage is idempotent across usage and point ledgers", async () =
 
   assert.equal(secondRecord.usageId, firstRecord.usageId);
 
-  const pointsPayload = pointsService.getPointsPayload(userId);
-  assert.equal(pointsPayload.records.length, 1);
-  assert.equal(pointsPayload.records[0].changeValue, -22);
-  assert.equal(pointsPayload.account.availablePoints, -22);
-});
-
-test("strict usage preflight blocks estimated usage beyond the daily user limit", async () => {
-  const { authStore, modelUsageService, pointsService } = await loadModules();
-  const userId = "user-daily-limit";
-  createAuthUser(authStore, userId);
-  pointsService.grantPointsForEvent({
-    userId,
-    eventType: "manual_adjustment",
-    sourceType: "manual",
-    changeValue: 1000,
-    idempotentKey: "daily-limit-seed-points",
-    remark: "测试积分",
-  });
-
-  modelUsageService.runWithModelUsageContext({ userId }, () =>
-    modelUsageService.recordModelUsage({
-      pricingKey: "doubao.seedream.5.0",
-      serviceName: "image.generate",
-      provider: "volcengine",
-      modelId: "doubao-seedream-5-0-260128",
-      metrics: { imageCount: 1, requestCount: 1 },
-      requestId: "daily-limit-used",
-      remark: "日限额已用量",
-    }),
-  );
-
-  const previousDailyLimit = process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
-  process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = "30";
-  try {
-    assert.throws(
-      () =>
-        modelUsageService.runWithModelUsageContext({ userId }, () =>
-          modelUsageService.assertModelUsagePreflight({
-            serviceName: "image.generate",
-            pricingKey: "doubao.seedream.5.0",
-            estimatedMetrics: {
-              imageCount: 1,
-              requestCount: 1,
-            },
-          }),
-        ),
-      (error) => {
-        assertBillingError(error, "DAILY_USAGE_LIMIT_EXCEEDED");
-        return true;
-      },
-    );
-  } finally {
-    if (previousDailyLimit === undefined) {
-      delete process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT;
-    } else {
-      process.env.USAGE_BILLING_DAILY_USER_POINT_LIMIT = previousDailyLimit;
-    }
-  }
+  const usagePayload = modelUsageService.getUserModelUsagePayload(userId);
+  assert.equal(usagePayload.records.filter((item: any) => item.requestId === "request-idempotent").length, 1);
 });
 
 test("production mode does not force strict preflight when billing switches are disabled", async () => {

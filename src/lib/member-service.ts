@@ -62,24 +62,44 @@ import {
   type MemberStatus,
   type MemberUserProfileRecord,
 } from "./member-store";
-import {
-  adjustPointsForAdmin,
-  getPointsPayload,
-  grantPointsForEvent,
-  recalculateUserPointsAccount,
-} from "./points-service";
-import {
-  getDefaultPointsConfig,
-  getPointsConfig,
-  listPointRules,
-  setPointsConfig,
-  type PointRecord,
-  type PointRuleRecord,
-  type PointsConfigRecord,
-  type UserPointsAccountRecord,
-  upsertPointRule,
-} from "./points-store";
 import { db } from "./db";
+
+type PointRecord = {
+  recordId: string;
+  userId: string;
+  eventType: string;
+  sourceType: string;
+  sourceBizId: string | null;
+  changeValue: number;
+  balanceAfter: number;
+  status: string;
+  expireAt: string | null;
+  remark: string | null;
+  createdAt: string;
+};
+
+type PointRuleRecord = {
+  ruleCode: string;
+  pointValue: number;
+  dailyLimit: number | null;
+  enabled: boolean;
+};
+
+type PointsConfigRecord = {
+  pointsEnabled: boolean;
+  defaultExpireDays: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type UserPointsAccountRecord = {
+  userId: string;
+  availablePoints: number;
+  lifetimePoints: number;
+  lastChangedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 type MemberRecalculateOptions = {
   reasonType?: MemberLevelChangeReasonType;
@@ -247,7 +267,21 @@ function getMemberConfigOrDefault() {
 }
 
 function getPointsConfigOrDefault() {
-  return getPointsConfig() ?? getDefaultPointsConfig();
+  const timestamp = nowIso();
+  return {
+    pointsEnabled: false,
+    defaultExpireDays: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  } satisfies PointsConfigRecord;
+}
+
+function listDisabledPointRules(): PointRuleRecord[] {
+  return [];
+}
+
+function getDisabledPointRecords(): PointRecord[] {
+  return [];
 }
 
 function querySingleNumber(sql: string, params: Array<string | number | null>) {
@@ -848,7 +882,6 @@ export function getMemberCenterPayload(userId: string) {
   const level = findLevelByCode(profile.currentLevelCode) ?? getEnabledLevels()[0];
   const nextLevel = profile.nextLevelCode ? findLevelByCode(profile.nextLevelCode) : null;
   const effectiveBenefits = listEffectiveBenefitsForUser(userId);
-  const pointsPayload = getPointsPayload(userId);
 
   return {
     user: {
@@ -864,9 +897,9 @@ export function getMemberCenterPayload(userId: string) {
     nextLevel,
     levels: getEnabledLevels(),
     growthRules: listMemberGrowthRules().filter((item) => item.enabled),
-    pointRules: listPointRules().filter((item) => item.enabled),
-    pointsAccount: pointsPayload.account,
-    pointRecords: pointsPayload.records,
+    pointRules: listDisabledPointRules(),
+    pointsAccount: null,
+    pointRecords: getDisabledPointRecords(),
     benefits: effectiveBenefits,
     grantedBenefits: listMemberBenefitGrantsByUserId(userId, 20),
     growthRecords: listMemberGrowthRecordsByUserId(userId, 20),
@@ -901,7 +934,7 @@ function buildMemberUsersForAdmin(input?: {
         currentLevelName: level?.name ?? "标准会员",
         effectiveGrowthValue: profile?.effectiveGrowthValue ?? 0,
         lifetimeGrowthValue: profile?.lifetimeGrowthValue ?? 0,
-        availablePoints: recalculateUserPointsAccount(user.userId)?.availablePoints ?? 0,
+        availablePoints: 0,
         nextLevelGap: profile?.nextLevelGap ?? 0,
         quotaScopeSnapshot: profile?.quotaScopeSnapshot ?? "limited",
         excludeFromMetrics: profile?.excludeFromMetrics ?? false,
@@ -975,8 +1008,8 @@ export function getMemberUserDetailForAdmin(userId: string) {
     summary,
     profile,
     level: findLevelByCode(profile.currentLevelCode) ?? getEnabledLevels()[0],
-    pointsAccount: recalculateUserPointsAccount(userId),
-    pointRecords: getPointsPayload(userId).records,
+    pointsAccount: null,
+    pointRecords: getDisabledPointRecords(),
     effectiveBenefits: listEffectiveBenefitsForUser(userId),
     grantedBenefits: listMemberBenefitGrantsByUserId(userId, 20),
     benefitUsageRecords: listMemberBenefitUsageRecordsByUserId(userId, 20),
@@ -1158,15 +1191,7 @@ export function getMemberAdminDashboard() {
         `,
         [since30d],
       ),
-      pointUsers30d: queryDistinctUserCount(
-        `
-          SELECT COUNT(DISTINCT user_id) AS value
-          FROM user_point_records
-          WHERE created_at >= ?
-            AND change_value > 0
-        `,
-        [since30d],
-      ),
+      pointUsers30d: 0,
       highLevelActiveUsers30d,
       highLevelActiveRate30d:
         highLevelUsers.length > 0 ? Number((highLevelActiveUsers30d / highLevelUsers.length).toFixed(4)) : 0,
@@ -1327,7 +1352,7 @@ export function adjustMemberPointsForAdmin(
     createdAt: nowIso(),
   });
 
-  return adjustPointsForAdmin(userId, input, actor);
+  return null;
 }
 
 export function updateMemberSystemConfigForAdmin(
@@ -1351,14 +1376,8 @@ export function updateMemberSystemConfigForAdmin(
     ...input.memberConfig,
     updatedAt: timestamp,
   };
-  const nextPointsConfig: PointsConfigRecord = {
-    ...getPointsConfigOrDefault(),
-    ...input.pointsConfig,
-    updatedAt: timestamp,
-  };
 
   setMemberConfig(nextMemberConfig);
-  setPointsConfig(nextPointsConfig);
   insertMemberOperationLog({
     operateId: createId("mop"),
     userId: null,
@@ -1438,26 +1457,13 @@ export function updatePointRulesForAdmin(
   input: Array<Pick<PointRuleRecord, "ruleCode" | "pointValue" | "dailyLimit" | "enabled">>,
   actor: { adminId: string },
 ) {
-  const currentRules = new Map(listPointRules().map((item) => [item.ruleCode, item]));
   const timestamp = nowIso();
-
-  for (const item of input) {
-    const current = currentRules.get(item.ruleCode);
-    if (!current) {
-      continue;
-    }
-    upsertPointRule({
-      ...current,
-      ...item,
-      updatedAt: timestamp,
-    });
-  }
 
   insertMemberOperationLog({
     operateId: createId("mop"),
     userId: null,
     actionType: "update_member_point_rules",
-    detail: `更新 ${input.length} 条积分规则`,
+    detail: `旧积分规则已下线，忽略 ${input.length} 条积分规则更新`,
     operatorId: actor.adminId,
     createdAt: timestamp,
   });
@@ -1569,18 +1575,9 @@ function executeMemberCampaignForTargets(
           remark: appendBatchMarker(campaign.remark || campaign.name, batchId),
         });
         detail = `发放成长值 ${campaign.growthValue}`;
-      } else if (campaign.grantType === "points" && campaign.pointsValue) {
-        grantPointsForEvent({
-          userId: target.userId,
-          eventType: "campaign_bonus",
-          sourceType: "campaign",
-          sourceBizId: batchId,
-          changeValue: campaign.pointsValue,
-          idempotentKey: `campaign:${campaign.campaignId}:${batchId}:points:${target.userId}`,
-          operatorId: actor.adminId,
-          remark: appendBatchMarker(campaign.remark || campaign.name, batchId),
-        });
-        detail = `发放积分 ${campaign.pointsValue}`;
+      } else if (campaign.grantType === "points") {
+        status = "skipped";
+        detail = "旧积分活动已下线，已跳过";
       } else if (campaign.grantType === "benefit" && benefitDefinition && campaign.benefitValue) {
         insertMemberBenefitGrant({
           grantId: createId("bgrant"),
@@ -1872,35 +1869,10 @@ export function rollbackMemberCampaignExecutionBatchForAdmin(
           .all(batchId, `%:${batchId}:growth:%`) as Array<Record<string, unknown>>)
       : [];
 
-  const pointRows =
-    campaign.grantType === "points"
-      ? (db
-          .prepare(
-            `
-              SELECT *
-              FROM user_point_records
-              WHERE source_type = 'campaign'
-                AND (
-                  source_biz_id = ?
-                  OR idempotent_key LIKE ?
-                )
-                AND change_value > 0
-                AND status = 'effective'
-            `,
-          )
-          .all(batchId, `%:${batchId}:points:%`) as Array<Record<string, unknown>>)
-      : [];
-
   const growthRowsByUser = new Map<string, Array<Record<string, unknown>>>();
   for (const row of growthRows) {
     const userId = String(row.user_id ?? "");
     growthRowsByUser.set(userId, [...(growthRowsByUser.get(userId) ?? []), row]);
-  }
-
-  const pointRowsByUser = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of pointRows) {
-    const userId = String(row.user_id ?? "");
-    pointRowsByUser.set(userId, [...(pointRowsByUser.get(userId) ?? []), row]);
   }
 
   for (const target of rollbackTargets) {
@@ -1927,23 +1899,8 @@ export function rollbackMemberCampaignExecutionBatchForAdmin(
         }
         detail = `回滚成长值 ${rows.reduce((sum, row) => sum + Number(row.effective_value ?? 0), 0)}`;
       } else if (campaign.grantType === "points") {
-        const rows = pointRowsByUser.get(target.userId) ?? [];
-        for (const row of rows) {
-          const pointId = String(row.point_id ?? "");
-          const value = Number(row.change_value ?? 0);
-          grantPointsForEvent({
-            userId: target.userId,
-            eventType: "manual_adjustment",
-            sourceType: "campaign",
-            sourceBizId: rollbackBatchId,
-            changeValue: -Math.abs(value),
-            idempotentKey: `campaign_rollback:${batchId}:${pointId}`,
-            operatorId: actor.adminId,
-            expireDays: null,
-            remark: appendBatchMarker(`回滚活动批次 ${batchId}`, rollbackBatchId),
-          });
-        }
-        detail = `回滚积分 ${rows.reduce((sum, row) => sum + Number(row.change_value ?? 0), 0)}`;
+        status = "skipped";
+        detail = "旧积分活动已下线，已跳过积分回滚";
       } else if (campaign.grantType === "benefit") {
         const grants = listMemberBenefitGrantsByUserId(target.userId, 200).filter(
           (item) =>
@@ -2164,7 +2121,7 @@ export function listPublicMemberRulesPayload() {
     levels: enabledLevels,
     growthRules: listMemberGrowthRules().filter((item) => item.enabled),
     benefitDefinitions: enabledBenefitDefinitions,
-    pointRules: listPointRules().filter((item) => item.enabled),
+    pointRules: listDisabledPointRules(),
     levelBenefitMaps: listMemberLevelBenefitMaps().filter(
       (item) => item.enabled && enabledLevelCodes.has(item.levelCode) && enabledBenefitKeys.has(item.benefitKey),
     ),
@@ -2185,7 +2142,7 @@ export function listMemberRulesPayload() {
     levels: listMemberLevels(),
     growthRules: listMemberGrowthRules(),
     benefitDefinitions: listMemberBenefitDefinitions(),
-    pointRules: listPointRules(),
+    pointRules: listDisabledPointRules(),
     levelBenefitMaps: listMemberLevelBenefitMaps(),
     config: getMemberConfigOrDefault(),
     pointsConfig: getPointsConfigOrDefault(),
@@ -2250,11 +2207,17 @@ export function buildMemberLogExportForAdmin(
     filePrefix = "member-growth";
   } else if (input.logType === "points") {
     sql = `
-      SELECT user_id, event_type, source_type, source_biz_id, change_value, status, expire_at, remark, created_at
-      FROM user_point_records
-      ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
-      ORDER BY created_at DESC
-      LIMIT 5000
+      SELECT
+        '' AS user_id,
+        '' AS event_type,
+        '' AS source_type,
+        '' AS source_biz_id,
+        0 AS change_value,
+        'disabled' AS status,
+        NULL AS expire_at,
+        '旧积分流水已下线' AS remark,
+        '' AS created_at
+      WHERE 1 = 0
     `;
     headers = [
       "user_id",

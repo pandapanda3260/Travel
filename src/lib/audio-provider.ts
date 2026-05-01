@@ -6,7 +6,11 @@ import { promisify } from "node:util";
 import { getSpeechSynthesisRuntime, type SpeechSynthesisRuntime } from "./audio-provider-config";
 import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import { createMockSpeechResult } from "./mock-aigc-assets";
-import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+} from "./model-usage-service";
 import { joinRuntimePublicStoragePath } from "./runtime-storage";
 import { withRetry } from "./retry";
 import { defaultModelRequestTimeoutMs, fetchWithTimeout } from "./timeout";
@@ -350,7 +354,7 @@ export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<S
 
   const format = input.format ?? "mp3";
   const pricingKey = "doubao.speech.tts.2.0";
-  assertModelUsagePreflight({
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "audio.tts",
     estimatedMetrics: {
@@ -358,66 +362,71 @@ export async function synthesizeSpeech(input: SpeechSynthesisRequest): Promise<S
       requestCount: 1,
     },
   });
-  const parsed = await withRetry(async () => {
-    const res = await fetchWithTimeout(
-      `${normalizeApiBase(runtime.apiBase)}/api/v3/tts/unidirectional/sse`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Api-App-Id": runtime.appId,
-          "X-Api-Access-Key": runtime.accessToken,
-          "X-Api-Resource-Id": input.resourceId ?? runtime.resourceId,
-          "X-Api-Request-Id": crypto.randomUUID(),
-          "X-Control-Require-Usage-Tokens-Return": "*",
+  try {
+    const parsed = await withRetry(async () => {
+      const res = await fetchWithTimeout(
+        `${normalizeApiBase(runtime.apiBase)}/api/v3/tts/unidirectional/sse`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Api-App-Id": runtime.appId,
+            "X-Api-Access-Key": runtime.accessToken,
+            "X-Api-Resource-Id": input.resourceId ?? runtime.resourceId,
+            "X-Api-Request-Id": crypto.randomUUID(),
+            "X-Control-Require-Usage-Tokens-Return": "*",
+          },
+          body: JSON.stringify(buildSpeechSynthesisRequestPayload(input, runtime)),
         },
-        body: JSON.stringify(buildSpeechSynthesisRequestPayload(input, runtime)),
+        {
+          timeoutMs: defaultModelRequestTimeoutMs,
+          timeoutMessage: "语音合成请求超时，请稍后重试",
+        },
+      );
+
+      const rawText = await res.text();
+      if (!res.ok) throw new Error(rawText || "语音合成失败");
+
+      const result = parseSseTextPayload(rawText);
+      if (result.audioBuffer.length === 0) {
+        throw new Error(result.lastMessage ?? `语音合成结果为空${result.lastCode ? `（code: ${result.lastCode}）` : ""}`);
+      }
+      return result;
+    });
+
+    const outputDir = getAudioOutputDir(input.taskId);
+    mkdirSync(outputDir, { recursive: true });
+    const extension = getOutputExtension(format);
+    const fileName = `${crypto.randomUUID()}.${extension}`;
+    const absolutePath = join(outputDir, fileName);
+    writeFileSync(absolutePath, parsed.audioBuffer);
+    const probedDurationSeconds = await probeMediaDurationSeconds(absolutePath).catch(() => null);
+    const words = normalizeTimedWords(parsed.words, probedDurationSeconds);
+    const wordTimelineDurationSeconds = words.length ? (words[words.length - 1]?.endTime ?? null) : null;
+
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "audio.tts",
+      provider: runtime.providerLabel,
+      modelId: input.resourceId ?? runtime.resourceId,
+      metrics: {
+        characterCount: Array.from(input.text).length,
+        requestCount: 1,
       },
-      {
-        timeoutMs: defaultModelRequestTimeoutMs,
-        timeoutMessage: "语音合成请求超时，请稍后重试",
-      },
-    );
+      requestId: crypto.randomUUID(),
+      remark: "语音合成",
+    });
 
-    const rawText = await res.text();
-    if (!res.ok) throw new Error(rawText || "语音合成失败");
-
-    const result = parseSseTextPayload(rawText);
-    if (result.audioBuffer.length === 0) {
-      throw new Error(result.lastMessage ?? `语音合成结果为空${result.lastCode ? `（code: ${result.lastCode}）` : ""}`);
-    }
-    return result;
-  });
-
-  const outputDir = getAudioOutputDir(input.taskId);
-  mkdirSync(outputDir, { recursive: true });
-  const extension = getOutputExtension(format);
-  const fileName = `${crypto.randomUUID()}.${extension}`;
-  const absolutePath = join(outputDir, fileName);
-  writeFileSync(absolutePath, parsed.audioBuffer);
-  const probedDurationSeconds = await probeMediaDurationSeconds(absolutePath).catch(() => null);
-  const words = normalizeTimedWords(parsed.words, probedDurationSeconds);
-  const wordTimelineDurationSeconds = words.length ? (words[words.length - 1]?.endTime ?? null) : null;
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "audio.tts",
-    provider: runtime.providerLabel,
-    modelId: input.resourceId ?? runtime.resourceId,
-    metrics: {
-      characterCount: Array.from(input.text).length,
-      requestCount: 1,
-    },
-    requestId: crypto.randomUUID(),
-    remark: "语音合成",
-  });
-
-  return {
-    audioUrl: getAudioOutputUrl(input.taskId, fileName),
-    audioDurationSeconds: probedDurationSeconds ?? wordTimelineDurationSeconds,
-    words,
-    usageTextWords: parsed.usageTextWords,
-  };
+    return {
+      audioUrl: getAudioOutputUrl(input.taskId, fileName),
+      audioDurationSeconds: probedDurationSeconds ?? wordTimelineDurationSeconds,
+      words,
+      usageTextWords: parsed.usageTextWords,
+    };
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
+  }
 }
 
 export async function synthesizeSpeechWithResourceFallbacks(

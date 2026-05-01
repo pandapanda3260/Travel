@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { db } from "./db";
-import { chargePointsForUsage, ensureUserPointsAccount, recalculateUserPointsAccount } from "./points-service";
+import { getCommercialCreditBalance } from "./commercial-credit-ledger";
 import { getModelUsageContext } from "./model-usage-context";
+import {
+  confirmCommercialMeteredUsageCharge,
+  prepareCommercialMeteredUsageCharge,
+  releaseCommercialUsageCharge,
+  type PreparedCommercialUsageCharge,
+} from "./commercial-billing-gateway";
 import {
   ensureModelUsageDefaults,
   findModelUsageRecordForProviderBill,
@@ -14,7 +19,6 @@ import {
   getModelUsageRecordByIdempotentKey,
   getModelUsageRiskEventOverview,
   getModelUsageSummaryByUserId,
-  getUserModelUsagePointsSince,
   insertModelUsageRecord,
   insertModelUsageRiskEvent,
   listModelPricingRules,
@@ -59,6 +63,10 @@ type PricedUsageComputation = {
   amountRmb: number;
   pointsCost: number;
   breakdown: ModelUsageBreakdownItem[];
+};
+
+type PreparedCommercialModelUsageCharge = PreparedCommercialUsageCharge & {
+  confirmIdempotencyKey: string;
 };
 
 type ModelBillingConfigUpdateInput = Partial<
@@ -226,38 +234,22 @@ function readBooleanEnv(name: string) {
   return null;
 }
 
-function readPositiveNumberEnv(name: string) {
-  const raw = process.env[name]?.trim();
-  if (!raw) {
-    return null;
-  }
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
 function resolveModelUsageBillingPolicy(config: ModelBillingConfigRecord): ModelUsageBillingPolicy {
   const strictEnv = readBooleanEnv("USAGE_BILLING_STRICT_MODE");
   const requirePricingEnv = readBooleanEnv("USAGE_BILLING_REQUIRE_PRICING");
-  const enforceBalanceEnv = readBooleanEnv("USAGE_BILLING_ENFORCE_BALANCE");
-  const dailyUserPointLimitEnv = readPositiveNumberEnv("USAGE_BILLING_DAILY_USER_POINT_LIMIT");
   const strictModeEnabled = strictEnv ?? config.strictModeEnabled;
   const strictModeSource = strictEnv !== null ? "env" : config.strictModeEnabled ? "config" : "off";
   const configuredRequirePricing = requirePricingEnv ?? config.requirePricingRule;
-  const configuredEnforceBalance = enforceBalanceEnv ?? config.enforceSufficientBalance;
 
   return {
     billingEnabled: config.billingEnabled,
     strictModeEnabled,
     requirePricingRule: configuredRequirePricing,
-    enforceSufficientBalance: configuredEnforceBalance,
-    minimumBalancePoints: Math.max(0, Number(config.minimumBalancePoints ?? 0) || 0),
-    dailyUserPointLimit: dailyUserPointLimitEnv ?? config.dailyUserPointLimit ?? null,
+    enforceSufficientBalance: false,
+    minimumBalancePoints: 0,
+    dailyUserPointLimit: null,
     strictModeSource,
   };
-}
-
-function getUtcDayStartIso(date = new Date()) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())).toISOString();
 }
 
 function resolvePricingRuleForUsage(input: Pick<RecordModelUsageInput, "pricingKey" | "serviceName">, policy: ModelUsageBillingPolicy) {
@@ -457,43 +449,6 @@ export function assertModelUsagePreflight(
   const estimated =
     pricingRule && input.estimatedMetrics ? computePricedUsage(pricingRule, input.estimatedMetrics, billingConfig) : null;
 
-  if (policy.enforceSufficientBalance && context?.userId && estimated && estimated.pointsCost > 0) {
-    const account = recalculateUserPointsAccount(context.userId) ?? ensureUserPointsAccount(context.userId);
-    const availablePoints = account?.availablePoints ?? 0;
-    if (availablePoints - estimated.pointsCost < policy.minimumBalancePoints) {
-      const message = `当前积分不足，预计需要 ${estimated.pointsCost} 积分，当前可用 ${availablePoints} 积分。`;
-      recordUsageRiskEvent({
-        code: "INSUFFICIENT_POINTS_BALANCE",
-        serviceName: input.serviceName,
-        pricingKey: input.pricingKey,
-        message,
-        severity: "warning",
-        metadata: { estimatedPointsCost: estimated.pointsCost, availablePoints },
-      });
-      throw new ModelUsageBillingError(message, "INSUFFICIENT_POINTS_BALANCE");
-    }
-  }
-
-  if (policy.dailyUserPointLimit !== null && context?.userId && estimated && estimated.pointsCost > 0) {
-    const usedPointsToday = getUserModelUsagePointsSince(context.userId, getUtcDayStartIso());
-    if (usedPointsToday + estimated.pointsCost > policy.dailyUserPointLimit) {
-      const message = `今日用量已达上限，今日已用 ${roundPoints(usedPointsToday)} 积分，本次预计 ${estimated.pointsCost} 积分，日上限 ${policy.dailyUserPointLimit} 积分。`;
-      recordUsageRiskEvent({
-        code: "DAILY_USAGE_LIMIT_EXCEEDED",
-        serviceName: input.serviceName,
-        pricingKey: input.pricingKey,
-        message,
-        severity: "warning",
-        metadata: {
-          usedPointsToday: roundPoints(usedPointsToday),
-          estimatedPointsCost: estimated.pointsCost,
-          dailyUserPointLimit: policy.dailyUserPointLimit,
-        },
-      });
-      throw new ModelUsageBillingError(message, "DAILY_USAGE_LIMIT_EXCEEDED");
-    }
-  }
-
   return {
     policy,
     context,
@@ -625,6 +580,145 @@ function buildUsageIdempotentKey(input: RecordModelUsageInput, userId: string, r
   return `model_usage:${createHash("sha256").update(seed).digest("hex")}`;
 }
 
+function resolveCommercialFeatureCodeForModelUsage(serviceName: string) {
+  if (serviceName.startsWith("image.")) {
+    return "image_generation" as const;
+  }
+  if (serviceName.startsWith("audio.") || serviceName.startsWith("voice.")) {
+    return "audio_generation" as const;
+  }
+  if (serviceName.includes("subtitle")) {
+    return "subtitle_generation" as const;
+  }
+  if (serviceName.includes("composition")) {
+    return "video_composition" as const;
+  }
+  return "text_generation" as const;
+}
+
+export function estimateTextModelUsageMetrics(input: {
+  inputText: string;
+  maxOutputTokens?: number | null;
+  cachedInputTokens?: number | null;
+}): ModelUsageMetrics {
+  const inputTokens = Math.max(1, Array.from(input.inputText).length);
+  const outputTokens = Math.max(1, Math.ceil(input.maxOutputTokens ?? 2_000));
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens: Math.max(0, Math.ceil(input.cachedInputTokens ?? 0)),
+    requestCount: 1,
+  };
+}
+
+function buildCommercialModelUsageIdempotencyKey(input: {
+  phase: "freeze" | "confirm";
+  userId: string;
+  serviceName: string;
+  pricingKey?: string | null;
+  objectType?: string | null;
+  objectId?: string | null;
+  requestId?: string | null;
+  idempotentSeed?: string | null;
+  metrics?: ModelUsageMetrics | null;
+}) {
+  const seed = [
+    input.phase,
+    input.userId,
+    input.serviceName,
+    input.pricingKey ?? "",
+    input.objectType ?? "",
+    input.objectId ?? "",
+    input.requestId ?? "",
+    input.idempotentSeed ?? "",
+    JSON.stringify(input.metrics ?? {}),
+  ].join("|");
+
+  return `commercial:model_usage:${input.phase}:${createHash("sha256").update(seed).digest("hex")}`;
+}
+
+export function prepareCommercialModelUsageCharge(
+  input: Pick<RecordModelUsageInput, "pricingKey" | "serviceName" | "idempotentSeed" | "remark"> & {
+    estimatedMetrics: ModelUsageMetrics;
+  },
+): PreparedCommercialModelUsageCharge | null {
+  const preflight = assertModelUsagePreflight({
+    pricingKey: input.pricingKey,
+    serviceName: input.serviceName,
+    estimatedMetrics: input.estimatedMetrics,
+  });
+  const context = preflight.context;
+  if (!context?.userId || !preflight.pricingRule || !preflight.estimated || preflight.estimated.amountRmb <= 0) {
+    return null;
+  }
+
+  const featureCode = resolveCommercialFeatureCodeForModelUsage(input.serviceName);
+  const taskId = context.objectId ?? context.requestId ?? `${input.serviceName}:${input.pricingKey ?? "unpriced"}`;
+  const freezeIdempotencyKey = buildCommercialModelUsageIdempotencyKey({
+    phase: "freeze",
+    userId: context.userId,
+    serviceName: input.serviceName,
+    pricingKey: preflight.pricingRule.pricingKey,
+    objectType: context.objectType,
+    objectId: context.objectId,
+    requestId: context.requestId,
+    idempotentSeed: input.idempotentSeed,
+    metrics: input.estimatedMetrics,
+  });
+  const confirmIdempotencyKey = buildCommercialModelUsageIdempotencyKey({
+    phase: "confirm",
+    userId: context.userId,
+    serviceName: input.serviceName,
+    pricingKey: preflight.pricingRule.pricingKey,
+    objectType: context.objectType,
+    objectId: context.objectId,
+    requestId: context.requestId,
+    idempotentSeed: input.idempotentSeed,
+    metrics: input.estimatedMetrics,
+  });
+
+  const prepared = prepareCommercialMeteredUsageCharge({
+    userId: context.userId,
+    taskId,
+    featureCode,
+    estimatedApiCostRmb: preflight.estimated.amountRmb,
+    idempotencyKey: freezeIdempotencyKey,
+    name: preflight.pricingRule.label,
+  });
+
+  return {
+    ...prepared,
+    confirmIdempotencyKey,
+  };
+}
+
+export function confirmCommercialModelUsageCharge(
+  prepared: PreparedCommercialModelUsageCharge | null,
+  input: RecordModelUsageInput,
+) {
+  const record = recordModelUsage(input);
+  if (prepared && record?.status === "charged" && record.amountRmb > 0) {
+    confirmCommercialMeteredUsageCharge({
+      freezeId: prepared.freeze.freezeId,
+      idempotencyKey: prepared.confirmIdempotencyKey,
+      actualCostRmb: record.amountRmb,
+      provider: input.provider ?? null,
+      modelId: input.modelId ?? null,
+    });
+  }
+  return record;
+}
+
+export function releaseCommercialModelUsageCharge(prepared: PreparedCommercialModelUsageCharge | null, reason: string) {
+  if (!prepared) {
+    return null;
+  }
+  return releaseCommercialUsageCharge({
+    freezeId: prepared.freeze.freezeId,
+    reason,
+  });
+}
+
 export function recordModelUsage(input: RecordModelUsageInput) {
   ensureModelUsageDefaults();
   const billingConfig = getModelBillingConfig() ?? getDefaultModelBillingConfig();
@@ -689,24 +783,7 @@ export function recordModelUsage(input: RecordModelUsageInput) {
     createdAt: new Date().toISOString(),
   };
 
-  db.transaction(() => {
-    insertModelUsageRecord(record);
-
-    if (pricingRule?.enabled && pointsCost > 0) {
-      chargePointsForUsage({
-        userId: context.userId,
-        serviceName: input.serviceName,
-        modelId: input.modelId ?? pricingRule.modelId,
-        sourceBizId: record.usageId,
-        idempotentKey: `${idempotentKey}:points`,
-        pointsCost,
-        remark: input.remark ?? `${pricingRule.label} 调用扣费`,
-      });
-    } else {
-      ensureUserPointsAccount(context.userId);
-      recalculateUserPointsAccount(context.userId);
-    }
-  })();
+  insertModelUsageRecord(record);
 
   return record;
 }
@@ -877,7 +954,7 @@ export function getModelUsageAdminSnapshot() {
 export function getUserModelUsagePayload(userId: string) {
   return {
     summary: getModelUsageSummaryByUserId(userId, 30),
-    pointsAccount: recalculateUserPointsAccount(userId) ?? ensureUserPointsAccount(userId),
+    commercialBalance: getCommercialCreditBalance(userId),
     records: listModelUsageRecordsByUserId(userId, 80),
   };
 }

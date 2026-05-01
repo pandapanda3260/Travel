@@ -31,6 +31,7 @@ import { deleteTaskStageProgressByTaskId } from "../../../../lib/task-stage-prog
 import { deleteTaskWorkflowEventsByTaskId } from "../../../../lib/task-workflow-event-store";
 import { deleteTaskVisualImageShotsByTaskId } from "../../../../lib/task-visual-image-store";
 import { deleteTaskHotelAssetsByTaskId } from "../../../../lib/task-hotel-asset-store";
+import { deleteTaskHotelAssetOptimizationStatesByTaskId } from "../../../../lib/task-hotel-asset-optimization-store";
 import {
   syncNarrationScriptIntoSubtitlePlan,
   usesSegmentLevelSubtitleSource,
@@ -359,6 +360,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     }
 
     deleteTaskVisualImageShotsByTaskId(taskId, { reason: "user_manual_delete" });
+    deleteTaskHotelAssetOptimizationStatesByTaskId(taskId);
     deleteTaskHotelAssetsByTaskId(taskId);
     deleteTaskClipShotsByTaskId(taskId, { reason: "user_manual_delete" });
 

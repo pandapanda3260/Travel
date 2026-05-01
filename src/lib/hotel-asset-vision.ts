@@ -1,7 +1,9 @@
 import {
-  assertModelUsagePreflight,
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
   ModelUsageBillingError,
-  recordModelUsage,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
   resolveDefaultModelPricingKey,
 } from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
@@ -284,11 +286,25 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
     return fallback;
   }
 
+  let commercialCharge: ReturnType<typeof prepareCommercialModelUsageCharge> = null;
   try {
     const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-    assertModelUsagePreflight({
+    const textPrompt = [
+      `用户补充说明：${input.userNote?.trim() || "无"}`,
+      `用户预设场景：${input.preferredSceneType ?? "auto"}`,
+      `原始文件名：${input.fileName?.trim() || "unknown"}`,
+      `图片尺寸：${input.width}x${input.height}`,
+      "",
+      "请识别这张酒店实拍图片在酒店探店视频中的素材价值，并按 JSON 返回。",
+    ].join("\n");
+    const estimatedMetrics = estimateTextModelUsageMetrics({
+      inputText: `${HOTEL_ASSET_ANALYSIS_SYSTEM_PROMPT}\n${textPrompt}`,
+      maxOutputTokens: 2_000,
+    });
+    commercialCharge = prepareCommercialModelUsageCharge({
       pricingKey,
       serviceName: "vision.hotel_asset_analysis",
+      estimatedMetrics,
     });
 
     const response = await fetch(normalizeApiUrl(runtime.apiBase, runtime.chatEndpoint), {
@@ -311,14 +327,7 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
             content: [
               {
                 type: "text",
-                text: [
-                  `用户补充说明：${input.userNote?.trim() || "无"}`,
-                  `用户预设场景：${input.preferredSceneType ?? "auto"}`,
-                  `原始文件名：${input.fileName?.trim() || "unknown"}`,
-                  `图片尺寸：${input.width}x${input.height}`,
-                  "",
-                  "请识别这张酒店实拍图片在酒店探店视频中的素材价值，并按 JSON 返回。",
-                ].join("\n"),
+                text: textPrompt,
               },
               {
                 type: "image_url",
@@ -346,35 +355,38 @@ export async function analyzeHotelAssetImage(input: VisionAssetInput): Promise<H
     };
 
     if (!response.ok) {
+      releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
       return fallback;
     }
 
-    recordModelUsage({
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content?.trim()) {
+      releaseCommercialModelUsageCharge(commercialCharge, "empty_result");
+      return fallback;
+    }
+
+    const parsed = JSON.parse(stripCodeFence(content)) as RawHotelAssetVisionResult;
+    const result = sanitizeAnalysisResult(parsed, fallback);
+    confirmCommercialModelUsageCharge(commercialCharge, {
       pricingKey,
       serviceName: "vision.hotel_asset_analysis",
       provider: runtime.providerLabel,
       modelId: runtime.modelId,
       metrics: {
-        inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
-        outputTokens: Number(payload.usage?.completion_tokens ?? 0),
+        inputTokens: Number(payload.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+        outputTokens: Number(payload.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
         cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
         requestCount: 1,
       },
       requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
       remark: "酒店探店素材识别",
     });
-
-    const content = payload.choices?.[0]?.message?.content;
-    if (!content?.trim()) {
-      return fallback;
-    }
-
-    const parsed = JSON.parse(stripCodeFence(content)) as RawHotelAssetVisionResult;
-    return sanitizeAnalysisResult(parsed, fallback);
+    return result;
   } catch (error) {
     if (error instanceof ModelUsageBillingError) {
       throw error;
     }
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
     return fallback;
   }
 }

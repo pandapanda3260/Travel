@@ -1,8 +1,10 @@
 import type { ImageGenerationResult } from "./image-provider";
 import {
-  assertModelUsagePreflight,
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
   ModelUsageBillingError,
-  recordModelUsage,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
   resolveDefaultModelPricingKey,
 } from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
@@ -337,61 +339,72 @@ export async function reviewTaskVisualImageBatch(input: ReviewInput): Promise<Re
 
   try {
     const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-    assertModelUsagePreflight({
+    const estimatedMetrics = estimateTextModelUsageMetrics({
+      inputText: `${IMAGE_QUALITY_CHECK_SYSTEM_PROMPT}\n${JSON.stringify(userContent)}`,
+      maxOutputTokens: 2_200,
+    });
+    const commercialCharge = prepareCommercialModelUsageCharge({
       pricingKey,
       serviceName: "image.self_check",
+      estimatedMetrics,
     });
 
-    const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${runtime.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: runtime.modelId,
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: IMAGE_QUALITY_CHECK_SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
-        max_completion_tokens: 2200,
-      }),
-    });
+    let parsed: { results?: RawReviewResult[] };
+    try {
+      const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${runtime.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: runtime.modelId,
+          temperature: 0.1,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: IMAGE_QUALITY_CHECK_SYSTEM_PROMPT },
+            { role: "user", content: userContent },
+          ],
+          max_completion_tokens: 2200,
+        }),
+      });
 
-    const payload = (await response.json().catch(() => ({}))) as {
-      error?: { message?: string };
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        prompt_tokens_details?: {
-          cached_tokens?: number;
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: { message?: string };
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          prompt_tokens_details?: {
+            cached_tokens?: number;
+          };
         };
       };
-    };
 
-    if (!response.ok) {
-      throw new Error(payload.error?.message ?? "图片自检失败");
+      if (!response.ok) {
+        throw new Error(payload.error?.message ?? "图片自检失败");
+      }
+
+      const content = payload.choices?.[0]?.message?.content ?? "";
+      parsed = JSON.parse(stripCodeFence(content)) as { results?: RawReviewResult[] };
+      confirmCommercialModelUsageCharge(commercialCharge, {
+        pricingKey,
+        serviceName: "image.self_check",
+        provider: runtime.providerLabel,
+        modelId: runtime.modelId,
+        metrics: {
+          inputTokens: Number(payload.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+          outputTokens: Number(payload.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+          cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+        },
+        requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+        remark: "参考图自检",
+      });
+    } catch (error) {
+      releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+      throw error;
     }
 
-    recordModelUsage({
-      pricingKey,
-      serviceName: "image.self_check",
-      provider: runtime.providerLabel,
-      modelId: runtime.modelId,
-      metrics: {
-        inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
-        outputTokens: Number(payload.usage?.completion_tokens ?? 0),
-        cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-      },
-      requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-      remark: "参考图自检",
-    });
-
-    const content = payload.choices?.[0]?.message?.content ?? "";
-    const parsed = JSON.parse(stripCodeFence(content)) as { results?: RawReviewResult[] };
     const checkedAt = new Date().toISOString();
     const fallbackResults = buildUncheckedResults(input.assets.length);
 

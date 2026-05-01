@@ -27,6 +27,7 @@ import {
   parseTaskClipShots,
   upsertTaskClipShot,
 } from "../../../../../lib/task-clip-store";
+import { resolveNarrationClipSpokenText } from "../../../../../lib/subtitle-text-contract";
 import { resolveTaskClipCompletionState } from "../../../../../lib/task-clip-completion";
 import { getTaskDirectorPlan } from "../../../../../lib/video-task-director";
 import {
@@ -115,7 +116,7 @@ function patchTaskStatusByClipJobs(taskId: string) {
     return null;
   }
 
-  const shotDefinitions = parseTaskClipShots(task, getTaskClipNarrationResult(taskId));
+  const shotDefinitions = parseTaskClipShots(task, getTaskClipNarrationResult(taskId, task));
   const clipRecords = listTaskClipShots(taskId);
   const completionState = resolveTaskClipCompletionState({
     shotDefinitions,
@@ -252,7 +253,7 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
     throw new Error("视频任务不存在");
   }
 
-  const narrationResult = getTaskClipNarrationResult(taskId);
+  const narrationResult = getTaskClipNarrationResult(taskId, task);
   const shotDefinition = parseTaskClipShots(task, narrationResult).find((item) => item.shotIndex === shotIndex);
   const narrationClip = shotDefinition?.narrationClip ?? null;
   if (!shotDefinition || !narrationClip) {
@@ -343,14 +344,16 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
     startedAt: submittedAt,
   });
 
-  let submission: {
-    jobId: string;
-    provider: "kling" | "seedance";
-    modelId: string;
-    logs: string[];
-    message: string;
-    optimizedPrompt?: string;
-  } | null = null;
+	  let submission: {
+	    jobId: string;
+	    provider: "kling" | "seedance";
+	    modelId: string;
+	    logs: string[];
+	    message: string;
+	    optimizedPrompt?: string;
+	    commercialChargeFreezeId?: string | null;
+	    commercialChargeStatus?: "frozen" | "confirmed" | "released" | null;
+	  } | null = null;
   let generationSettings: KlingGenerationSettings;
   let providerPrompt = prompt;
 
@@ -483,7 +486,7 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
         segmentId: shotDefinition.segmentId,
         segmentIndex: shotDefinition.segmentIndex,
         shotDescriptions,
-        narrationText: narrationClip.narrationText || narrationClip.subtitleText || "",
+        narrationText: resolveNarrationClipSpokenText(narrationClip),
         durationSeconds: segmentDuration,
         task,
       });
@@ -633,6 +636,8 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
         provider: submission.provider,
         modelId: submission.modelId,
         generationSettings,
+        commercialChargeFreezeId: submission.commercialChargeFreezeId ?? null,
+        commercialChargeStatus: submission.commercialChargeStatus ?? null,
       });
       upsertVideoJob(record);
       stageTracker.update("QUEUED");
@@ -753,7 +758,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       await withUsageContext(() => ensureSelectedImagesForClipGeneration(taskId));
       const existingClips = listTaskClipShots(taskId);
       const existingShotIndexes = new Set(existingClips.map((item) => item.shotIndex));
-      const shotDefinitions = parseTaskClipShots(task, getTaskClipNarrationResult(taskId));
+      const shotDefinitions = parseTaskClipShots(task, getTaskClipNarrationResult(taskId, task));
       const hasAllShots =
         shotDefinitions.length > 0 && shotDefinitions.every((item) => existingShotIndexes.has(item.shotIndex));
       const isRerun = hasAllShots && existingClips.length > 0;

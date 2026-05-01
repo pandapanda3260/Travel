@@ -4,7 +4,6 @@ import { adminApiUnauthorizedResponse, requireAdminApiSession } from "../../../.
 import {
   adjustMemberGrowthForAdmin,
   adjustMemberLevelForAdmin,
-  adjustMemberPointsForAdmin,
   getMemberUserDetailForAdmin,
   grantBenefitForAdmin,
   isMemberAdminEnabled,
@@ -43,6 +42,16 @@ export async function POST(request: NextRequest) {
   }
 
   const actor = { adminId: session.adminId };
+
+  if (body.action === "adjust_points") {
+    return NextResponse.json(
+      {
+        error: "旧积分调整已下线，请使用「充值与套餐」中的商业积分订单或补偿入口。",
+        code: "LEGACY_POINTS_DISABLED",
+      },
+      { status: 410 },
+    );
+  }
 
   if (body.action === "adjust_level") {
     if (!body.levelCode) {
@@ -123,24 +132,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "权益发放记录不存在", code: "BENEFIT_GRANT_NOT_FOUND" }, { status: 404 });
     }
     return NextResponse.json({ detail });
-  }
-
-  if (body.action === "adjust_points") {
-    if (typeof body.changeValue !== "number" || Number.isNaN(body.changeValue) || body.changeValue === 0) {
-      return NextResponse.json({ error: "积分调整值必须为非 0 数字", code: "CHANGE_VALUE_INVALID" }, { status: 400 });
-    }
-    const account = adjustMemberPointsForAdmin(
-      body.userId,
-      {
-        changeValue: body.changeValue,
-        reason: body.reason.trim(),
-      },
-      actor,
-    );
-    return NextResponse.json({
-      account,
-      detail: getMemberUserDetailForAdmin(body.userId),
-    });
   }
 
   return NextResponse.json({ error: "不支持的动作", code: "INVALID_ACTION" }, { status: 400 });

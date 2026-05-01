@@ -55,7 +55,6 @@ type PhaseTemplate = {
   intent: string;
   scenePreference: HotelAssetSceneType[];
   strength: RealPhotoNarrationBeat["structureStrength"];
-  subtitleText: string;
   buildSpokenText: (context: RealPhotoNarrationTextContext) => string;
 };
 
@@ -74,7 +73,6 @@ const phaseTemplates: PhaseTemplate[] = [
     intent: "开篇先抛出用户真实顾虑，让画面有停留感，再进入产品信息。",
     scenePreference: ["exterior", "lobby", "atmosphere", "neighborhood", "other"],
     strength: "medium",
-    subtitleText: "先看它值不值得带孩子来",
     buildSpokenText: () => "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住。",
   },
   {
@@ -83,7 +81,6 @@ const phaseTemplates: PhaseTemplate[] = [
     intent: "用到达、环境、第一印象承接开篇，不直接堆卖点。",
     scenePreference: ["lobby", "exterior", "room", "atmosphere", "other"],
     strength: "medium",
-    subtitleText: "第一眼要有度假感",
     buildSpokenText: (context) =>
       `${context.productTitle}的第一眼，重点不是豪不豪华，而是有没有那种一到就放松下来的度假感。`,
   },
@@ -93,7 +90,6 @@ const phaseTemplates: PhaseTemplate[] = [
     intent: "把房间、餐饮、活动等实拍证据串成一句用户能理解的理由。",
     scenePreference: ["facility", "room", "dining", "food", "service_detail", "other"],
     strength: "medium",
-    subtitleText: "大人省心，孩子有事做",
     buildSpokenText: () => "房间、餐厅和活动区放在一起看，逻辑就清楚了：大人省心，孩子有事做。",
   },
   {
@@ -102,7 +98,6 @@ const phaseTemplates: PhaseTemplate[] = [
     intent: "说明套餐为什么值得，但保持真人推荐的口吻。",
     scenePreference: ["dining", "food", "room", "facility", "service_detail", "other"],
     strength: "medium",
-    subtitleText: "套餐价值要看省心程度",
     buildSpokenText: () => "如果套餐把餐、住、玩都包进去，预算反而更好算，临时加项也少。",
   },
   {
@@ -111,7 +106,6 @@ const phaseTemplates: PhaseTemplate[] = [
     intent: "收束到适合人群和行动建议，让用户知道下一步怎么判断。",
     scenePreference: ["room", "facility", "exterior", "lobby", "atmosphere", "other"],
     strength: "soft",
-    subtitleText: "适合就重点看日期和房型",
     buildSpokenText: () => "所以你要的是周边轻度假，又带孩子，重点就看日期和房型，合适就可以下手。",
   },
 ];
@@ -129,6 +123,11 @@ function compactText(value: string | null | undefined, fallback = "") {
 function truncateText(value: string, limit: number) {
   const compact = compactText(value);
   return compact.length > limit ? `${compact.slice(0, limit)}...` : compact;
+}
+
+function buildNarrationHintFromBeat(beat: Pick<RealPhotoNarrationBeat, "title" | "intent" | "phase">) {
+  const source = compactText(beat.title || beat.intent || beat.phase);
+  return Array.from(source).slice(0, 15).join("");
 }
 
 function normalizeTags(tags: string[] | null | undefined) {
@@ -374,10 +373,7 @@ export function buildFallbackRealPhotoNarrationBlueprint(
         removeTerminalOh: true,
       },
     );
-    const subtitleText = sanitizeNarrationText(template.subtitleText, {
-      stripLeadingDayPrefix: true,
-      removeTerminalOh: true,
-    });
+    const subtitleText = spokenText;
 
     return {
       beatId: buildBeatId(index, template.phase),
@@ -456,11 +452,7 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
           removeTerminalOh: true,
         },
       ) || fallbackBeat.spokenText;
-    const subtitleText =
-      sanitizeNarrationText(readString(candidateBeat.subtitleText), {
-        stripLeadingDayPrefix: true,
-        removeTerminalOh: true,
-      }) || fallbackBeat.subtitleText;
+    const subtitleText = spokenText;
     const targetMaterialIds = readStringArray(candidateBeat.targetMaterialIds).filter((assetId) =>
       allowedMaterialIds.has(assetId),
     );
@@ -570,7 +562,7 @@ function buildShotFromBeat(input: {
       ? `${material.displayName}。${material.analysisSummary || material.recommendedRole}`
       : input.beat.intent,
     contentDescription: material?.analysisSummary ?? input.beat.intent,
-    narrationHint: input.beat.subtitleText,
+    narrationHint: buildNarrationHintFromBeat(input.beat),
     startAtSeconds: input.startAtSeconds,
     endAtSeconds: Math.round((input.startAtSeconds + durationSeconds) * 10) / 10,
     functionTag: input.beat.phase,

@@ -2,7 +2,11 @@ import { statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 
 import { getAsrRuntime } from "./asr-provider-config";
-import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+} from "./model-usage-service";
 
 export type AsrResult = {
   text: string;
@@ -50,77 +54,80 @@ export async function transcribeAudioFile(audioFilePath: string, format: string 
   const requestId = crypto.randomUUID();
   const apiBase = normalizeApiBase(runtime.apiBase);
   const pricingKey = "doubao.asr.file.2.0";
-  assertModelUsagePreflight({
+  const estimatedMetrics = {
+    audioSeconds: estimateAudioSeconds(audioFilePath, format),
+    requestCount: 1,
+  };
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "audio.asr",
-    estimatedMetrics: {
-      audioSeconds: estimateAudioSeconds(audioFilePath, format),
-      requestCount: 1,
-    },
+    estimatedMetrics,
   });
 
-  const response = await fetch(`${apiBase}/api/v3/auc/bigmodel/recognize/flash`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Api-App-Key": runtime.appId,
-      "X-Api-Access-Key": runtime.accessToken,
-      "X-Api-Resource-Id": runtime.resourceId,
-      "X-Api-Request-Id": requestId,
-      "X-Api-Sequence": "-1",
-    },
-    body: JSON.stringify({
-      audio: {
-        data: audioBase64,
-        format: format,
+  try {
+    const response = await fetch(`${apiBase}/api/v3/auc/bigmodel/recognize/flash`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Api-App-Key": runtime.appId,
+        "X-Api-Access-Key": runtime.accessToken,
+        "X-Api-Resource-Id": runtime.resourceId,
+        "X-Api-Request-Id": requestId,
+        "X-Api-Sequence": "-1",
       },
-      request: {
-        model_name: "bigmodel",
-        enable_itn: true,
-        enable_punc: true,
-      },
-    }),
-  });
+      body: JSON.stringify({
+        audio: {
+          data: audioBase64,
+          format: format,
+        },
+        request: {
+          model_name: "bigmodel",
+          enable_itn: true,
+          enable_punc: true,
+        },
+      }),
+    });
 
-  const responseData = (await response.json()) as {
-    resp?: { code?: number; message?: string };
-    result?: {
-      text?: string;
-      utterances?: Array<{
+    const responseData = (await response.json()) as {
+      resp?: { code?: number; message?: string };
+      result?: {
         text?: string;
-        start_time?: number;
-        end_time?: number;
-      }>;
+        utterances?: Array<{
+          text?: string;
+          start_time?: number;
+          end_time?: number;
+        }>;
+      };
     };
-  };
 
-  if (!response.ok) {
-    throw new Error(responseData.resp?.message ?? `语音识别请求失败 (HTTP ${response.status})`);
+    if (!response.ok) {
+      throw new Error(responseData.resp?.message ?? `语音识别请求失败 (HTTP ${response.status})`);
+    }
+
+    if (responseData.resp?.code && responseData.resp.code !== 0) {
+      throw new Error(responseData.resp.message ?? `语音识别失败 (code: ${responseData.resp.code})`);
+    }
+
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "audio.asr",
+      provider: runtime.providerLabel,
+      modelId: runtime.resourceId,
+      metrics: estimatedMetrics,
+      requestId,
+      remark: "录音文件识别",
+    });
+
+    return {
+      text: responseData.result?.text ?? "",
+      utterances: (responseData.result?.utterances ?? []).map((u) => ({
+        text: u.text ?? "",
+        startTime: u.start_time ?? 0,
+        endTime: u.end_time ?? 0,
+      })),
+    };
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
-
-  if (responseData.resp?.code && responseData.resp.code !== 0) {
-    throw new Error(responseData.resp.message ?? `语音识别失败 (code: ${responseData.resp.code})`);
-  }
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "audio.asr",
-    provider: runtime.providerLabel,
-    modelId: runtime.resourceId,
-    metrics: {
-      audioSeconds: estimateAudioSeconds(audioFilePath, format),
-      requestCount: 1,
-    },
-    requestId,
-    remark: "录音文件识别",
-  });
-
-  return {
-    text: responseData.result?.text ?? "",
-    utterances: (responseData.result?.utterances ?? []).map((u) => ({
-      text: u.text ?? "",
-      startTime: u.start_time ?? 0,
-      endTime: u.end_time ?? 0,
-    })),
-  };
 }

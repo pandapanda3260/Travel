@@ -23,7 +23,13 @@ import {
   updateVideoMaterial,
 } from "./video-material-store";
 import { runWithModelUsageContext } from "./model-usage-context";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { getGenerationRuntime, getVisionRuntime } from "./vision-provider-config";
 import { extractVisualSubtitleLinesFromAnalysis } from "./video-material-subtitles";
 
@@ -159,6 +165,7 @@ async function generateContentFromAnalysis(
   }
 
   const systemPrompt = getEffectiveConstraintPrompt("video_script_generation");
+  let commercialCharge: ReturnType<typeof prepareCommercialModelUsageCharge> = null;
 
   try {
     const url = `${runtime.apiBase}${runtime.chatEndpoint}`;
@@ -176,9 +183,14 @@ async function generateContentFromAnalysis(
       Authorization: `Bearer ${runtime.apiKey}`,
     };
     const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-    assertModelUsagePreflight({
+    const estimatedMetrics = estimateTextModelUsageMetrics({
+      inputText: `${systemPrompt}\n${userMessage}`,
+      maxOutputTokens: 8_192,
+    });
+    commercialCharge = prepareCommercialModelUsageCharge({
       pricingKey,
       serviceName: "llm.material_script",
+      estimatedMetrics,
     });
 
     const response = await withAdminProviderCallTracking(
@@ -225,20 +237,6 @@ async function generateContentFromAnalysis(
       };
     };
 
-    recordModelUsage({
-      pricingKey,
-      serviceName: "llm.material_script",
-      provider: runtime.providerLabel,
-      modelId: runtime.modelId,
-      metrics: {
-        inputTokens: Number(data.usage?.prompt_tokens ?? 0),
-        outputTokens: Number(data.usage?.completion_tokens ?? 0),
-        cachedInputTokens: Number(data.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-      },
-      requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-      remark: "素材脚本生成",
-    });
-
     const content = data.choices?.[0]?.message?.content ?? "";
     const extractedJson = extractBestJsonObject(content);
     if (extractedJson) {
@@ -248,6 +246,19 @@ async function generateContentFromAnalysis(
         reversePrompt?: string;
         subtitle?: string;
       };
+      confirmCommercialModelUsageCharge(commercialCharge, {
+        pricingKey,
+        serviceName: "llm.material_script",
+        provider: runtime.providerLabel,
+        modelId: runtime.modelId,
+        metrics: {
+          inputTokens: Number(data.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+          outputTokens: Number(data.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+          cachedInputTokens: Number(data.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+        },
+        requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+        remark: "素材脚本生成",
+      });
       return {
         contentScript: parsed.contentScript ?? "",
         videoTemplatePrompt: parsed.videoTemplatePrompt ?? "",
@@ -256,6 +267,7 @@ async function generateContentFromAnalysis(
       };
     }
 
+    releaseCommercialModelUsageCharge(commercialCharge, "empty_result");
     return {
       contentScript: rawTranscript || videoAnalysis,
       videoTemplatePrompt: "",
@@ -263,6 +275,7 @@ async function generateContentFromAnalysis(
       subtitle: rawTranscript,
     };
   } catch {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
     return {
       contentScript: rawTranscript || videoAnalysis,
       videoTemplatePrompt: "",

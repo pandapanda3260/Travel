@@ -2,6 +2,31 @@ import type { VideoCompositionRecord } from "./video-composition-store";
 import type { SubtitleDisplayCueInput } from "./subtitle-display";
 import type { TimedWord } from "./video-task-schema";
 
+export type SubtitleLine = string;
+
+export type ScreenSubtitleSentence = {
+  text: string;
+  lines: SubtitleLine[];
+  sourceStartIndex?: number;
+  sourceEndIndex?: number;
+};
+
+export type AudioAlignmentSource =
+  | "provider_char"
+  | "provider_word"
+  | "provider_sentence"
+  | "forced_alignment"
+  | "estimated";
+
+export type AudioAlignment = {
+  audioDurationSeconds: number | null;
+  source: AudioAlignmentSource;
+  confidence: "high" | "medium" | "low";
+  charTimestamps?: Array<{ char: string; index: number; startTime: number; endTime: number }>;
+  wordTimestamps?: TimedWord[];
+  sentenceTimestamps?: Array<{ sentenceIndex: number; startTime: number; endTime: number }>;
+};
+
 export type NarrationDraftClip = {
   id: string;
   cueId?: string;
@@ -14,9 +39,12 @@ export type NarrationDraftClip = {
   audioDurationSeconds?: number | null;
   characterFocus: string;
   visualFocus: string;
+  fullSemanticSentence?: string | null;
   narrationText: string;
   subtitleText: string;
   spokenText?: string | null;
+  screenSubtitleSentences?: ScreenSubtitleSentence[] | null;
+  audioAlignment?: AudioAlignment | null;
   note: string;
   hasVoice?: boolean;
   hasSubtitle?: boolean;

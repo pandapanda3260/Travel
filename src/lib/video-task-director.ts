@@ -14,6 +14,13 @@ import {
   trimNarrationToCharacterLimit,
 } from "./narration";
 import { buildIndexedBlockText, parseIndexedTextBlocks, type IndexedTextBlock } from "./indexed-text-blocks";
+import {
+  getRealPhotoMaterialBriefFromShotPlan,
+  getRealPhotoNarrationBlueprintFromShotPlan,
+  resolveRealPhotoShotNarrationSource,
+  restoreRealPhotoNarrationFieldsForShot,
+  restoreRealPhotoNarrationShotPlan,
+} from "./real-photo-narration-source";
 import { clampSeedanceSegmentDurationSeconds } from "./video-duration-constraints";
 import { isSeedanceProvider } from "./video-provider-config";
 import {
@@ -517,9 +524,10 @@ function buildFallbackStoryShot(input: {
     normalizeInlineText(input.narrationText) ||
     `${input.segmentIndex}号片段亮点`;
   const narrationText = normalizeNarrationText(input.planItem?.sourceSpokenText || input.narrationText);
-  const subtitleText = normalizeNarrationText(
-    input.planItem?.sourceSubtitleText || input.planItem?.sourceSpokenText || input.narrationText,
-  );
+  const subtitleText =
+    input.planItem?.hasVoice ?? flags.hasVoice
+      ? narrationText
+      : normalizeNarrationText(input.planItem?.sourceSubtitleText || input.narrationText);
 
   return {
     shotId: `shot-${input.shotIndex}`,
@@ -597,8 +605,24 @@ export function buildDirectorPlanFromTaskData(input: {
   parameters: VideoTaskParameterBundle;
   forceRebuild?: boolean;
 }) {
+  const sourceShotPlan = input.shotPlan ? restoreRealPhotoNarrationShotPlan(input.shotPlan) : input.shotPlan;
   if (!input.forceRebuild && input.directorPlan?.renderSegments?.length && input.directorPlan.storyShots?.length) {
-    return input.directorPlan;
+    const realPhotoBlueprint = getRealPhotoNarrationBlueprintFromShotPlan(sourceShotPlan);
+    const canReuseExistingDirectorPlan =
+      !realPhotoBlueprint ||
+      input.directorPlan.storyShots.every((shot) => {
+        if (!shot.hasVoice && !shot.hasSubtitle) {
+          return true;
+        }
+        const source = resolveRealPhotoShotNarrationSource(shot, sourceShotPlan);
+        if (!source.spokenText) {
+          return true;
+        }
+        return normalizeNarrationText(shot.sourceSpokenText || shot.narrationText) === normalizeNarrationText(source.spokenText);
+      });
+    if (canReuseExistingDirectorPlan) {
+      return input.directorPlan;
+    }
   }
 
   const profile = getVideoTaskTypeProfile(input.parameters.video.videoType);
@@ -612,7 +636,7 @@ export function buildDirectorPlanFromTaskData(input: {
         storyShotsPerSegment: input.parameters.video.storyShotsPerSegment,
       }),
   );
-  const shotPlanItems = [...(input.shotPlan?.shots ?? [])].sort((left, right) => left.shotIndex - right.shotIndex);
+  const shotPlanItems = [...(sourceShotPlan?.shots ?? [])].sort((left, right) => left.shotIndex - right.shotIndex);
   const segmentGroups = buildSegmentShotGroups(
     { ...input.parameters.video, storyShotCount },
     shotPlanItems.length > 0 ? shotPlanItems : undefined,
@@ -629,9 +653,9 @@ export function buildDirectorPlanFromTaskData(input: {
     "片段",
   );
   const narrationBlocks = parseIndexedTextBlocks(input.draftBundle.narrationScript, storyShotCount, "镜头");
-  const normalizedShotPlan = input.shotPlan
-    ? normalizeSubtitlePlanSource(input.shotPlan, input.parameters.video.videoType)
-    : input.shotPlan;
+  const normalizedShotPlan = sourceShotPlan
+    ? normalizeSubtitlePlanSource(sourceShotPlan, input.parameters.video.videoType)
+    : sourceShotPlan;
 
   const storyShots: DirectorStoryShot[] = [];
   const renderSegments: DirectorRenderSegment[] = [];
@@ -787,7 +811,8 @@ export function buildDirectorPlanFromTaskData(input: {
     const segmentRequiresLipSync = segmentShots.some((shot) => shot.requiresLipSync);
     const cueAnchorShot = segmentShots.find((shot) => shot.hasVoice || shot.hasSubtitle) ?? segmentShots[0] ?? null;
     const useSegmentLevelNarration =
-      !normalizedShotPlan?.realPhotoNarrationBlueprint && (voicedShotCount > 1 || Boolean(normalizedSegmentNarrationBlock));
+      !getRealPhotoNarrationBlueprintFromShotPlan(normalizedShotPlan) &&
+      (voicedShotCount > 1 || Boolean(normalizedSegmentNarrationBlock));
 
     const multiPrompt =
       segmentMode === "multi_shot_montage"
@@ -828,7 +853,11 @@ export function buildDirectorPlanFromTaskData(input: {
     renderSegments.push(renderSegment);
 
     let shotAccumulatedSeconds = accumulatedSeconds;
-    if (!normalizedShotPlan?.realPhotoNarrationBlueprint && useSegmentSubtitleSource && (segmentHasVoice || segmentHasSubtitle)) {
+    if (
+      !getRealPhotoNarrationBlueprintFromShotPlan(normalizedShotPlan) &&
+      useSegmentSubtitleSource &&
+      (segmentHasVoice || segmentHasSubtitle)
+    ) {
       audioCues.push({
         cueId: `cue-segment-${segmentIndex}`,
         cueIndex: audioCues.length + 1,
@@ -844,11 +873,11 @@ export function buildDirectorPlanFromTaskData(input: {
         requiresLipSync: segmentRequiresLipSync,
         voiceId: null,
         narrationText: segmentNarrationText,
-        subtitleText: cueAnchorShot?.sourceSubtitleText || segmentNarrationText,
+        subtitleText: segmentHasVoice ? segmentNarrationText : cueAnchorShot?.sourceSubtitleText || segmentNarrationText,
         narrationBeatId: cueAnchorShot?.narrationBeatId ?? null,
         narrationPhase: cueAnchorShot?.narrationPhase ?? null,
         sourceSpokenText: cueAnchorShot?.sourceSpokenText ?? segmentNarrationText,
-        sourceSubtitleText: cueAnchorShot?.sourceSubtitleText ?? segmentNarrationText,
+        sourceSubtitleText: segmentHasVoice ? segmentNarrationText : cueAnchorShot?.sourceSubtitleText ?? segmentNarrationText,
         audioUrl: null,
         words: [],
       });
@@ -864,10 +893,14 @@ export function buildDirectorPlanFromTaskData(input: {
                 : shot.narrationText || "";
           const cueSubtitleText =
             isCueAnchor && useSegmentLevelNarration
-              ? cueAnchorShot?.sourceSubtitleText || segmentNarrationText
+              ? shot.hasVoice
+                ? segmentNarrationText
+                : cueAnchorShot?.sourceSubtitleText || segmentNarrationText
               : useSegmentLevelNarration
                 ? ""
-                : shot.sourceSubtitleText || shot.subtitleText || cueNarrationText;
+                : shot.hasVoice
+                  ? cueNarrationText
+                  : shot.sourceSubtitleText || shot.subtitleText || cueNarrationText;
           audioCues.push({
             cueId: `cue-shot-${shot.shotIndex}`,
             cueIndex: audioCues.length + 1,
@@ -998,60 +1031,81 @@ export function buildDraftBundleFromDirectorPlan(plan: VideoTaskDirectorPlan): V
 }
 
 export function buildShotPlanFromDirectorPlan(plan: VideoTaskDirectorPlan, base?: ShotPlan | null) {
+  const restoreSourcePlan = base ?? {
+    shots: [],
+    storyboard: plan.storyboard,
+    realPhotoNarrationBlueprint: plan.storyboard?.realPhotoNarrationBlueprint,
+    realPhotoMaterialBrief: plan.storyboard?.realPhotoMaterialBrief,
+  };
+  const realPhotoNarrationBlueprint = getRealPhotoNarrationBlueprintFromShotPlan(restoreSourcePlan);
+  const realPhotoMaterialBrief = getRealPhotoMaterialBriefFromShotPlan(restoreSourcePlan);
+
   return {
-    shots: plan.storyShots.map((shot) => ({
-      shotId: shot.shotId,
-      shotIndex: shot.shotIndex,
-      segmentId: shot.segmentId,
-      segmentIndex: shot.segmentIndex,
-      sceneType: shot.sceneType,
-      purpose: shot.purpose,
-      location: shot.location,
-      hasCharacters: shot.hasCharacters,
-      characters: shot.characters,
-      hasTalent: shot.hasTalent,
-      talentCaptureMode: shot.talentCaptureMode,
-      hasVoice: shot.hasVoice,
-      hasSubtitle: shot.hasSubtitle,
-      requiresLipSync: shot.requiresLipSync,
-      action: shot.action,
-      emotion: shot.emotion,
-      cameraMovement: shot.cameraMovement,
-      durationSeconds: shot.durationSeconds,
-      sceneDescription: shot.sceneDescription,
-      contentDescription: shot.contentDescription,
-      narrationHint: shot.narrationHint,
-      functionTag: shot.functionTag,
-      sellingPointType: shot.sellingPointType,
-      commercialPhase: shot.commercialPhase ?? null,
-      commercialIntent: shot.commercialIntent ?? null,
-      evidenceTarget: shot.evidenceTarget ?? null,
-      conversionRole: shot.conversionRole ?? null,
-      shotScale: shot.shotScale,
-      compositionHint: shot.compositionHint,
-      rhythmTag: shot.rhythmTag,
-      mood: shot.mood,
-      sellingPointTags: shot.sellingPointTags,
-      assetId: shot.assetId ?? null,
-      assetSourceType: shot.assetSourceType ?? null,
-      assetSubjectSummary: shot.assetSubjectSummary ?? null,
-      sourceMaterialId: shot.sourceMaterialId ?? null,
-      sourceStartAtSeconds: shot.sourceStartAtSeconds ?? null,
-      sourceEndAtSeconds: shot.sourceEndAtSeconds ?? null,
-      sourceTimeRangeLabel: shot.sourceTimeRangeLabel ?? null,
-      referenceImageUrl: shot.referenceImageUrl ?? null,
-      generationMode: shot.generationMode,
-      sourceTrace: shot.sourceTrace ?? null,
-      needImageEnhancement: shot.needImageEnhancement ?? false,
-      needImageToVideo: shot.needImageToVideo ?? true,
-      isAtmosphereInsert: shot.isAtmosphereInsert ?? false,
-      img2imgPrompt: shot.img2imgPrompt ?? null,
-      i2vPrompt: shot.i2vPrompt ?? null,
-      visual: shot.visual,
-      subject: shot.subject,
-      cinematography: shot.cinematography,
-      structure: shot.structure,
-    })),
+    shots: plan.storyShots.map((shot) =>
+      restoreRealPhotoNarrationFieldsForShot(
+        {
+          shotId: shot.shotId,
+          shotIndex: shot.shotIndex,
+          segmentId: shot.segmentId,
+          segmentIndex: shot.segmentIndex,
+          sceneType: shot.sceneType,
+          purpose: shot.purpose,
+          location: shot.location,
+          hasCharacters: shot.hasCharacters,
+          characters: shot.characters,
+          hasTalent: shot.hasTalent,
+          talentCaptureMode: shot.talentCaptureMode,
+          hasVoice: shot.hasVoice,
+          hasSubtitle: shot.hasSubtitle,
+          requiresLipSync: shot.requiresLipSync,
+          action: shot.action,
+          emotion: shot.emotion,
+          cameraMovement: shot.cameraMovement,
+          durationSeconds: shot.durationSeconds,
+          sceneDescription: shot.sceneDescription,
+          contentDescription: shot.contentDescription,
+          narrationHint: shot.narrationHint,
+          functionTag: shot.functionTag,
+          sellingPointType: shot.sellingPointType,
+          commercialPhase: shot.commercialPhase ?? null,
+          commercialIntent: shot.commercialIntent ?? null,
+          evidenceTarget: shot.evidenceTarget ?? null,
+          conversionRole: shot.conversionRole ?? null,
+          narrationBeatId: shot.narrationBeatId ?? null,
+          narrationPhase: shot.narrationPhase ?? null,
+          narrationIntent: shot.narrationIntent ?? null,
+          sourceSpokenText: shot.sourceSpokenText ?? null,
+          sourceSubtitleText: shot.sourceSubtitleText ?? null,
+          narrationEstimatedDurationSeconds: shot.narrationEstimatedDurationSeconds ?? null,
+          targetMaterialIds: shot.targetMaterialIds,
+          shotScale: shot.shotScale,
+          compositionHint: shot.compositionHint,
+          rhythmTag: shot.rhythmTag,
+          mood: shot.mood,
+          sellingPointTags: shot.sellingPointTags,
+          assetId: shot.assetId ?? null,
+          assetSourceType: shot.assetSourceType ?? null,
+          assetSubjectSummary: shot.assetSubjectSummary ?? null,
+          sourceMaterialId: shot.sourceMaterialId ?? null,
+          sourceStartAtSeconds: shot.sourceStartAtSeconds ?? null,
+          sourceEndAtSeconds: shot.sourceEndAtSeconds ?? null,
+          sourceTimeRangeLabel: shot.sourceTimeRangeLabel ?? null,
+          referenceImageUrl: shot.referenceImageUrl ?? null,
+          generationMode: shot.generationMode,
+          sourceTrace: shot.sourceTrace ?? null,
+          needImageEnhancement: shot.needImageEnhancement ?? false,
+          needImageToVideo: shot.needImageToVideo ?? true,
+          isAtmosphereInsert: shot.isAtmosphereInsert ?? false,
+          img2imgPrompt: shot.img2imgPrompt ?? null,
+          i2vPrompt: shot.i2vPrompt ?? null,
+          visual: shot.visual,
+          subject: shot.subject,
+          cinematography: shot.cinematography,
+          structure: shot.structure,
+        },
+        restoreSourcePlan,
+      ),
+    ),
     globalStyle: base?.globalStyle ?? "真实旅行记录感，贴近平台原生短视频节奏",
     totalDurationSeconds: plan.totalDurationSeconds,
     validationErrors: base?.validationErrors ?? [],
@@ -1060,6 +1114,8 @@ export function buildShotPlanFromDirectorPlan(plan: VideoTaskDirectorPlan, base?
     narrativeCurves: base?.narrativeCurves,
     subtitlePlan: plan.subtitlePlan ?? base?.subtitlePlan,
     storyboard: base?.storyboard ?? plan.storyboard,
+    ...(realPhotoMaterialBrief ? { realPhotoMaterialBrief } : {}),
+    ...(realPhotoNarrationBlueprint ? { realPhotoNarrationBlueprint } : {}),
   } satisfies ShotPlan;
 }
 

@@ -8,9 +8,12 @@ import {
 } from "./narration-audio-bundle";
 import { dbGetAll, dbUpsert, dbDelete, dbReplaceAll, migrateJsonArrayIfNeeded } from "./db";
 import type { NarrationDraft, NarrationDraftClip } from "./narration";
-import { normalizeNarrationSpokenText, sanitizeNarrationText } from "./narration";
 import { joinRuntimeDataPath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
 import { buildSrtFromSubtitleCues, buildSubtitleCuesFromNarrationClips, writeSrtSubtitleFile } from "./subtitle-export";
+import {
+  normalizeNarrationClipTextContract,
+  validateSubtitleTextIntegrity,
+} from "./subtitle-text-contract";
 
 export type NarrationResultRecord = {
   resultId: string;
@@ -40,27 +43,34 @@ function ensureStore() {
   }
 }
 
-function normalizeNarrationClip(clip: NarrationDraftClip): NarrationDraftClip {
-  const narrationText = sanitizeNarrationText(
-    clip.narrationText?.trim() || clip.spokenText?.trim() || clip.subtitleText?.trim() || "",
-  );
-  const subtitleText = sanitizeNarrationText(
-    clip.subtitleText?.trim() || clip.narrationText?.trim() || clip.spokenText?.trim() || "",
-  );
-  const spokenText = normalizeNarrationSpokenText(clip.spokenText?.trim() || narrationText, {
-    stripLeadingDayPrefix: true,
+function normalizeDisplayCuesForTextContract(clip: NarrationDraftClip) {
+  if (!clip.subtitleDisplayCues?.length || !clip.fullSemanticSentence) {
+    return clip.subtitleDisplayCues ?? null;
+  }
+
+  const screenSubtitleSentences = clip.subtitleDisplayCues.map((cue) => {
+    const lines = Array.isArray(cue.lines) ? cue.lines.filter(Boolean) : [];
+    const text = cue.text || lines.join("");
+    return { text, lines };
+  });
+  const validation = validateSubtitleTextIntegrity({
+    fullSemanticSentence: clip.fullSemanticSentence,
+    screenSubtitleSentences,
   });
 
+  return validation.ok ? clip.subtitleDisplayCues : null;
+}
+
+export function normalizeNarrationResultClipForTextContract(clip: NarrationDraftClip): NarrationDraftClip {
+  const contractedClip = normalizeNarrationClipTextContract(clip);
   return {
-    ...clip,
-    narrationText: clip.hasVoice === false ? "" : narrationText,
-    subtitleText: clip.hasSubtitle === false ? "" : subtitleText,
-    spokenText: clip.hasVoice === false ? "" : spokenText || narrationText,
+    ...contractedClip,
+    subtitleDisplayCues: normalizeDisplayCuesForTextContract(contractedClip),
   };
 }
 
 function normalizeNarrationClips(clips: NarrationDraftClip[]) {
-  return clips.map((clip) => normalizeNarrationClip(clip));
+  return clips.map((clip) => normalizeNarrationResultClipForTextContract(clip));
 }
 
 function readStore() {

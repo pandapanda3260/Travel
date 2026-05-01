@@ -358,8 +358,8 @@ export default function VoiceManagementPageClient({
   const [audioDuration, setAudioDuration] = useState(0);
   const progressRef = useRef<HTMLDivElement | null>(null);
 
-  const loadBaseData = useCallback(async () => {
-    const response = await fetch("/api/voice-management?includeTimbres=0", { cache: "no-store" });
+  const loadBaseData = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/voice-management?includeTimbres=0", { cache: "no-store", signal });
     const data = (await response.json()) as {
       favoriteTimbres: TimbreItem[];
       clonedVoices: ClonedVoiceRecord[];
@@ -385,12 +385,21 @@ export default function VoiceManagementPageClient({
       return;
     }
 
-    void loadBaseData().catch((loadError) => {
+    const controller = new AbortController();
+
+    void loadBaseData(controller.signal).catch((loadError) => {
+      if (controller.signal.aborted) {
+        return;
+      }
       setError(loadError instanceof Error ? loadError.message : "音色管理页面加载失败");
     });
+
+    return () => {
+      controller.abort();
+    };
   }, [initialData.membership, initialError, loadBaseData]);
 
-  const loadSquareVoices = useCallback(async (keyword: string) => {
+  const loadSquareVoices = useCallback(async (keyword: string, signal?: AbortSignal) => {
     setIsSquareLoading(true);
     try {
       const params = new URLSearchParams();
@@ -398,7 +407,10 @@ export default function VoiceManagementPageClient({
         params.set("q", keyword.trim());
       }
       const query = params.toString();
-      const response = await fetch(`/api/voice-management/search${query ? `?${query}` : ""}`, { cache: "no-store" });
+      const response = await fetch(`/api/voice-management/search${query ? `?${query}` : ""}`, {
+        cache: "no-store",
+        signal,
+      });
       const data = (await response.json()) as {
         items: TimbreItem[];
         pagination: VoiceSquarePagination;
@@ -411,9 +423,14 @@ export default function VoiceManagementPageClient({
       setSquarePagination(data.pagination);
       setError(null);
     } catch (loadError) {
+      if (signal?.aborted) {
+        return;
+      }
       setError(loadError instanceof Error ? loadError.message : "音色广场加载失败");
     } finally {
-      setIsSquareLoading(false);
+      if (!signal?.aborted) {
+        setIsSquareLoading(false);
+      }
     }
   }, []);
 
@@ -422,7 +439,16 @@ export default function VoiceManagementPageClient({
       skipInitialSquareFetchRef.current = false;
       return;
     }
-    void loadSquareVoices(deferredSquareSearchKeyword);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      void loadSquareVoices(deferredSquareSearchKeyword, controller.signal);
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [deferredSquareSearchKeyword, loadSquareVoices]);
 
   const activeClonedVoices = useMemo(() => {

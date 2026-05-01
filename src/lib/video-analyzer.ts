@@ -6,7 +6,13 @@ import { promisify } from "node:util";
 import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { extractBestJsonObject } from "./llm-json";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
 
 const execFileAsync = promisify(execFile);
@@ -428,27 +434,38 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
   const url = `${runtime.apiBase}${runtime.chatEndpoint}`;
 
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-  assertModelUsagePreflight({
+  const estimatedMetrics = estimateTextModelUsageMetrics({
+    inputText: requestBody,
+    maxOutputTokens: 8_192,
+  });
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "video.analysis",
+    estimatedMetrics,
   });
 
   let response: Response | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    response = await fetch(url, {
-      method: "POST",
-      headers: requestHeaders,
-      body: requestBody,
-    });
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await fetch(url, {
+        method: "POST",
+        headers: requestHeaders,
+        body: requestBody,
+      });
 
-    if (response.status !== 429) break;
+      if (response.status !== 429) break;
 
-    const retryAfter = Number(response.headers.get("retry-after")) || 0;
-    const waitSeconds = Math.max(retryAfter, 30) + attempt * 15;
-    await new Promise((r) => setTimeout(r, waitSeconds * 1000));
+      const retryAfter = Number(response.headers.get("retry-after")) || 0;
+      const waitSeconds = Math.max(retryAfter, 30) + attempt * 15;
+      await new Promise((r) => setTimeout(r, waitSeconds * 1000));
+    }
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
 
   if (!response || !response.ok) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
     const errorText = response ? await response.text() : "no response";
     throw new VisionAnalysisRequestError(
       `视觉分析请求失败 (HTTP ${response?.status ?? "?"}): ${errorText.slice(0, 300)}`,
@@ -470,20 +487,6 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
     };
   };
 
-  recordModelUsage({
-    pricingKey,
-    serviceName: "video.analysis",
-    provider: runtime.providerLabel,
-    modelId: runtime.modelId,
-    metrics: {
-      inputTokens: Number(data.usage?.prompt_tokens ?? 0),
-      outputTokens: Number(data.usage?.completion_tokens ?? 0),
-      cachedInputTokens: Number(data.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-    },
-    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-    remark: "视频关键帧分析",
-  });
-
   const content = data.choices?.[0]?.message?.content ?? "";
   const finishReason = data.choices?.[0]?.finish_reason ?? null;
   const extractedJson =
@@ -497,6 +500,7 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
     }));
 
   if (!extractedJson) {
+    releaseCommercialModelUsageCharge(commercialCharge, "empty_result");
     if (finishReason === "length") {
       throw new Error("视觉分析输出被截断，未能形成完整 JSON");
     }
@@ -506,8 +510,23 @@ export async function analyzeVideoFrames(frames: FrameData[]): Promise<string> {
   try {
     JSON.parse(extractedJson);
   } catch {
+    releaseCommercialModelUsageCharge(commercialCharge, "invalid_result");
     throw new Error("视觉分析返回的 JSON 格式不合法");
   }
+
+  confirmCommercialModelUsageCharge(commercialCharge, {
+    pricingKey,
+    serviceName: "video.analysis",
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    metrics: {
+      inputTokens: Number(data.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+      outputTokens: Number(data.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+      cachedInputTokens: Number(data.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+    },
+    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+    remark: "视频关键帧分析",
+  });
 
   return extractedJson;
 }

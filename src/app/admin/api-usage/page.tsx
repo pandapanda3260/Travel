@@ -76,8 +76,8 @@ export default function ApiUsagePage() {
         <p className="eyebrow">Usage Billing</p>
         <div className="admin-page-header-row">
           <div>
-            <h1>模型用量与积分扣费</h1>
-            <p className="admin-page-desc">按真实模型调用用量记账，按金额比例折算积分，当前规则为 100 积分 = 1 元。</p>
+            <h1>模型用量与成本审计</h1>
+            <p className="admin-page-desc">按真实模型调用记录成本，实际扣费以商业积分账本为准，参考口径为 108 积分 = 1 元。</p>
           </div>
           <div className="admin-page-pill-row">
             <span className="admin-page-pill">{snapshot.billingConfig.billingEnabled ? "计费已开启" : "计费已关闭"}</span>
@@ -86,15 +86,6 @@ export default function ApiUsagePage() {
             </span>
             <span className={`admin-page-pill ${snapshot.billingPolicy.requirePricingRule ? "" : "subtle"}`}>
               定价必填 {snapshot.billingPolicy.requirePricingRule ? "是" : "否"}
-            </span>
-            <span className={`admin-page-pill ${snapshot.billingPolicy.enforceSufficientBalance ? "" : "subtle"}`}>
-              余额拦截 {snapshot.billingPolicy.enforceSufficientBalance ? "已开启" : "未开启"}
-            </span>
-            <span className="admin-page-pill subtle">
-              日限额{" "}
-              {snapshot.billingPolicy.dailyUserPointLimit === null
-                ? "未设置"
-                : `${formatPoints(snapshot.billingPolicy.dailyUserPointLimit)} 积分`}
             </span>
             <span className="admin-page-pill subtle">美元汇率 {snapshot.billingConfig.usdToCnyRate}</span>
             <span className="admin-page-pill subtle">规则 {enabledRules.length}</span>
@@ -113,7 +104,7 @@ export default function ApiUsagePage() {
         <article className="admin-summary-card success">
           <span>已计费金额</span>
           <strong>{formatCurrency(snapshot.overview.totalAmountRmb)}</strong>
-          <p>累计扣减 {formatPoints(snapshot.overview.totalPoints)} 积分</p>
+          <p>参考折算 {formatPoints(snapshot.overview.totalPoints)} 积分</p>
         </article>
         <article className="admin-summary-card info">
           <span>已扣费调用</span>
@@ -213,13 +204,7 @@ export default function ApiUsagePage() {
               <div className="admin-feed-copy">
                 <strong>阻断策略</strong>
                 <p>
-                  严格模式下，缺少用户上下文或缺少启用定价规则的模型调用会被阻止，避免生产成本无法归因。
-                  {snapshot.billingPolicy.enforceSufficientBalance
-                    ? ` 余额低于 ${formatPoints(snapshot.billingPolicy.minimumBalancePoints)} 积分时，可预估调用会在请求前被阻止。`
-                    : ""}
-                  {snapshot.billingPolicy.dailyUserPointLimit === null
-                    ? ""
-                    : ` 单用户每日最多消耗 ${formatPoints(snapshot.billingPolicy.dailyUserPointLimit)} 积分。`}
+                  严格模式下，缺少用户上下文或缺少启用定价规则的模型调用会被阻止，避免生产成本无法归因；余额校验和扣费由商业积分网关处理。
                 </p>
               </div>
               <div className="admin-feed-side">

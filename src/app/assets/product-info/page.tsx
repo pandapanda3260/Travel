@@ -1,9 +1,8 @@
 import "./product-info.css";
 
-import { requireUserPageSession } from "../../../lib/auth-session";
-import { listAccessibleProductArchives } from "../../../lib/product-archive-store";
 import { getProductArchiveVisionProviderMeta } from "../../../lib/product-archive-vision";
-import ProductInfoPageClient, { type ProductArchivesPayload } from "./product-info-page-client";
+import type { ProductArchivesPayload } from "./product-info-page-client";
+import { ProductInfoPageLoader } from "./product-info-page-loader";
 
 function buildEmptyPayload(): ProductArchivesPayload {
   return {
@@ -12,19 +11,6 @@ function buildEmptyPayload(): ProductArchivesPayload {
   };
 }
 
-export default async function ProductInfoPage() {
-  const session = await requireUserPageSession();
-  let initialData = buildEmptyPayload();
-  let initialError: string | null = null;
-
-  try {
-    initialData = {
-      archives: listAccessibleProductArchives(session.userId),
-      runtime: getProductArchiveVisionProviderMeta(),
-    };
-  } catch (error) {
-    initialError = error instanceof Error ? error.message : "商品信息页面加载失败";
-  }
-
-  return <ProductInfoPageClient initialData={initialData} initialError={initialError} />;
+export default function ProductInfoPage() {
+  return <ProductInfoPageLoader initialData={buildEmptyPayload()} />;
 }

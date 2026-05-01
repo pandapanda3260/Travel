@@ -150,9 +150,9 @@ export function ApiUsageAdminControls({ initialSnapshot }: { initialSnapshot: Ap
           billingEnabled: configForm.billingEnabled,
           strictModeEnabled: configForm.strictModeEnabled,
           requirePricingRule: configForm.requirePricingRule,
-          enforceSufficientBalance: configForm.enforceSufficientBalance,
-          minimumBalancePoints: Number(configForm.minimumBalancePoints || 0),
-          dailyUserPointLimit: configForm.dailyUserPointLimit.trim() ? Number(configForm.dailyUserPointLimit) : null,
+          enforceSufficientBalance: false,
+          minimumBalancePoints: 0,
+          dailyUserPointLimit: null,
           pointsPerRmb: Number(configForm.pointsPerRmb || 0),
           usdToCnyRate: Number(configForm.usdToCnyRate || 0),
         }),
@@ -215,7 +215,7 @@ export function ApiUsageAdminControls({ initialSnapshot }: { initialSnapshot: Ap
         <div className="panel-header compact">
           <div>
             <h3>计费风控配置</h3>
-            <p className="admin-panel-desc">可按业务需要单独开启或关闭严格模式、定价必填、余额拦截和每日限额。</p>
+            <p className="admin-panel-desc">配置模型成本审计与定价必填策略，余额校验由商业积分网关统一处理。</p>
           </div>
         </div>
         <div className="admin-billing-form-grid">
@@ -253,41 +253,7 @@ export function ApiUsageAdminControls({ initialSnapshot }: { initialSnapshot: Ap
             </select>
           </label>
           <label className="setting-field">
-            <span>余额拦截</span>
-            <select
-              className="setting-select"
-              value={configForm.enforceSufficientBalance ? "1" : "0"}
-              onChange={(event) =>
-                setConfigForm((current) => ({ ...current, enforceSufficientBalance: event.target.value === "1" }))
-              }
-            >
-              <option value="1">开启</option>
-              <option value="0">关闭</option>
-            </select>
-          </label>
-          <label className="setting-field">
-            <span>最低余额</span>
-            <input
-              className="setting-input"
-              type="number"
-              min="0"
-              value={configForm.minimumBalancePoints}
-              onChange={(event) => setConfigForm((current) => ({ ...current, minimumBalancePoints: event.target.value }))}
-            />
-          </label>
-          <label className="setting-field">
-            <span>每日限额</span>
-            <input
-              className="setting-input"
-              type="number"
-              min="0"
-              placeholder="不限"
-              value={configForm.dailyUserPointLimit}
-              onChange={(event) => setConfigForm((current) => ({ ...current, dailyUserPointLimit: event.target.value }))}
-            />
-          </label>
-          <label className="setting-field">
-            <span>积分/元</span>
+            <span>参考积分/元</span>
             <input
               className="setting-input"
               type="number"

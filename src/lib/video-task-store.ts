@@ -16,6 +16,7 @@ import {
 import { hydrateSubtitleConfig } from "./subtitle-style-config";
 import { normalizeNullableMediaSourceInput } from "./media-source-input";
 import { buildDirectorPlanFromTaskData, buildShotPlanFromDirectorPlan } from "./video-task-director";
+import { hasGeneratedShotPlanArtifacts } from "./video-task-generation-state";
 import {
   computeVideoTaskStoryShotCount,
   deriveVideoTaskTitle,
@@ -185,16 +186,31 @@ export function patchVideoTask(
       ...updates.parameters?.constraints,
     },
   };
-  const nextDirectorPlan =
-    updates.directorPlan ??
-    buildDirectorPlanFromTaskData({
-      draftBundle: nextDraftBundle,
-      shotPlan: updates.shotPlan ?? currentRecord.shotPlan,
-      directorPlan: currentRecord.directorPlan,
-      parameters: nextParameters,
-      forceRebuild: Boolean(updates.draftBundle || updates.parameters || updates.shotPlan),
-    });
-  const nextShotPlan = updates.shotPlan ?? buildShotPlanFromDirectorPlan(nextDirectorPlan, currentRecord.shotPlan);
+  const hasShotPlanUpdate = Object.prototype.hasOwnProperty.call(updates, "shotPlan");
+  const hasDirectorPlanUpdate = Object.prototype.hasOwnProperty.call(updates, "directorPlan");
+  const requestedShotPlan = hasShotPlanUpdate ? (updates.shotPlan ?? null) : currentRecord.shotPlan;
+  const requestedDirectorPlan = hasDirectorPlanUpdate ? (updates.directorPlan ?? null) : currentRecord.directorPlan;
+  const shouldKeepGeneratedPlan = hasGeneratedShotPlanArtifacts({
+    status: nextStatus,
+    stageTimestamps: nextStageTimestamps,
+    draftBundle: nextDraftBundle,
+    shotPlan: requestedShotPlan,
+    directorPlan: requestedDirectorPlan,
+  });
+  const nextDirectorPlan = shouldKeepGeneratedPlan
+    ? (requestedDirectorPlan ??
+      buildDirectorPlanFromTaskData({
+        draftBundle: nextDraftBundle,
+        shotPlan: requestedShotPlan,
+        directorPlan: currentRecord.directorPlan,
+        parameters: nextParameters,
+        forceRebuild: Boolean(updates.draftBundle || updates.parameters || hasShotPlanUpdate),
+      }))
+    : null;
+  const nextShotPlan =
+    shouldKeepGeneratedPlan && nextDirectorPlan
+      ? (requestedShotPlan ?? buildShotPlanFromDirectorPlan(nextDirectorPlan, currentRecord.shotPlan))
+      : null;
 
   const nextRecord: VideoTaskRecord = {
     ...currentRecord,
@@ -333,13 +349,25 @@ function normalizeVideoTaskRecord(record: Partial<VideoTaskRecord>): VideoTaskRe
     imageToVideoPrompt: record.draftBundle?.imageToVideoPrompt ?? "",
     narrationScript: record.draftBundle?.narrationScript ?? "",
   };
-  const shotPlan = ((record as Record<string, unknown>).shotPlan as ShotPlan | null) ?? null;
-  const directorPlan = buildDirectorPlanFromTaskData({
+  const rawShotPlan = ((record as Record<string, unknown>).shotPlan as ShotPlan | null) ?? null;
+  const rawDirectorPlan = ((record as Record<string, unknown>).directorPlan as VideoTaskDirectorPlan | null) ?? null;
+  const shouldMaterializeGeneratedPlan = hasGeneratedShotPlanArtifacts({
+    status: record.status,
+    stageTimestamps: record.stageTimestamps,
     draftBundle,
-    shotPlan,
-    directorPlan: ((record as Record<string, unknown>).directorPlan as VideoTaskDirectorPlan | null) ?? null,
-    parameters,
+    shotPlan: rawShotPlan,
+    directorPlan: rawDirectorPlan,
   });
+  const directorPlan = shouldMaterializeGeneratedPlan
+    ? buildDirectorPlanFromTaskData({
+        draftBundle,
+        shotPlan: rawShotPlan,
+        directorPlan: rawDirectorPlan,
+        parameters,
+      })
+    : null;
+  const shotPlan =
+    shouldMaterializeGeneratedPlan && directorPlan ? (rawShotPlan ?? buildShotPlanFromDirectorPlan(directorPlan)) : null;
 
   return {
     taskId: record.taskId ?? crypto.randomUUID(),
@@ -348,7 +376,7 @@ function normalizeVideoTaskRecord(record: Partial<VideoTaskRecord>): VideoTaskRe
     status: normalizeVideoTaskStatus(record.status),
     source,
     draftBundle,
-    shotPlan: shotPlan ?? buildShotPlanFromDirectorPlan(directorPlan),
+    shotPlan,
     directorPlan,
     parameters,
     createdAt: record.createdAt ?? new Date().toISOString(),

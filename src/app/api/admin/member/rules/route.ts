@@ -9,7 +9,6 @@ import {
   updateMemberGrowthRulesForAdmin,
   updateMemberLevelsForAdmin,
   updateMemberSystemConfigForAdmin,
-  updatePointRulesForAdmin,
 } from "../../../../../lib/member-service";
 
 export const dynamic = "force-dynamic";
@@ -138,11 +137,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (body.action === "update_point_rules") {
-    if (!Array.isArray(body.pointRules) || body.pointRules.length === 0) {
-      return NextResponse.json({ error: "缺少积分规则", code: "POINT_RULES_REQUIRED" }, { status: 400 });
-    }
-    const rules = updatePointRulesForAdmin(body.pointRules, actor);
-    return NextResponse.json({ rules, dashboard: getMemberAdminDashboard() });
+    return NextResponse.json(
+      {
+        error: "旧积分规则已下线，商业积分规则请在「充值与套餐」与「用量与计费」中维护。",
+        code: "LEGACY_POINTS_DISABLED",
+      },
+      { status: 410 },
+    );
   }
 
   if (body.action === "update_benefit_maps") {

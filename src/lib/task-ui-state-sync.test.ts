@@ -52,6 +52,7 @@ test("mergeTaskStepActionState 在动作语义未变时会复用旧引用", () =
   const previous = {
     label: "生成视频",
     isRunning: false,
+    busyDisplay: "progress" as const,
     progressPercent: null,
     canRun: true,
     blockedReason: null,
@@ -61,6 +62,7 @@ test("mergeTaskStepActionState 在动作语义未变时会复用旧引用", () =
   const next = {
     label: "生成视频",
     isRunning: false,
+    busyDisplay: "progress" as const,
     progressPercent: null,
     canRun: true,
     blockedReason: null,
@@ -68,6 +70,31 @@ test("mergeTaskStepActionState 在动作语义未变时会复用旧引用", () =
   };
 
   assert.equal(mergeTaskStepActionState(previous, next), previous);
+});
+
+test("mergeTaskStepActionState 会识别状态加载和任务进度的展示语义变化", () => {
+  type TaskStepActionForMerge = Parameters<typeof mergeTaskStepActionState>[0];
+  const previous: TaskStepActionForMerge = {
+    label: "任务状态加载中...",
+    isRunning: true,
+    busyDisplay: "status",
+    progressPercent: null,
+    canRun: false,
+    blockedReason: null,
+    onAction: () => undefined,
+  };
+
+  const next: TaskStepActionForMerge = {
+    label: "任务状态加载中...",
+    isRunning: true,
+    busyDisplay: "progress",
+    progressPercent: 1,
+    canRun: false,
+    blockedReason: null,
+    onAction: () => undefined,
+  };
+
+  assert.equal(mergeTaskStepActionState(previous, next), next);
 });
 
 test("mergeNumericSummaryState 在数值汇总未变时会复用旧引用", () => {

@@ -9,6 +9,7 @@ import { extractVisualSubtitleLinesFromAnalysis } from "../../../lib/video-mater
 import { sortVideoMaterialsByUploadTimeDesc } from "../../../lib/video-material-sort";
 import type { ProcessingMode, VideoMaterialRecord, VideoMaterialSummary } from "../../../lib/video-material-types";
 import { PageBrandTitle } from "../../_components/page-brand-title";
+import { RouteLoadingShell } from "../../_components/route-loading-shell";
 import { useVideoTimecode } from "../../_components/use-video-timecode";
 import { ModuleStatusBadge, ModuleTitle } from "../../studio/task-creation/_components/task-ui";
 import { VideoMaterialImagePreviewModal } from "./_components/video-material-image-preview-modal";
@@ -303,9 +304,11 @@ function getMaterialVisualSubtitleLines(material: VideoMaterialRecord): string[]
 export default function VideoMaterialsPageClient({
   initialData,
   initialError = null,
+  deferInitialLoad = false,
 }: {
   initialData: VideoMaterialsPayload;
   initialError?: string | null;
+  deferInitialLoad?: boolean;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -318,11 +321,11 @@ export default function VideoMaterialsPageClient({
   const [selectedMaterialId, setSelectedMaterialId] = useState("");
   const [selectedMaterialDetail, setSelectedMaterialDetail] = useState<VideoMaterialRecord | null>(null);
   const [isSelectedMaterialLoading, setIsSelectedMaterialLoading] = useState(
-    () => (initialData.materials?.length ?? 0) > 0,
+    () => !deferInitialLoad && (initialData.materials?.length ?? 0) > 0,
   );
   const [selectedMaterialError, setSelectedMaterialError] = useState<string | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<"idle" | "loading" | "success" | "error">(() =>
-    initialError ? "error" : "success",
+    deferInitialLoad ? "loading" : initialError ? "error" : "success",
   );
   const [isUploading, setIsUploading] = useState(false);
   const [deletingMaterialId, setDeletingMaterialId] = useState("");
@@ -346,6 +349,52 @@ export default function VideoMaterialsPageClient({
   const selectedMaterialSummary =
     materials.find((material) => material.materialId === selectedMaterialId) ?? materials[0] ?? null;
   const requestedMaterialId = searchParams.get("materialId")?.trim() ?? "";
+
+  useEffect(() => {
+    if (!deferInitialLoad) {
+      return;
+    }
+
+    let isActive = true;
+    const controller = new AbortController();
+
+    async function loadMaterials() {
+      setLoadingStatus("loading");
+      setError(null);
+
+      try {
+        const response = await fetch("/api/video-materials", { cache: "no-store", signal: controller.signal });
+        const data = (await response.json().catch(() => ({}))) as VideoMaterialsPayload;
+        if (!response.ok) {
+          throw new Error(data.error ?? "视频拆解页面加载失败");
+        }
+        if (!isActive) {
+          return;
+        }
+        setMaterials(sortVideoMaterialsByUploadTimeDesc(data.materials ?? []));
+        if (data.runtime) {
+          setRuntime(data.runtime);
+        }
+        setLoadingStatus("success");
+      } catch (loadError) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!isActive) {
+          return;
+        }
+        setError(loadError instanceof Error ? loadError.message : "视频拆解页面加载失败");
+        setLoadingStatus("error");
+      }
+    }
+
+    void loadMaterials();
+
+    return () => {
+      isActive = false;
+      controller.abort();
+    };
+  }, [deferInitialLoad]);
 
   const selectedMaterial = useMemo(() => {
     if (!selectedMaterialSummary) {
@@ -785,13 +834,7 @@ export default function VideoMaterialsPageClient({
 
   if (loadingStatus === "loading" && !materials.length) {
     return (
-      <main className="shell">
-        <section className="content">
-          <section className="panel product-archive-panel">
-            <div className="product-archive-empty">视频拆解页面加载中...</div>
-          </section>
-        </section>
-      </main>
+      <RouteLoadingShell pageName="Video Breakdown" title="上传视频后" description="正在加载视频拆解记录和模式选择。" />
     );
   }
 

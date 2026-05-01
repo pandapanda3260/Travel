@@ -209,6 +209,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
         provider: submission.provider,
         modelId: submission.modelId,
         generationSettings,
+        commercialChargeFreezeId: submission.commercialChargeFreezeId ?? null,
+        commercialChargeStatus: submission.commercialChargeStatus ?? null,
       });
       upsertVideoJob(videoJob);
       scheduleVideoJobPolling(videoJob.jobId);

@@ -31,6 +31,30 @@ db.exec(`
   )
 `);
 
+const LEGACY_POINT_COLLECTIONS = ["points-rules", "user-points-accounts", "points-config"];
+
+/**
+ * 旧积分体系已下线：启动时清除遗留表和文档集合，避免旧数据被误读、误迁移或误恢复。
+ * 该清理只处理旧 points 命名空间，不触碰商业积分账本 commercial_*。
+ */
+export function purgeLegacyPointsStorage(): void {
+  db.transaction(() => {
+    const deleteLegacyCollection = db.prepare("DELETE FROM records WHERE collection = ?");
+    for (const collection of LEGACY_POINT_COLLECTIONS) {
+      deleteLegacyCollection.run(collection);
+    }
+
+    db.exec(`
+      DROP INDEX IF EXISTS idx_user_point_records_idempotent;
+      DROP INDEX IF EXISTS idx_user_point_records_user_created;
+      DROP INDEX IF EXISTS idx_user_point_records_user_status_expire;
+      DROP TABLE IF EXISTS user_point_records;
+    `);
+  })();
+}
+
+purgeLegacyPointsStorage();
+
 // ─── 集合级 CRUD ──────────────────────────────────────────────────────────────
 
 /**

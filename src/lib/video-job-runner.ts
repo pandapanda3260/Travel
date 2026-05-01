@@ -14,12 +14,67 @@ import { getVideoTask, patchVideoTask } from "./video-task-store";
 import { getVideoTaskStatusIndex } from "./video-task-schema";
 import { refreshProviderVideoJob } from "./video-provider";
 import { getProviderRuntime } from "./video-provider-config";
+import { confirmCommercialUsageCharge, releaseCommercialUsageCharge } from "./commercial-billing-gateway";
 
 const activePollers = new Map<string, NodeJS.Timeout>();
 const activeRefreshes = new Map<string, Promise<VideoJobRecord | null>>();
 
 function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error ?? "状态刷新失败");
+}
+
+function confirmCommercialChargeForCompletedJob(job: VideoJobRecord) {
+  if (!job.commercialChargeFreezeId || job.commercialChargeStatus !== "frozen") {
+    return job;
+  }
+
+  try {
+    const confirmed = confirmCommercialUsageCharge({
+      freezeId: job.commercialChargeFreezeId,
+      idempotencyKey: `commercial:video:confirm:${job.jobId}`,
+      provider: job.provider,
+      modelId: job.modelId,
+    });
+
+    return (
+      patchVideoJob(job.jobId, {
+        commercialChargeStatus: "confirmed",
+        logs: [...job.logs, `商业积分扣费已确认：${confirmed.transaction.changeCredits} 积分`],
+      }) ?? job
+    );
+  } catch (error) {
+    return (
+      patchVideoJob(job.jobId, {
+        logs: [...job.logs, `商业积分扣费确认失败：${toErrorMessage(error)}`],
+      }) ?? job
+    );
+  }
+}
+
+function releaseCommercialChargeForFailedJob(job: VideoJobRecord) {
+  if (!job.commercialChargeFreezeId || job.commercialChargeStatus !== "frozen") {
+    return job;
+  }
+
+  try {
+    releaseCommercialUsageCharge({
+      freezeId: job.commercialChargeFreezeId,
+      reason: "video_generation_failed",
+    });
+
+    return (
+      patchVideoJob(job.jobId, {
+        commercialChargeStatus: "released",
+        logs: [...job.logs, "视频生成失败，商业积分冻结已释放"],
+      }) ?? job
+    );
+  } catch (error) {
+    return (
+      patchVideoJob(job.jobId, {
+        logs: [...job.logs, `商业积分冻结释放失败：${toErrorMessage(error)}`],
+      }) ?? job
+    );
+  }
 }
 
 function stopPolling(jobId: string) {
@@ -38,11 +93,12 @@ function markPollingTimedOut(jobId: string, attempts: number, maxAttempts: numbe
   }
 
   const message = `视频生成后台轮询超时：已尝试 ${attempts}/${maxAttempts} 次，请重新生成该片段`;
-  return patchVideoJob(jobId, {
+  const failedJob = patchVideoJob(jobId, {
     status: "FAILED",
     error: message,
     logs: [...currentJob.logs, message],
   });
+  return failedJob ? releaseCommercialChargeForFailedJob(failedJob) : failedJob;
 }
 
 async function refreshLiveJobOnce(jobId: string) {
@@ -82,7 +138,10 @@ async function refreshLiveJobOnce(jobId: string) {
       /* 下载失败不阻断流程，合成时会重试远程 URL */
     }
 
+    patchedJob = confirmCommercialChargeForCompletedJob(patchedJob);
+
     if (patchedJob?.sourceTaskId) {
+      const completedSourceTaskId = patchedJob.sourceTaskId;
       if (patchedJob.videoUrl || patchedJob.remoteVideoUrl) {
         upsertMaterialLibraryItemBySource({
           type: "video",
@@ -100,10 +159,10 @@ async function refreshLiveJobOnce(jobId: string) {
         });
       }
 
-      const task = getVideoTask(patchedJob.sourceTaskId);
+      const task = getVideoTask(completedSourceTaskId);
       const clipCompletionState = task
         ? resolveTaskClipCompletionState({
-            shotDefinitions: parseTaskClipShots(task, getTaskClipNarrationResult(task.taskId)),
+            shotDefinitions: parseTaskClipShots(task, getTaskClipNarrationResult(task.taskId, task)),
             clipRecords: listTaskClipShots(task.taskId),
             jobs: listVideoJobs(),
           })
@@ -113,19 +172,19 @@ async function refreshLiveJobOnce(jobId: string) {
         clipCompletionState?.allCompleted &&
         getVideoTaskStatusIndex(task.status) < getVideoTaskStatusIndex("CLIPS_READY")
       ) {
-        patchVideoTask(patchedJob.sourceTaskId, {
+        patchVideoTask(completedSourceTaskId, {
           status: "CLIPS_READY",
         });
       }
 
       const isLipSyncStyle = patchedJob.strategy.style === "Kling lip-sync 口型同步";
       const isClipJob = patchedJob.generationSettings?.sourceImageUrl && !isLipSyncStyle;
-      const clipRecord = listTaskClipShots(patchedJob.sourceTaskId).find((r) => r.videoJobId === patchedJob!.jobId);
+      const clipRecord = listTaskClipShots(completedSourceTaskId).find((r) => r.videoJobId === patchedJob!.jobId);
 
       if (clipRecord) {
         writeAdminTaskStageRun({
-          runId: `clip:${patchedJob.sourceTaskId}:${clipRecord.shotIndex}:${clipRecord.generatedAt ?? job.submittedAt}`,
-          taskId: patchedJob.sourceTaskId,
+          runId: `clip:${completedSourceTaskId}:${clipRecord.shotIndex}:${clipRecord.generatedAt ?? job.submittedAt}`,
+          taskId: completedSourceTaskId,
           stageKey: "clip_generation",
           status: "COMPLETED",
           provider: patchedJob.provider ?? providerRuntime.providerLabel,
@@ -136,13 +195,13 @@ async function refreshLiveJobOnce(jobId: string) {
       }
 
       if (isLipSyncStyle) {
-        const lipSyncRecord = listTaskClipShots(patchedJob.sourceTaskId).find(
+        const lipSyncRecord = listTaskClipShots(completedSourceTaskId).find(
           (item) => item.lipSyncJobId === patchedJob!.jobId,
         );
         if (lipSyncRecord) {
           writeAdminTaskStageRun({
             runId: patchedJob.jobId,
-            taskId: patchedJob.sourceTaskId,
+            taskId: completedSourceTaskId,
             stageKey: "lip_sync",
             status: "COMPLETED",
             provider: patchedJob.provider ?? providerRuntime.providerLabel,
@@ -156,7 +215,7 @@ async function refreshLiveJobOnce(jobId: string) {
       if (isClipJob) {
         if (clipRecord && !clipRecord.lipSyncJobId) {
           try {
-            await triggerShotLipSync(patchedJob.sourceTaskId, clipRecord.shotIndex);
+            await triggerShotLipSync(completedSourceTaskId, clipRecord.shotIndex);
           } catch {
             /* 口型任务提交失败时保留无声片段，用户可重新生成该镜重试 */
           }
@@ -166,35 +225,38 @@ async function refreshLiveJobOnce(jobId: string) {
   }
 
   if (patchedJob?.status === "FAILED" && patchedJob.sourceTaskId) {
-    const clipRecord = listTaskClipShots(patchedJob.sourceTaskId).find((item) => item.videoJobId === patchedJob.jobId);
+    const failedSourceTaskId = patchedJob.sourceTaskId;
+    const failedJob = releaseCommercialChargeForFailedJob(patchedJob);
+    patchedJob = failedJob;
+    const clipRecord = listTaskClipShots(failedSourceTaskId).find((item) => item.videoJobId === failedJob.jobId);
     if (clipRecord) {
       writeAdminTaskStageRun({
-        runId: `clip:${patchedJob.sourceTaskId}:${clipRecord.shotIndex}:${clipRecord.generatedAt ?? job.submittedAt}`,
-        taskId: patchedJob.sourceTaskId,
+        runId: `clip:${failedSourceTaskId}:${clipRecord.shotIndex}:${clipRecord.generatedAt ?? job.submittedAt}`,
+        taskId: failedSourceTaskId,
         stageKey: "clip_generation",
         status: "FAILED",
-        provider: patchedJob.provider ?? providerRuntime.providerLabel,
-        modelId: patchedJob.modelId,
+        provider: failedJob.provider ?? providerRuntime.providerLabel,
+        modelId: failedJob.modelId,
         startedAt: clipRecord.generatedAt ?? job.submittedAt,
-        finishedAt: patchedJob.updatedAt,
-        errorMessage: patchedJob.error ?? "视频片段生成失败",
+        finishedAt: failedJob.updatedAt,
+        errorMessage: failedJob.error ?? "视频片段生成失败",
       });
     }
 
-    const lipSyncRecord = listTaskClipShots(patchedJob.sourceTaskId).find(
-      (item) => item.lipSyncJobId === patchedJob.jobId,
+    const lipSyncRecord = listTaskClipShots(failedSourceTaskId).find(
+      (item) => item.lipSyncJobId === failedJob.jobId,
     );
     if (lipSyncRecord) {
       writeAdminTaskStageRun({
-        runId: patchedJob.jobId,
-        taskId: patchedJob.sourceTaskId,
+        runId: failedJob.jobId,
+        taskId: failedSourceTaskId,
         stageKey: "lip_sync",
         status: "FAILED",
-        provider: patchedJob.provider ?? providerRuntime.providerLabel,
-        modelId: patchedJob.modelId,
+        provider: failedJob.provider ?? providerRuntime.providerLabel,
+        modelId: failedJob.modelId,
         startedAt: lipSyncRecord.updatedAt ?? job.submittedAt,
-        finishedAt: patchedJob.updatedAt,
-        errorMessage: patchedJob.error ?? "口型同步失败",
+        finishedAt: failedJob.updatedAt,
+        errorMessage: failedJob.error ?? "口型同步失败",
       });
     }
   }
@@ -313,6 +375,8 @@ export function createVideoJobRecord(input: {
   provider?: VideoJobRecord["provider"];
   modelId?: string | null;
   generationSettings?: VideoJobRecord["generationSettings"];
+  commercialChargeFreezeId?: string | null;
+  commercialChargeStatus?: VideoJobRecord["commercialChargeStatus"];
 }) {
   return {
     jobId: input.jobId,
@@ -333,6 +397,8 @@ export function createVideoJobRecord(input: {
     modelId: input.modelId ?? null,
     generationSettings: input.generationSettings ?? null,
     resolvedDurationSeconds: null,
+    commercialChargeFreezeId: input.commercialChargeFreezeId ?? null,
+    commercialChargeStatus: input.commercialChargeStatus ?? null,
     deletedAt: null,
   } satisfies VideoJobRecord;
 }

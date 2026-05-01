@@ -2,13 +2,38 @@
 
 import { ChevronRight } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useEffect, useOptimistic, useRef, useState } from "react";
+import { useCallback, useEffect, useOptimistic, useRef, useState } from "react";
 
 import type { SidebarUserSummary } from "./global-sidebar-config";
 
 const GlobalSidebarAccountPopover = dynamic(() =>
   import("./global-sidebar-account-popover").then((module) => module.GlobalSidebarAccountPopover),
 );
+
+type SidebarAccountDetails = Pick<SidebarUserSummary, "maskedPhone" | "activeSessionCount" | "availablePoints">;
+
+type SidebarAccountDetailsPayload = {
+  user?: Partial<SidebarAccountDetails>;
+  error?: string;
+};
+
+type SidebarAccountDetailsResult = {
+  userId: string;
+  details: SidebarAccountDetails;
+};
+
+type SidebarAccountDetailsLoadState = {
+  userId: string | null;
+  status: "idle" | "loading" | "success" | "error";
+};
+
+function pickSidebarAccountDetails(user: SidebarUserSummary): SidebarAccountDetails {
+  return {
+    maskedPhone: user.maskedPhone,
+    activeSessionCount: user.activeSessionCount,
+    availablePoints: user.availablePoints,
+  };
+}
 
 function buildAvatarText(user: SidebarUserSummary) {
   const nickname = user.nickname.trim();
@@ -32,11 +57,59 @@ function buildPlanLabel(user: SidebarUserSummary) {
 
 export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | null }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const activeUserIdRef = useRef<string | null>(user?.userId ?? null);
   const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [accountDetailsResult, setAccountDetailsResult] = useState<SidebarAccountDetailsResult | null>(null);
+  const [accountDetailsLoadState, setAccountDetailsLoadState] = useState<SidebarAccountDetailsLoadState>({
+    userId: null,
+    status: "idle",
+  });
   const [displayNickname, setDisplayNickname] = useOptimistic(
     user?.nickname ?? "",
     (_currentNickname, nextNickname: string) => nextNickname,
   );
+
+  activeUserIdRef.current = user?.userId ?? null;
+
+  const loadAccountDetails = useCallback(async () => {
+    if (!user) {
+      return;
+    }
+    if (
+      accountDetailsLoadState.userId === user.userId &&
+      (accountDetailsLoadState.status === "loading" || accountDetailsLoadState.status === "success")
+    ) {
+      return;
+    }
+
+    const requestUserId = user.userId;
+    setAccountDetailsLoadState({ userId: requestUserId, status: "loading" });
+
+    try {
+      const response = await fetch("/api/account/sidebar?details=1", { cache: "no-store" });
+      const data = (await response.json().catch(() => ({}))) as SidebarAccountDetailsPayload;
+      if (!response.ok) {
+        throw new Error(data.error ?? "账号概览同步失败");
+      }
+      if (activeUserIdRef.current !== requestUserId) {
+        return;
+      }
+      setAccountDetailsResult({
+        userId: requestUserId,
+        details: {
+          maskedPhone: data.user?.maskedPhone ?? null,
+          activeSessionCount: data.user?.activeSessionCount ?? 0,
+          availablePoints: data.user?.availablePoints ?? 0,
+        },
+      });
+      setAccountDetailsLoadState({ userId: requestUserId, status: "success" });
+    } catch {
+      if (activeUserIdRef.current !== requestUserId) {
+        return;
+      }
+      setAccountDetailsLoadState({ userId: requestUserId, status: "error" });
+    }
+  }, [accountDetailsLoadState.status, accountDetailsLoadState.userId, user]);
 
   useEffect(() => {
     if (!isPanelOpen) {
@@ -69,8 +142,11 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
 
   const displayUser = {
     ...user,
+    ...(accountDetailsResult?.userId === user.userId ? accountDetailsResult.details : pickSidebarAccountDetails(user)),
     nickname: displayNickname,
   };
+  const accountDetailsLoadStatus =
+    accountDetailsLoadState.userId === user.userId ? accountDetailsLoadState.status : "idle";
   const avatarText = buildAvatarText(displayUser);
   const planLabel = buildPlanLabel(displayUser);
 
@@ -79,7 +155,13 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
       <button
         type="button"
         className="sidebar-account-trigger"
-        onClick={() => setIsPanelOpen((current) => !current)}
+        onClick={() => {
+          const nextOpen = !isPanelOpen;
+          setIsPanelOpen(nextOpen);
+          if (nextOpen) {
+            void loadAccountDetails();
+          }
+        }}
         aria-expanded={isPanelOpen}
       >
         <span
@@ -103,6 +185,7 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
           user={displayUser}
           avatarText={avatarText}
           planLabel={planLabel}
+          accountDetailsLoadStatus={accountDetailsLoadStatus}
           onClose={() => setIsPanelOpen(false)}
           onNicknameUpdated={setDisplayNickname}
         />

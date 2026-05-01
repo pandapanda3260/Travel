@@ -216,7 +216,15 @@ db.exec(`
     key        TEXT NOT NULL,
     data       TEXT NOT NULL,
     PRIMARY KEY (collection, key)
-  )
+  );
+
+  DELETE FROM records
+  WHERE collection IN ('points-rules', 'user-points-accounts', 'points-config');
+
+  DROP INDEX IF EXISTS idx_user_point_records_idempotent;
+  DROP INDEX IF EXISTS idx_user_point_records_user_created;
+  DROP INDEX IF EXISTS idx_user_point_records_user_status_expire;
+  DROP TABLE IF EXISTS user_point_records;
 `);
 
 function listCollection(collection) {

@@ -74,8 +74,14 @@ export async function POST(request: NextRequest) {
     if (body.campaign.grantType === "growth" && !body.campaign.growthValue) {
       return NextResponse.json({ error: "请填写成长值", code: "CAMPAIGN_GRANT_REQUIRED" }, { status: 400 });
     }
-    if (body.campaign.grantType === "points" && !body.campaign.pointsValue) {
-      return NextResponse.json({ error: "请填写积分值", code: "CAMPAIGN_GRANT_REQUIRED" }, { status: 400 });
+    if (body.campaign.grantType === "points") {
+      return NextResponse.json(
+        {
+          error: "旧积分活动已下线，商业积分赠送请使用新商业积分账本。",
+          code: "LEGACY_POINTS_DISABLED",
+        },
+        { status: 410 },
+      );
     }
     if (body.campaign.grantType === "benefit" && (!body.campaign.benefitKey || !body.campaign.benefitValue)) {
       return NextResponse.json({ error: "请填写权益项和权益值", code: "CAMPAIGN_GRANT_REQUIRED" }, { status: 400 });
@@ -100,6 +106,16 @@ export async function POST(request: NextRequest) {
   if (body.action === "execute_campaign") {
     if (!body.campaignId?.trim()) {
       return NextResponse.json({ error: "缺少活动 ID", code: "CAMPAIGN_ID_REQUIRED" }, { status: 400 });
+    }
+    const campaign = listMemberCampaignsForAdmin().find((item) => item.campaignId === body.campaignId?.trim());
+    if (campaign?.grantType === "points") {
+      return NextResponse.json(
+        {
+          error: "旧积分活动已下线，不能继续执行积分发放。",
+          code: "LEGACY_POINTS_DISABLED",
+        },
+        { status: 410 },
+      );
     }
     const result = executeMemberCampaignForAdmin(body.campaignId.trim(), actor);
     if (!result) {

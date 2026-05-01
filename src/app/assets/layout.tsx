@@ -2,11 +2,6 @@ import type { ReactNode } from "react";
 
 import "./assets-shared.css";
 
-import { requireUserPageSession } from "../../lib/auth-session";
-
-export const dynamic = "force-dynamic";
-
-export default async function AssetsLayout({ children }: { children: ReactNode }) {
-  await requireUserPageSession();
+export default function AssetsLayout({ children }: { children: ReactNode }) {
   return children;
 }

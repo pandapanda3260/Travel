@@ -438,7 +438,7 @@ export function getDefaultModelBillingConfig(): ModelBillingConfigRecord {
     enforceSufficientBalance: false,
     minimumBalancePoints: 0,
     dailyUserPointLimit: null,
-    pointsPerRmb: 100,
+    pointsPerRmb: 108,
     usdToCnyRate: 7.2,
     createdAt: timestamp,
     updatedAt: timestamp,

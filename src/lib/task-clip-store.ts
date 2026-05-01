@@ -10,7 +10,9 @@ import { formatSecondValue } from "./duration-format";
 import { getFfmpegBinaryPath } from "./ffmpeg-runtime";
 import type { NarrationDraftClip } from "./narration";
 import { listNarrationResults, type NarrationResultRecord } from "./narration-result-store";
+import { isRealPhotoStructuralNarrationText } from "./real-photo-narration-source";
 import { ensureRuntimeDataDir, joinRuntimeDataPath, joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
+import { recoverNarrationResultTextFromTask } from "./task-narration-result-recovery";
 import { getTaskDirectorPlan } from "./video-task-director";
 import { listTaskVisualSelectedImages } from "./task-visual-image-store";
 import {
@@ -196,9 +198,15 @@ export function buildTaskClipGenerationPrompt(input: {
     duration: number;
   }>;
   narrationClip: NarrationDraftClip;
-  task: VideoTaskRecord;
+  task?: VideoTaskRecord | null;
 }) {
   const timelineText = buildWordTimelineText(input.narrationClip.words);
+  const videoParameters = input.task?.parameters.video;
+  const unifiedText =
+    input.narrationClip.fullSemanticSentence?.trim() ||
+    input.narrationClip.spokenText?.trim() ||
+    input.narrationClip.narrationText.trim() ||
+    input.narrationClip.subtitleText.trim();
 
   const clipConstraint = getEffectiveConstraintPrompt("clip_generation");
   const multiPromptSummary = (input.multiPrompt ?? [])
@@ -208,17 +216,16 @@ export function buildTaskClipGenerationPrompt(input: {
   return [
     `片段 ${input.shotIndex}（${input.segmentId}）生成要求：`,
     input.shotPrompt.trim(),
-    `口播台词：${input.narrationClip.narrationText}`,
-    `字幕文案：${input.narrationClip.subtitleText}`,
+    `配音与字幕唯一文本源：${unifiedText}`,
     `片段总时长：${input.narrationClip.durationSeconds} 秒。`,
     `片段模式：${input.segmentMode}。`,
     multiPromptSummary ? `片段内镜头分解：\n${multiPromptSummary}` : "",
     clipConstraint,
     timelineText ? `解说节奏参考：${timelineText}` : "解说节奏参考：按自然发声节奏均匀分配动作。",
-    `画面比例：${input.task.parameters.video.aspectRatio}。`,
-    `输出画质：${input.task.parameters.video.mode}。`,
-    `提示词相关性：${input.task.parameters.video.cfgScale}。`,
-    `运镜策略：${input.task.parameters.video.cameraControl}。`,
+    `画面比例：${videoParameters?.aspectRatio ?? "9:16"}。`,
+    `输出画质：${videoParameters?.mode ?? "std"}。`,
+    `提示词相关性：${videoParameters?.cfgScale ?? 0.5}。`,
+    `运镜策略：${videoParameters?.cameraControl ?? "auto"}。`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -263,10 +270,12 @@ export function buildSeedanceSegmentPrompt(input: {
     .join("\n");
 }
 
-export function getTaskClipNarrationResult(taskId: string) {
-  return listNarrationResults()
+export function getTaskClipNarrationResult(taskId: string, task?: VideoTaskRecord | null) {
+  const result =
+    listNarrationResults()
     .filter((item) => item.taskId === taskId)
-    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())[0] ?? null;
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())[0] ?? null;
+  return task ? recoverNarrationResultTextFromTask(task, result) : result;
 }
 
 export function parseTaskClipShots(task: VideoTaskRecord, narrationResult?: NarrationResultRecord | null) {
@@ -331,6 +340,25 @@ export function resolveTaskClipPayloadDurationSeconds(input: {
   );
 }
 
+export function resolveTaskClipPayloadText(input: {
+  recordText?: string | null;
+  recoveredText?: string | null;
+  structuralRecordText?: boolean;
+}) {
+  const recordText = input.recordText?.trim() ?? "";
+  const recoveredText = input.recoveredText?.trim() ?? "";
+
+  if (!recordText) {
+    return recoveredText;
+  }
+
+  if (recoveredText && input.structuralRecordText) {
+    return recoveredText;
+  }
+
+  return recordText;
+}
+
 export function listTaskClipShots(taskId?: string) {
   const records = taskId ? readStore().filter((record) => record.taskId === taskId) : readStore();
   return records.sort((left, right) => left.segmentIndex - right.segmentIndex);
@@ -374,7 +402,7 @@ export async function ensureTaskClipThumbnail(taskId: string, videoJobId: string
 }
 
 export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?: { readOnly?: boolean }) {
-  const narrationResult = getTaskClipNarrationResult(task.taskId);
+  const narrationResult = getTaskClipNarrationResult(task.taskId, task);
   const shotDefinitions = parseTaskClipShots(task, narrationResult);
   const clipRecords = listTaskClipShots(task.taskId);
   const jobMap = new Map(listVideoJobs().map((job) => [job.jobId, job]));
@@ -439,6 +467,29 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
           : resolvedRecord?.thumbnailUrl ?? null;
       const sourceShots =
         [...(sourceShotMap.get(definition.segmentId) ?? [])].sort((left, right) => left.shotIndex - right.shotIndex);
+      const payloadSubtitleText = resolveTaskClipPayloadText({
+        recordText: resolvedRecord?.subtitleText,
+        recoveredText: definition.narrationClip?.subtitleText || definition.narrationClip?.narrationText || "",
+        structuralRecordText: isRealPhotoStructuralNarrationText(
+          resolvedRecord?.subtitleText,
+          directorPlan.storyShots,
+          task.shotPlan,
+        ),
+      });
+      const payloadNarrationText = resolveTaskClipPayloadText({
+        recordText: resolvedRecord?.narrationText,
+        recoveredText: definition.narrationClip?.narrationText || definition.narrationClip?.subtitleText || "",
+        structuralRecordText: isRealPhotoStructuralNarrationText(
+          resolvedRecord?.narrationText,
+          directorPlan.storyShots,
+          task.shotPlan,
+        ),
+      });
+      const shouldUseRecoveredWordTimeline =
+        Boolean(definition.narrationClip?.words?.length) &&
+        (!resolvedRecord?.wordTimeline?.length ||
+          payloadSubtitleText !== (resolvedRecord?.subtitleText ?? "") ||
+          payloadNarrationText !== (resolvedRecord?.narrationText ?? ""));
 
       return {
         segmentId: definition.segmentId,
@@ -449,8 +500,8 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         requiresLipSync: definition.requiresLipSync,
         multiPrompt: definition.multiPrompt,
         videoPrompt: resolvedRecord?.videoPrompt ?? definition.videoPrompt,
-        subtitleText: resolvedRecord?.subtitleText ?? definition.narrationClip?.subtitleText ?? "",
-        narrationText: resolvedRecord?.narrationText ?? definition.narrationClip?.narrationText ?? "",
+        subtitleText: payloadSubtitleText,
+        narrationText: payloadNarrationText,
         durationSeconds: resolveTaskClipPayloadDurationSeconds({
           recordDurationSeconds: resolvedRecord?.durationSeconds,
           audioDurationSeconds: definition.narrationClip?.audioDurationSeconds,
@@ -459,7 +510,9 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         }),
         visualImageSessionId: resolvedRecord?.visualImageSessionId ?? null,
         visualImageUrl: resolvedRecord?.visualImageUrl ?? null,
-        wordTimeline: resolvedRecord?.wordTimeline ?? definition.narrationClip?.words ?? [],
+        wordTimeline: shouldUseRecoveredWordTimeline
+          ? definition.narrationClip?.words ?? []
+          : resolvedRecord?.wordTimeline ?? definition.narrationClip?.words ?? [],
         clipRecord: resolvedRecord ? { ...resolvedRecord, thumbnailUrl } : null,
         job: ensuredJob ?? null,
         lipSyncJob: ensuredLipSyncJob ?? null,

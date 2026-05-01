@@ -362,6 +362,7 @@ export type TaskStepActionState = {
   label: string;
   onAction: () => void;
   isRunning?: boolean;
+  busyDisplay?: "progress" | "status";
   progressPercent?: number | null;
   canRun?: boolean;
   blockedReason?: string | null;
@@ -402,11 +403,15 @@ export function TaskNextStepButton({
   const canRun = typeof state.canRun === "boolean" ? state.canRun : !state.blockedReason;
   const blockedReason = state.blockedReason?.trim() || "请先完善当前步骤后再继续。";
   const blocked = !running && !canRun;
+  const busyDisplay = running ? (state.busyDisplay ?? "progress") : "status";
   const progressPercent =
     typeof state.progressPercent === "number" && Number.isFinite(state.progressPercent)
       ? Math.max(0, Math.min(100, Math.round(state.progressPercent)))
       : null;
-  const buttonLabel = running && progressPercent !== null ? `${state.label} ${progressPercent}%` : state.label;
+  const displayProgressPercent =
+    running && busyDisplay === "progress" ? (progressPercent === null ? 1 : progressPercent) : null;
+  const buttonLabel =
+    running && displayProgressPercent !== null ? `${state.label} ${displayProgressPercent}%` : state.label;
 
   return (
     <button

@@ -5,6 +5,7 @@ type ComparableTaskStepActionState =
       label: string;
       onAction: () => void;
       isRunning?: boolean;
+      busyDisplay?: "progress" | "status";
       progressPercent?: number | null;
       canRun?: boolean;
       blockedReason?: string | null;
@@ -37,6 +38,7 @@ export function mergeTaskStepActionState<T extends ComparableTaskStepActionState
   if (
     current.label === next.label &&
     current.isRunning === next.isRunning &&
+    (current.busyDisplay ?? "progress") === (next.busyDisplay ?? "progress") &&
     (current.progressPercent ?? null) === (next.progressPercent ?? null) &&
     (current.canRun ?? true) === (next.canRun ?? true) &&
     (current.blockedReason ?? null) === (next.blockedReason ?? null)

@@ -1,7 +1,12 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { getImageGenerationRuntime, type ImageGenerationRuntime } from "./image-provider-config";
 import { createMockImageResults } from "./mock-aigc-assets";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
 
@@ -311,7 +316,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
   const sanitizedPrompt = sanitizeImagePromptForModeration(enhancedPrompt);
   const outputCount = Math.max(1, Math.min(10, input.outputCount ?? 4));
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-  assertModelUsagePreflight({
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "image.generate",
     estimatedMetrics: {
@@ -337,7 +342,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
 
   try {
     const results = await requestBatch(sanitizedPrompt);
-    recordModelUsage({
+    confirmCommercialModelUsageCharge(commercialCharge, {
       pricingKey,
       serviceName: "image.generate",
       provider: runtime.providerLabel,
@@ -352,6 +357,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
     return results;
   } catch (error) {
     if (!isSensitivePromptError(error)) {
+      releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
       throw error;
     }
 
@@ -359,7 +365,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
 
     try {
       const results = await requestBatch(saferPrompt);
-      recordModelUsage({
+      confirmCommercialModelUsageCharge(commercialCharge, {
         pricingKey,
         serviceName: "image.generate",
         provider: runtime.providerLabel,
@@ -374,8 +380,10 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
       return results;
     } catch (retryError) {
       if (!isSensitivePromptError(retryError)) {
+        releaseCommercialModelUsageCharge(commercialCharge, "provider_retry_failed");
         throw retryError;
       }
+      releaseCommercialModelUsageCharge(commercialCharge, "provider_safety_retry_failed");
       throw new Error(SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE);
     }
   }

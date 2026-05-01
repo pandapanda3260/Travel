@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { recordAdminDataEvent } from "../../../lib/admin-data-analytics";
 import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../lib/auth-session";
 import { grantGrowthForEvent } from "../../../lib/member-service";
-import { grantPointsForEvent } from "../../../lib/points-service";
 import { createVideoMaterial, listAccessibleVideoMaterialSummaries } from "../../../lib/video-material-store";
 import { getAsrRuntime } from "../../../lib/asr-provider-config";
 import { getTextGenerationRuntime } from "../../../lib/text-provider-config";
@@ -62,14 +61,6 @@ export async function POST(request: NextRequest) {
       },
     });
     grantGrowthForEvent({
-      userId: session.userId,
-      eventType: "video_material_create",
-      sourceType: "rule",
-      sourceBizId: material.materialId,
-      idempotentKey: `video_material_create:${material.materialId}`,
-      remark: "创建视频素材记录",
-    });
-    grantPointsForEvent({
       userId: session.userId,
       eventType: "video_material_create",
       sourceType: "rule",

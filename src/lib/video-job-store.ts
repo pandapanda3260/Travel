@@ -48,6 +48,8 @@ export type VideoJobRecord = {
   modelId: string | null;
   generationSettings: KlingGenerationSettings | null;
   resolvedDurationSeconds: number | null;
+  commercialChargeFreezeId?: string | null;
+  commercialChargeStatus?: "frozen" | "confirmed" | "released" | null;
   deletedAt: string | null;
 };
 
@@ -142,6 +144,13 @@ function normalizeJob(job: Partial<VideoJobRecord>): VideoJobRecord {
     modelId: job.modelId ?? null,
     generationSettings: job.generationSettings ?? null,
     resolvedDurationSeconds: job.resolvedDurationSeconds ?? null,
+    commercialChargeFreezeId: job.commercialChargeFreezeId ?? null,
+    commercialChargeStatus:
+      job.commercialChargeStatus === "frozen" ||
+      job.commercialChargeStatus === "confirmed" ||
+      job.commercialChargeStatus === "released"
+        ? job.commercialChargeStatus
+        : null,
     deletedAt: job.deletedAt ?? null,
   };
 }

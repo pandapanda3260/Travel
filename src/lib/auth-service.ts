@@ -69,7 +69,6 @@ import {
 } from "./member-service";
 import { recordAdminDataEvent } from "./admin-data-analytics";
 import { SESSION_EXPIRE_DAYS } from "./auth-route-config";
-import { ensureUserPointsAccount, grantPointsForEvent, transferPointsOnMerge } from "./points-service";
 import { sendTencentVerificationSms, TencentSmsProviderError } from "./tencent-sms-provider";
 
 export type RequestAuditContext = {
@@ -1122,7 +1121,6 @@ function createUser(params?: { nickname?: string; phone?: string | null }) {
   };
   upsertAuthUser(user);
   ensureMemberProfile(user.userId);
-  ensureUserPointsAccount(user.userId);
   return user;
 }
 
@@ -1197,28 +1195,8 @@ export function registerUserWithPassword(
       remark: "注册成功",
     });
   });
-  runAuthSideEffectSafely("register points grant", () => {
-    grantPointsForEvent({
-      userId: user.userId,
-      eventType: "register_success",
-      sourceType: "rule",
-      sourceBizId: user.userId,
-      idempotentKey: `register:${user.userId}`,
-      remark: "注册成功",
-    });
-  });
   runAuthSideEffectSafely("register daily login growth grant", () => {
     grantGrowthForEvent({
-      userId: user.userId,
-      eventType: "daily_login",
-      sourceType: "rule",
-      sourceBizId: session.sessionId,
-      idempotentKey: `daily_login:${user.userId}:${getUtcDateString()}`,
-      remark: "注册当日首次登录",
-    });
-  });
-  runAuthSideEffectSafely("register daily login points grant", () => {
-    grantPointsForEvent({
       userId: user.userId,
       eventType: "daily_login",
       sourceType: "rule",
@@ -1280,17 +1258,6 @@ export function loginUserWithPassword(
       remark: "每日首次登录",
     });
   });
-  runAuthSideEffectSafely("password login points grant", () => {
-    grantPointsForEvent({
-      userId: user.userId,
-      eventType: "daily_login",
-      sourceType: "rule",
-      sourceBizId: session.sessionId,
-      idempotentKey: `daily_login:${user.userId}:${getUtcDateString()}`,
-      remark: "每日首次登录",
-    });
-  });
-
   return {
     token: session.token,
     userId: user.userId,
@@ -1512,17 +1479,6 @@ export function resetPasswordWithSms(
       remark: "重置密码后登录",
     });
   });
-  runAuthSideEffectSafely("reset password login points grant", () => {
-    grantPointsForEvent({
-      userId: user.userId,
-      eventType: "daily_login",
-      sourceType: "rule",
-      sourceBizId: session.sessionId,
-      idempotentKey: `daily_login:${user.userId}:${getUtcDateString()}`,
-      remark: "重置密码后登录",
-    });
-  });
-
   return {
     token: session.token,
     userId: user.userId,
@@ -1579,17 +1535,6 @@ export function loginUserWithSms(input: { phone: string; code: string }, context
       remark: "每日首次登录",
     });
   });
-  runAuthSideEffectSafely("sms login points grant", () => {
-    grantPointsForEvent({
-      userId: user.userId,
-      eventType: "daily_login",
-      sourceType: "rule",
-      sourceBizId: session.sessionId,
-      idempotentKey: `daily_login:${user.userId}:${getUtcDateString()}`,
-      remark: "每日首次登录",
-    });
-  });
-
   return {
     token: session.token,
     userId: user.userId,
@@ -1969,7 +1914,6 @@ function mergeUsersInternal(sourceUserId: string, targetUserId: string) {
   });
   normalizeUserCredentialRecords(target.userId);
   transferMemberDataOnMerge(source.userId, target.userId);
-  transferPointsOnMerge(source.userId, target.userId);
 
   return {
     source: ensureUserExists(source.userId),

@@ -20,7 +20,9 @@ function buildNarrationClip(
     audioDurationSeconds: input.audioDurationSeconds ?? 4,
     characterFocus: input.characterFocus ?? "旁白",
     visualFocus: input.visualFocus ?? "",
+    fullSemanticSentence: input.fullSemanticSentence ?? null,
     narrationText: input.narrationText ?? input.id,
+    spokenText: input.spokenText ?? input.narrationText ?? input.id,
     subtitleText: input.subtitleText ?? input.narrationText ?? input.id,
     note: input.note ?? input.id,
     hasVoice: input.hasVoice ?? true,
@@ -169,4 +171,20 @@ test("buildSubtitleCuesFromNarrationClips 保留已展开的绝对时间轴", ()
 
   assert.equal(cues[0]?.startAtSeconds, 0);
   assert.equal(cues[1]?.startAtSeconds, 5.2);
+});
+
+test("buildSubtitleCuesFromNarrationClips 优先使用完整语义句而不是旧字幕摘要", () => {
+  const cues = buildSubtitleCuesFromNarrationClips([
+    buildNarrationClip({
+      id: "unified-text",
+      shotIndex: 1,
+      fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      narrationText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      spokenText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      subtitleText: "亲子度假首选",
+    }),
+  ]);
+
+  assert.equal(cues[0]?.text, "杭州这家全新开业亲子度假村真的太适合遛娃了");
+  assert.equal(cues[0]?.text.includes("亲子度假首选"), false);
 });

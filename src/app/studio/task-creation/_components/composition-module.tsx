@@ -463,6 +463,7 @@ export function CompositionModule({
     onPrimaryActionChange({
       label: primaryActionLabel,
       isRunning: compositionStageRunning || isInitialCompositionLoading,
+      busyDisplay: isInitialCompositionLoading ? "status" : "progress",
       progressPercent: primaryProgressPercent,
       canRun: !compositionBlockedReason,
       blockedReason: compositionBlockedReason,
@@ -613,7 +614,7 @@ export function CompositionModule({
                 title={compositionBlockedReason ?? undefined}
                 onClick={handlePrimaryAction}
               >
-                {compositionStageRunning ? primaryActionLabel : "重新合成视频"}
+                {primaryActionLabel}
               </button>
             </div>
             <div className="task-clip-detail-copy">

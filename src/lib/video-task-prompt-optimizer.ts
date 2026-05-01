@@ -1,5 +1,11 @@
 import { extractBestJsonObject } from "./llm-json";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 import { getDirectorPromptOptimizerRuntime } from "./director-video-generation-runtime";
 import {
   type VideoTaskExpectedDurationRange,
@@ -158,61 +164,71 @@ export async function optimizeTaskCreationUserPrompt(
   ].join("\n");
 
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-  assertModelUsagePreflight({
+  const estimatedMetrics = estimateTextModelUsageMetrics({
+    inputText: `${systemPrompt}\n${userContent}`,
+    maxOutputTokens: 1_800,
+  });
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "llm.chat",
+    estimatedMetrics,
   });
 
-  const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${runtime.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: runtime.modelId,
-      ...(supportsTemperatureOverride(runtime.modelId) ? { temperature: 0.2 } : {}),
-      max_completion_tokens: 1800,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-    }),
-  });
+  try {
+    const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${runtime.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: runtime.modelId,
+        ...(supportsTemperatureOverride(runtime.modelId) ? { temperature: 0.2 } : {}),
+        max_completion_tokens: 1800,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+      }),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { message?: string };
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      prompt_tokens_details?: {
-        cached_tokens?: number;
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        prompt_tokens_details?: {
+          cached_tokens?: number;
+        };
       };
     };
-  };
 
-  if (!response.ok) {
-    throw new Error(payload.error?.message ?? "优化提示词生成失败");
+    if (!response.ok) {
+      throw new Error(payload.error?.message ?? "优化提示词生成失败");
+    }
+
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "llm.chat",
+      provider: runtime.providerLabel,
+      modelId: runtime.modelId,
+      metrics: {
+        inputTokens: Number(payload.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+        outputTokens: Number(payload.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+        cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+      },
+      requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+      remark: "导演模式用户提示词优化",
+    });
+
+    return {
+      result: parseOptimizationResponse(payload.choices?.[0]?.message?.content ?? "", input),
+      usedFallback: false,
+      providerLabel: runtime.providerLabel,
+    };
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "llm.chat",
-    provider: runtime.providerLabel,
-    modelId: runtime.modelId,
-    metrics: {
-      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
-      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
-      cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-    },
-    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-    remark: "导演模式用户提示词优化",
-  });
-
-  return {
-    result: parseOptimizationResponse(payload.choices?.[0]?.message?.content ?? "", input),
-    usedFallback: false,
-    providerLabel: runtime.providerLabel,
-  };
 }

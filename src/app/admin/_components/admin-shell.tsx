@@ -51,7 +51,7 @@ const adminNavGroups = [
     items: [
       { label: "账号看板", href: "/admin/system-status" },
       { label: "用户管理", href: "/admin/users" },
-      { label: "会员管理", href: "/admin/membership" },
+      { label: "充值与套餐", href: "/admin/recharge" },
       { label: "绑定与合并", href: "/admin/members" },
       { label: "运营账号管理", href: "/admin/permissions" },
     ],
@@ -72,7 +72,7 @@ const adminPanelLinks = [
   { label: "导出中心", href: "/admin/data/exports", icon: Download },
   { label: "账号看板", href: "/admin/system-status", icon: LayoutGrid },
   { label: "用户管理", href: "/admin/users", icon: Users },
-  { label: "会员管理", href: "/admin/membership", icon: Activity },
+  { label: "充值与套餐", href: "/admin/recharge", icon: Activity },
   { label: "绑定与合并", href: "/admin/members", icon: Waves },
   { label: "运营账号管理", href: "/admin/permissions", icon: ShieldCheck },
 ];

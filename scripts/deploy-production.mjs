@@ -21,6 +21,7 @@ const identityFile = expandHome(
 );
 
 const allowDirty = args.has("--allow-dirty") || process.env.TRAVEL_DEPLOY_ALLOW_DIRTY === "1";
+const deployWorkingTree = args.has("--working-tree") || process.env.TRAVEL_DEPLOY_WORKING_TREE === "1";
 const skipBuild = args.has("--skip-build");
 const syncMedia = args.has("--sync-media");
 const dryRun = args.has("--dry-run");
@@ -50,6 +51,33 @@ const archiveExcludes = [
   ":(exclude)public/video-tasks",
 ];
 
+const workingTreeExcludes = [
+  ".git/",
+  ".next/",
+  "node_modules/",
+  "data/",
+  ".env",
+  ".env.*",
+  "*.env.local",
+  "*.db",
+  "*.bak",
+  ".dbg/",
+  ".playwright-mcp/",
+  "dist/",
+  "playwright-report/",
+  "test-results/",
+  "tsconfig.tsbuildinfo",
+  "public/generated-audio/",
+  "public/generated-compositions/",
+  "public/generated-final-videos/",
+  "public/generated-images/",
+  "public/generated-subtitles/",
+  "public/generated-videos/",
+  "public/product-archives/",
+  "public/video-materials/",
+  "public/video-tasks/",
+];
+
 function expandHome(value) {
   if (!value.startsWith("~/")) {
     return value;
@@ -66,11 +94,13 @@ function log(message) {
 }
 
 function run(command, commandArgs, options = {}) {
+  const stdio = options.input === undefined ? (options.stdio ?? "inherit") : ["pipe", "inherit", "inherit"];
   const result = spawnSync(command, commandArgs, {
     cwd: options.cwd ?? projectRoot,
     encoding: "utf8",
     env: process.env,
-    stdio: options.stdio ?? "inherit",
+    input: options.input,
+    stdio,
   });
 
   if (result.error) {
@@ -95,10 +125,15 @@ function remoteTarget() {
 }
 
 function runRemote(script) {
-  return run("ssh", [...sshBaseArgs(), remoteTarget(), "bash", "-lc", script]);
+  return run("ssh", [...sshBaseArgs(), remoteTarget(), "bash", "-se"], { input: script });
 }
 
 function ensureGitClean() {
+  if (deployWorkingTree) {
+    log("working tree deployment mode enabled; current local files will be synced with runtime/secret exclusions");
+    return;
+  }
+
   const status = output("git", ["status", "--porcelain=v1"]);
   if (!status) {
     return;
@@ -123,6 +158,7 @@ function printConfig() {
   log(`serviceName=${serviceName}`);
   log(`healthcheckUrl=${healthcheckUrl}`);
   log(`syncMedia=${syncMedia ? "yes" : "no"}`);
+  log(`deployWorkingTree=${deployWorkingTree ? "yes" : "no"}`);
 }
 
 function validateConfig() {
@@ -197,6 +233,33 @@ async function deployCodeArchive() {
   });
 }
 
+function deployCurrentWorkingTree() {
+  const remoteScript = [
+    "set -euo pipefail",
+    `mkdir -p ${shellQuote(remoteAppDir)}`,
+  ].join("\n");
+
+  runRemote(remoteScript);
+
+  const rsyncArgs = [
+    "-a",
+    "--delete",
+    "--delete-delay",
+    "--human-readable",
+    "-e",
+    `ssh ${sshBaseArgs().map(shellQuote).join(" ")}`,
+  ];
+
+  for (const pattern of workingTreeExcludes) {
+    rsyncArgs.push("--exclude", pattern);
+  }
+
+  rsyncArgs.push(`${projectRoot}/`, `${remoteTarget()}:${remoteAppDir}/`);
+
+  log("syncing current working tree to the server with runtime/secret exclusions");
+  run("rsync", rsyncArgs);
+}
+
 function syncRuntimeMedia() {
   log("syncing historical runtime media; this can be slow on overseas links");
   for (const dirName of runtimePublicDirs) {
@@ -248,7 +311,11 @@ async function main() {
   }
 
   ensureGitClean();
-  await deployCodeArchive();
+  if (deployWorkingTree) {
+    deployCurrentWorkingTree();
+  } else {
+    await deployCodeArchive();
+  }
   installAndRestartRemote();
 
   if (syncMedia) {

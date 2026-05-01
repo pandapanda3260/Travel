@@ -46,7 +46,7 @@ export async function triggerShotLipSync(taskId: string, shotIndex: number): Pro
       return null;
     }
 
-    const narrationResult = getTaskClipNarrationResult(taskId);
+    const narrationResult = getTaskClipNarrationResult(taskId, task);
     if (!narrationResult) return null;
 
     const clipRecord = getTaskClipShot(taskId, shotIndex);

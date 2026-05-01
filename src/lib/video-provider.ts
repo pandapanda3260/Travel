@@ -1,9 +1,11 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 import type { KlingGenerationSettings } from "./prompt";
 import type { VideoJobRecord } from "./video-job-store";
 import { loadOptionalEnvFile } from "./env-file";
 import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
+import { getModelUsageContext } from "./model-usage-context";
+import { prepareCommercialUsageCharge, releaseCommercialUsageCharge } from "./commercial-billing-gateway";
 import { getLipSyncProviderRuntime, getProviderRuntime, type LiveVideoProvider } from "./video-provider-config";
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
@@ -17,6 +19,8 @@ type SubmittedLiveVideoJob = {
   logs: string[];
   message: string;
   optimizedPrompt?: string;
+  commercialChargeFreezeId?: string | null;
+  commercialChargeStatus?: "frozen" | "confirmed" | "released" | null;
 };
 
 type RefreshedLiveVideoJob = Pick<VideoJobRecord, "status" | "logs" | "videoUrl" | "remoteVideoUrl" | "error">;
@@ -188,6 +192,52 @@ function buildProviderHttpError(response: Response, payload: unknown, fallbackMe
   return error;
 }
 
+function buildCommercialVideoChargeSeed(input: {
+  provider: string;
+  modelId: string;
+  durationSeconds: number;
+  prompt: string;
+  imageUrls?: string[];
+  videoUrls?: string[];
+}) {
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 24);
+}
+
+function prepareCommercialVideoChargeForCurrentContext(input: {
+  provider: string;
+  modelId: string;
+  durationSeconds: number;
+  prompt: string;
+  imageUrls?: string[];
+  videoUrls?: string[];
+}) {
+  const context = getModelUsageContext();
+  if (!context?.userId) {
+    return null;
+  }
+
+  const seed = buildCommercialVideoChargeSeed(input);
+  return prepareCommercialUsageCharge({
+    userId: context.userId,
+    taskId: context.objectId ?? context.requestId ?? seed,
+    featureCode: "video_generation",
+    durationSeconds: input.durationSeconds,
+    idempotencyKey: `commercial:video:freeze:${context.userId}:${context.objectType ?? "video"}:${context.objectId ?? "unknown"}:${seed}`,
+  });
+}
+
+function releaseCommercialVideoChargeOnSubmitFailure(freezeId: string | null | undefined, reason: string) {
+  if (!freezeId) {
+    return;
+  }
+
+  try {
+    releaseCommercialUsageCharge({ freezeId, reason });
+  } catch {
+    /* 原始 provider 错误更重要，释放失败会在账本巡检中处理。 */
+  }
+}
+
 async function fetchProviderJsonWithRetry<T>(
   input: Parameters<typeof fetchWithTimeout>[0],
   init: Parameters<typeof fetchWithTimeout>[1],
@@ -241,43 +291,64 @@ export async function submitLiveVideoJob(
     },
   });
 
-  const { response, payload } = await withRetry(async () => {
-    const res = await fetchWithTimeout(
-      `${getKlingApiBase()}/v1/videos/text2video`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${getKlingAuthorizationToken()}`,
-        },
-        body: JSON.stringify({
-          model_name: runtime.modelId,
-          prompt,
-          negative_prompt: generationSettings.negativePrompt,
-          cfg_scale: generationSettings.cfgScale,
-          mode: generationSettings.mode,
-          duration: String(generationSettings.durationSeconds),
-          aspect_ratio: generationSettings.aspectRatio,
-          ...(buildKlingCameraControl(generationSettings.cameraControl)
-            ? { camera_control: buildKlingCameraControl(generationSettings.cameraControl) }
-            : {}),
-          watermark: { enabled: generationSettings.watermark },
-          external_task_id: randomUUID(),
-        }),
-      },
-      {
-        timeoutMs: defaultModelRequestTimeoutMs,
-        timeoutMessage: "Kling 文生视频任务提交超时，请稍后重试",
-      },
-    );
-    const p = (await res.json().catch(() => ({}))) as {
-      code?: number | string;
-      message?: string;
-      data?: { task_id?: string; id?: string };
-    };
-    if (!res.ok) throw new Error(p.message ?? "Kling 文生视频任务提交失败");
-    return { response: res, payload: p };
+  const commercialCharge = prepareCommercialVideoChargeForCurrentContext({
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    durationSeconds: generationSettings.durationSeconds,
+    prompt,
   });
+
+  let response: Response;
+  let payload: {
+    code?: number | string;
+    message?: string;
+    data?: { task_id?: string; id?: string };
+  };
+
+  try {
+    const submitted = await withRetry(async () => {
+      const res = await fetchWithTimeout(
+        `${getKlingApiBase()}/v1/videos/text2video`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${getKlingAuthorizationToken()}`,
+          },
+          body: JSON.stringify({
+            model_name: runtime.modelId,
+            prompt,
+            negative_prompt: generationSettings.negativePrompt,
+            cfg_scale: generationSettings.cfgScale,
+            mode: generationSettings.mode,
+            duration: String(generationSettings.durationSeconds),
+            aspect_ratio: generationSettings.aspectRatio,
+            ...(buildKlingCameraControl(generationSettings.cameraControl)
+              ? { camera_control: buildKlingCameraControl(generationSettings.cameraControl) }
+              : {}),
+            watermark: { enabled: generationSettings.watermark },
+            external_task_id: randomUUID(),
+          }),
+        },
+        {
+          timeoutMs: defaultModelRequestTimeoutMs,
+          timeoutMessage: "Kling 文生视频任务提交超时，请稍后重试",
+        },
+      );
+      const p = (await res.json().catch(() => ({}))) as {
+        code?: number | string;
+        message?: string;
+        data?: { task_id?: string; id?: string };
+      };
+      if (!res.ok) throw new Error(p.message ?? "Kling 文生视频任务提交失败");
+      return { response: res, payload: p };
+    });
+    response = submitted.response;
+    payload = submitted.payload;
+  } catch (error) {
+    releaseCommercialVideoChargeOnSubmitFailure(commercialCharge?.freeze.freezeId, "provider_submit_failed");
+    throw error;
+  }
 
   void response;
 
@@ -305,6 +376,8 @@ export async function submitLiveVideoJob(
     modelId: runtime.modelId,
     logs: [`文生视频任务已提交：${taskId}`, `模型：${runtime.modelId}`, `模式：${generationSettings.mode}`],
     message: "Kling 文生视频任务已提交，正在生成中。",
+    commercialChargeFreezeId: commercialCharge?.freeze.freezeId ?? null,
+    commercialChargeStatus: commercialCharge ? "frozen" : null,
   };
 }
 
@@ -333,54 +406,73 @@ export async function submitLiveImageToVideoJob(
     },
   });
 
-  const payload = await withRetry(async () => {
-    const res = await fetchWithTimeout(
-      `${getKlingApiBase()}/v1/videos/image2video`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${getKlingAuthorizationToken()}`,
-        },
-        body: JSON.stringify({
-          model_name: runtime.modelId,
-          image: stripDataUrlPrefix(generationSettings.sourceImageBase64),
-          ...(generationSettings.multiShot ? { multi_shot: true, shot_type: generationSettings.shotType } : {}),
-          ...(!generationSettings.multiShot || generationSettings.shotType === "intelligence" ? { prompt } : {}),
-          ...(generationSettings.multiShot && generationSettings.shotType === "customize"
-            ? { multi_prompt: buildKlingMultiPrompt(generationSettings.multiPrompt) }
-            : {}),
-          ...(!generationSettings.multiShot && generationSettings.tailImageBase64
-            ? { image_tail: stripDataUrlPrefix(generationSettings.tailImageBase64) }
-            : {}),
-          negative_prompt: generationSettings.negativePrompt,
-          cfg_scale: generationSettings.cfgScale,
-          mode: generationSettings.mode,
-          sound: generationSettings.generateAudio ? "on" : "off",
-          duration: String(generationSettings.durationSeconds),
-          aspect_ratio: generationSettings.aspectRatio,
-          ...(!generationSettings.multiShot &&
-          !generationSettings.tailImageBase64 &&
-          buildKlingCameraControl(generationSettings.cameraControl)
-            ? { camera_control: buildKlingCameraControl(generationSettings.cameraControl) }
-            : {}),
-          watermark: { enabled: generationSettings.watermark },
-          external_task_id: randomUUID(),
-        }),
-      },
-      {
-        timeoutMs: defaultModelRequestTimeoutMs,
-        timeoutMessage: "Kling 图生视频任务提交超时，请稍后重试",
-      },
-    );
-    const p = (await res.json().catch(() => ({}))) as {
-      code?: number | string;
-      message?: string;
-      data?: { task_id?: string; id?: string };
-    };
-    if (!res.ok) throw new Error(p.message ?? "Kling 任务片段提交失败");
-    return p;
+  const commercialCharge = prepareCommercialVideoChargeForCurrentContext({
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    durationSeconds: generationSettings.durationSeconds,
+    prompt,
+    imageUrls: ["source-image", generationSettings.tailImageBase64 ? "tail-image" : ""].filter(Boolean),
   });
+
+  let payload: {
+    code?: number | string;
+    message?: string;
+    data?: { task_id?: string; id?: string };
+  };
+
+  try {
+    payload = await withRetry(async () => {
+      const res = await fetchWithTimeout(
+        `${getKlingApiBase()}/v1/videos/image2video`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${getKlingAuthorizationToken()}`,
+          },
+          body: JSON.stringify({
+            model_name: runtime.modelId,
+            image: stripDataUrlPrefix(generationSettings.sourceImageBase64),
+            ...(generationSettings.multiShot ? { multi_shot: true, shot_type: generationSettings.shotType } : {}),
+            ...(!generationSettings.multiShot || generationSettings.shotType === "intelligence" ? { prompt } : {}),
+            ...(generationSettings.multiShot && generationSettings.shotType === "customize"
+              ? { multi_prompt: buildKlingMultiPrompt(generationSettings.multiPrompt) }
+              : {}),
+            ...(!generationSettings.multiShot && generationSettings.tailImageBase64
+              ? { image_tail: stripDataUrlPrefix(generationSettings.tailImageBase64) }
+              : {}),
+            negative_prompt: generationSettings.negativePrompt,
+            cfg_scale: generationSettings.cfgScale,
+            mode: generationSettings.mode,
+            sound: generationSettings.generateAudio ? "on" : "off",
+            duration: String(generationSettings.durationSeconds),
+            aspect_ratio: generationSettings.aspectRatio,
+            ...(!generationSettings.multiShot &&
+            !generationSettings.tailImageBase64 &&
+            buildKlingCameraControl(generationSettings.cameraControl)
+              ? { camera_control: buildKlingCameraControl(generationSettings.cameraControl) }
+              : {}),
+            watermark: { enabled: generationSettings.watermark },
+            external_task_id: randomUUID(),
+          }),
+        },
+        {
+          timeoutMs: defaultModelRequestTimeoutMs,
+          timeoutMessage: "Kling 图生视频任务提交超时，请稍后重试",
+        },
+      );
+      const p = (await res.json().catch(() => ({}))) as {
+        code?: number | string;
+        message?: string;
+        data?: { task_id?: string; id?: string };
+      };
+      if (!res.ok) throw new Error(p.message ?? "Kling 任务片段提交失败");
+      return p;
+    });
+  } catch (error) {
+    releaseCommercialVideoChargeOnSubmitFailure(commercialCharge?.freeze.freezeId, "provider_submit_failed");
+    throw error;
+  }
 
   const taskId = payload.data?.task_id ?? payload.data?.id;
   if (!taskId) {
@@ -413,6 +505,8 @@ export async function submitLiveImageToVideoJob(
       `运镜：${generationSettings.cameraControl === "auto" ? "自动匹配" : generationSettings.cameraControl}`,
     ],
     message: "Kling 任务片段已提交，正在生成中。",
+    commercialChargeFreezeId: commercialCharge?.freeze.freezeId ?? null,
+    commercialChargeStatus: commercialCharge ? "frozen" : null,
   };
 }
 
@@ -940,6 +1034,15 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
     },
   });
 
+  const commercialCharge = prepareCommercialVideoChargeForCurrentContext({
+    provider: runtime.providerLabel,
+    modelId: runtime.modelId,
+    durationSeconds: input.durationSeconds,
+    prompt: input.prompt,
+    imageUrls: input.imageUrls,
+    videoUrls: input.videoUrls,
+  });
+
   const promptVariants = dedupeSeedancePromptVariants([
     input.prompt,
     sanitizeSeedancePromptForModeration(input.prompt),
@@ -951,29 +1054,8 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
     | { payload: { id?: string; data?: { task_id?: string } }; optimizedPrompt: string }
     | null = null;
 
-  for (const variant of promptVariants) {
-    try {
-      successfulSubmission = await submitSeedanceVideoJobOnce({
-        ...input,
-        prompt: variant,
-      });
-      break;
-    } catch (error) {
-      lastError = error;
-      if (!isSeedanceSensitivePromptError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  if (!successfulSubmission && isSeedanceSensitivePromptError(lastError)) {
-    const rewrittenPrompt = await rewriteSensitiveSeedancePrompt(input.prompt);
-    const retryCandidates = dedupeSeedancePromptVariants([rewrittenPrompt, sanitizeSeedancePromptForModeration(rewrittenPrompt, true)]);
-
-    for (const variant of retryCandidates) {
-      if (promptVariants.includes(variant)) {
-        continue;
-      }
+  try {
+    for (const variant of promptVariants) {
       try {
         successfulSubmission = await submitSeedanceVideoJobOnce({
           ...input,
@@ -987,10 +1069,36 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
         }
       }
     }
-  }
 
-  if (!successfulSubmission) {
-    throw lastError instanceof Error ? lastError : new Error("Seedance 任务提交失败");
+    if (!successfulSubmission && isSeedanceSensitivePromptError(lastError)) {
+      const rewrittenPrompt = await rewriteSensitiveSeedancePrompt(input.prompt);
+      const retryCandidates = dedupeSeedancePromptVariants([rewrittenPrompt, sanitizeSeedancePromptForModeration(rewrittenPrompt, true)]);
+
+      for (const variant of retryCandidates) {
+        if (promptVariants.includes(variant)) {
+          continue;
+        }
+        try {
+          successfulSubmission = await submitSeedanceVideoJobOnce({
+            ...input,
+            prompt: variant,
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!isSeedanceSensitivePromptError(error)) {
+            throw error;
+          }
+        }
+      }
+    }
+
+    if (!successfulSubmission) {
+      throw lastError instanceof Error ? lastError : new Error("Seedance 任务提交失败");
+    }
+  } catch (error) {
+    releaseCommercialVideoChargeOnSubmitFailure(commercialCharge?.freeze.freezeId, "provider_submit_failed");
+    throw error;
   }
 
   const { payload, optimizedPrompt } = successfulSubmission;
@@ -1028,6 +1136,8 @@ export async function submitSeedanceVideoJob(input: SeedanceGenerationInput): Pr
     ],
     message: "Seedance 2.0 任务已提交，正在生成中。",
     optimizedPrompt,
+    commercialChargeFreezeId: commercialCharge?.freeze.freezeId ?? null,
+    commercialChargeStatus: commercialCharge ? "frozen" : null,
   };
 }
 

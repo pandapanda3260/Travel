@@ -170,7 +170,7 @@ const phaseMeta: Record<
     defaultGoal: "按时间、地点或步骤交付可执行安排",
     durationRangeLabel: "中段",
     materialStrategy: "地点、体验和人物镜头按路线顺序推进",
-    narrationStrategy: "一天/一站一个小结论，字幕提炼地点和动作",
+    narrationStrategy: "一天/一站一个小结论，字幕沿用同一句完整口播",
   },
   atmosphere_memory: {
     title: "氛围记忆",
@@ -420,7 +420,7 @@ export function buildTaskStoryboardPlan(input: {
       "开篇 3 秒内有强画面或强利益点。",
       "交易型种草前 8 秒要讲清主体和机会，中段要有权益密度，结尾要有风险解除或行动引导。",
       "台词听起来像真人推荐，不像参数说明书。",
-      "字幕短句化，和口播含义一致但不必逐字相同。",
+      "字幕与口播/音频逐字一致；短句化只允许通过展示层换行实现，不允许摘要或改写。",
     ],
     warnings,
     generatedAt: new Date().toISOString(),

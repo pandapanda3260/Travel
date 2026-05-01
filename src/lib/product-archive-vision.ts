@@ -1,6 +1,12 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
 import { loadOptionalEnvFile, parseBoolean } from "./env-file";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 
 type ProductArchiveVisionRuntime = {
   liveEnabled: boolean;
@@ -181,81 +187,94 @@ export async function extractProductArchiveFromImageDataUrl(imageDataUrl: string
 
   const systemContent = getEffectiveConstraintPrompt("product_vision");
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-  assertModelUsagePreflight({
+  const promptText = prompt ?? "请识别这张商品图片中的文字和关键信息，并按指定 JSON 返回。";
+  const estimatedMetrics = estimateTextModelUsageMetrics({
+    inputText: `${systemContent}\n${promptText}`,
+    maxOutputTokens: 2_000,
+  });
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "vision.product_archive",
+    estimatedMetrics,
   });
 
-  const response = await fetch(`${normalizeApiBase(runtime.apiBase)}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${runtime.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: runtime.modelId,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: systemContent,
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: prompt ?? "请识别这张商品图片中的文字和关键信息，并按指定 JSON 返回。",
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: imageDataUrl,
+  try {
+    const response = await fetch(`${normalizeApiBase(runtime.apiBase)}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${runtime.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: runtime.modelId,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: systemContent,
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: promptText,
               },
-            },
-          ],
-        },
-      ],
-    }),
-  });
+              {
+                type: "image_url",
+                image_url: {
+                  url: imageDataUrl,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { message?: string };
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      prompt_tokens_details?: {
-        cached_tokens?: number;
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        prompt_tokens_details?: {
+          cached_tokens?: number;
+        };
       };
     };
-  };
 
-  if (!response.ok) {
-    throw new Error(payload.error?.message ?? "商品图片解析失败");
+    if (!response.ok) {
+      throw new Error(payload.error?.message ?? "商品图片解析失败");
+    }
+
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) {
+      releaseCommercialModelUsageCharge(commercialCharge, "empty_result");
+      return buildFallbackResult();
+    }
+
+    const parsedResult = parseResult(content);
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "vision.product_archive",
+      provider: runtime.providerLabel,
+      modelId: runtime.modelId,
+      metrics: {
+        inputTokens: Number(payload.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+        outputTokens: Number(payload.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+        cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+      },
+      requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+      remark: "商品档案图片解析",
+    });
+
+    return parsedResult;
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "vision.product_archive",
-    provider: runtime.providerLabel,
-    modelId: runtime.modelId,
-    metrics: {
-      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
-      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
-      cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-    },
-    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-    remark: "商品档案图片解析",
-  });
-
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) {
-    return buildFallbackResult();
-  }
-
-  return parseResult(content);
 }
 
 export async function extractProductArchiveFromImageChunks(chunks: VisionChunkInput[]) {

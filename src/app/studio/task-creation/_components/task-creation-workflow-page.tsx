@@ -3,9 +3,10 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { resolveNarrationClipWordTimestamps } from "../../../../lib/audio-alignment";
 import { PageBrandTitle } from "../../../_components/page-brand-title";
 import { formatDurationSecondsLabel, formatTimelineSecondLabel } from "../../../../lib/duration-format";
-import { estimateNarrationReadingSeconds } from "../../../../lib/narration";
+import { estimateNarrationReadingSeconds, type AudioAlignment } from "../../../../lib/narration";
 import {
   countSubtitlePlanTextEntries,
   getSegmentSubtitleEntry,
@@ -16,12 +17,16 @@ import {
   normalizeSubtitleDisplayCues,
   type SubtitleDisplayCueInput,
 } from "../../../../lib/subtitle-display";
+import { resolveNarrationClipFullSemanticText } from "../../../../lib/subtitle-text-contract";
 import {
   applyParameterSettingsToTaskCreationState,
   getDefaultParameterSettingsState,
   readParameterSettingsState,
 } from "../../../../lib/parameter-settings";
 import {
+  resolveTaskSelectionAfterIndexReady,
+  shouldAllowHotelAssetInputTaskEnsure,
+  shouldDeferTaskIdUrlSync,
   shouldResumeTaskCreationDraft,
   shouldSyncTaskSelectionFromUrl,
 } from "../../../../lib/task-creation-navigation";
@@ -53,16 +58,11 @@ import {
 } from "../../../../lib/task-creation-parameters";
 import { ModuleStatusBadge, ModuleTitle, TaskNextStepButton, type TaskStepActionState } from "./task-ui";
 import {
-  PipelineFlow,
   type ClipPipelineSummary,
   type PipelineMetricItem,
   type PipelineStageRuntime,
   type VisualPipelineSummary,
 } from "./pipeline-flow";
-import { GenerationTasksPanel } from "./generation-tasks-panel";
-import { CompositionSettingsPanel } from "./composition-settings-panel";
-import { HotelAssetPanel } from "./hotel-asset-panel";
-import { SubtitlePreviewPanel } from "./subtitle-preview-panel";
 import { useTaskCreationIndexData } from "./task-creation-index-provider";
 import { useStreamProgress } from "./use-stream-progress";
 import { resolveTaskVoiceOptionLabel } from "../../../../lib/speaker-display-overrides";
@@ -105,6 +105,7 @@ import {
   type TaskCreationWorkflowMode,
 } from "../../../../lib/task-creation-workflow-mode";
 import { replaceGeneratedVideoRecord } from "../../../../lib/task-generated-video-state";
+import { hasGeneratedShotPlanArtifacts } from "../../../../lib/video-task-generation-state";
 import {
   mergeNumericSummaryState,
   mergeStructuredState,
@@ -117,6 +118,29 @@ import type { TaskCreationVoiceOption } from "../../../../lib/task-creation-voic
 const VisualImageModule = dynamic(() => import("./visual-image-module").then((module) => module.VisualImageModule), {
   loading: () => <div className="task-module-empty">视觉图片模块加载中…</div>,
 });
+
+const GenerationTasksPanel = dynamic(
+  () => import("./generation-tasks-panel").then((module) => module.GenerationTasksPanel),
+  { loading: () => <div className="task-module-empty">任务列表加载中…</div> },
+);
+
+const PipelineFlow = dynamic(() => import("./pipeline-flow").then((module) => module.PipelineFlow), {
+  loading: () => <div className="task-module-empty">工作流进度加载中…</div>,
+});
+
+const HotelAssetPanel = dynamic(() => import("./hotel-asset-panel").then((module) => module.HotelAssetPanel), {
+  loading: () => <div className="task-module-empty">素材上传面板加载中…</div>,
+});
+
+const CompositionSettingsPanel = dynamic(
+  () => import("./composition-settings-panel").then((module) => module.CompositionSettingsPanel),
+  { loading: () => <div className="task-module-empty">字幕与背景音设置加载中…</div> },
+);
+
+const SubtitlePreviewPanel = dynamic(
+  () => import("./subtitle-preview-panel").then((module) => module.SubtitlePreviewPanel),
+  { loading: () => <div className="task-module-empty">字幕预览加载中…</div> },
+);
 
 const ClipGenerationModule = dynamic(
   () => import("./clip-generation-module").then((module) => module.ClipGenerationModule),
@@ -146,12 +170,17 @@ type TaskSubtitleAudioResult = {
     startAtSeconds: number;
     durationSeconds: number;
     characterFocus: string;
+    fullSemanticSentence?: string | null;
     subtitleText: string;
     narrationText: string;
+    spokenText?: string | null;
+    hasVoice?: boolean;
+    hasSubtitle?: boolean;
     voiceId?: string | null;
     audioUrl?: string | null;
     audioDurationSeconds?: number | null;
     words?: TimedWord[];
+    audioAlignment?: AudioAlignment | null;
     subtitleDisplayCues?: SubtitleDisplayCueInput[] | null;
   }>;
 };
@@ -335,7 +364,7 @@ function getTaskCreateDraftStorageKey(mode: TaskCreationWorkflowMode | null | un
 }
 
 function getSubtitleAudioClipLineText(clip: TaskSubtitleAudioResult["clips"][number]) {
-  return clip.narrationText || clip.subtitleText || "";
+  return resolveNarrationClipFullSemanticText(clip);
 }
 
 function normalizeSubtitleAudioEditText(text: string) {
@@ -396,7 +425,7 @@ function buildSubtitleAudioDisplayUnits(
   return buildSubtitleDisplayUnits({
     text: lineText,
     durationSeconds: clip.audioDurationSeconds ?? clip.durationSeconds,
-    words: clip.words ?? [],
+    words: resolveNarrationClipWordTimestamps(clip),
     maxCharsPerLine: subtitleConfig.maxCharsPerLine,
     displayMode: subtitleConfig.displayMode,
     trimEstimatedTail: true,
@@ -608,6 +637,31 @@ function mapTaskVoiceOptions(rawVoiceOptions: TaskCreationVoiceOption[]) {
   }));
 }
 
+function scheduleAfterInitialPaint(callback: () => void) {
+  if (typeof window === "undefined") {
+    callback();
+    return () => undefined;
+  }
+
+  const browserWindow = window as Window &
+    typeof globalThis & {
+      requestIdleCallback?: (handler: IdleRequestCallback, options?: IdleRequestOptions) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+
+  if (browserWindow.requestIdleCallback) {
+    const idleHandle = browserWindow.requestIdleCallback(callback, { timeout: 900 });
+    return () => {
+      browserWindow.cancelIdleCallback?.(idleHandle);
+    };
+  }
+
+  const timeoutHandle = globalThis.setTimeout(callback, 120);
+  return () => {
+    globalThis.clearTimeout(timeoutHandle);
+  };
+}
+
 function getStoryboardVoiceSlotCount(input: { selectedTask: VideoTaskRecord | null; fallbackSegmentCount: number }) {
   if (!input.selectedTask) {
     return Math.max(1, input.fallbackSegmentCount);
@@ -687,7 +741,12 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   const [referenceVideoMaterialOptions, setReferenceVideoMaterialOptions] = useState<
     TaskCreationIndexPayload["referenceVideoMaterialOptions"]
   >(() => initialIndexData?.referenceVideoMaterialOptions ?? []);
-  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+    return new URLSearchParams(window.location.search).get("taskId") ?? "";
+  });
   const [isNewTaskDraftMode, setIsNewTaskDraftMode] = useState(false);
   const [createTaskTitle, setCreateTaskTitle] = useState("");
   const [createSelectedProductId, setCreateSelectedProductId] = useState("");
@@ -782,6 +841,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   const voiceValidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceFailCountRef = useRef<{ count: number; firstFailAt: number }>({ count: 0, firstFailAt: 0 });
   const [lastCreatedDraftKey, setLastCreatedDraftKey] = useState("");
+  const [lastSelectedTaskId, setLastSelectedTaskId] = useState("");
   const [isDraftHydrated, setIsDraftHydrated] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const createStreamProgress = useStreamProgress();
@@ -842,19 +902,21 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   const videoGenerationClipKickoffRef = useRef("");
   const createInputDraftTaskInFlightRef = useRef<Promise<VideoTaskRecord | null> | null>(null);
   const ensureHotelAssetInputTaskInFlightRef = useRef<Promise<string | null> | null>(null);
+  const explicitNewTaskDraftModeRef = useRef(false);
   const latestTaskDraftAutosaveRef = useRef<TaskDraftAutosaveSnapshot | null>(null);
   const visibleTasks = useMemo(
     () => (workflowMode ? tasks.filter((task) => taskMatchesCreationWorkflowMode(task, workflowMode)) : tasks),
     [tasks, workflowMode],
   );
-  const visibleTaskIds = useMemo(() => new Set(visibleTasks.map((task) => task.taskId)), [visibleTasks]);
+  const visibleTaskIdList = useMemo(() => visibleTasks.map((task) => task.taskId), [visibleTasks]);
+  const visibleTaskIds = useMemo(() => new Set(visibleTaskIdList), [visibleTaskIdList]);
   const visibleGeneratedVideos = useMemo(
     () => (workflowMode ? generatedVideos.filter((item) => visibleTaskIds.has(item.taskId)) : generatedVideos),
     [generatedVideos, visibleTaskIds, workflowMode],
   );
   const selectedTask = isNewTaskDraftMode
     ? null
-    : (visibleTasks.find((task) => task.taskId === selectedTaskId) ?? visibleTasks[0] ?? null);
+    : (visibleTasks.find((task) => task.taskId === selectedTaskId) ?? null);
   const selectedProductOption = productOptions.find((item) => item.id === createSelectedProductId) ?? null;
   const selectedReferenceVideoMaterialOption =
     referenceVideoMaterialOptions.find((item) => item.materialId === createVideoMaterialId) ?? null;
@@ -1115,8 +1177,8 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       setGeneratedVideos(initialIndexData.generatedVideos ?? []);
       setProductOptions(initialIndexData.productOptions ?? []);
       setReferenceVideoMaterialOptions(initialIndexData.referenceVideoMaterialOptions ?? []);
+      setIsTaskIndexReady(true);
     });
-    setIsTaskIndexReady(true);
   }, [initialIndexData]);
 
   useEffect(() => {
@@ -1143,10 +1205,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
     };
 
-    void run();
+    const cancelDeferredRun = scheduleAfterInitialPaint(() => {
+      void run();
+    });
 
     return () => {
       isActive = false;
+      cancelDeferredRun();
     };
   }, [handleSelectedTaskStageProgressChange, loadSelectedTaskStageProgress]);
 
@@ -1166,10 +1231,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
     };
 
-    void run();
+    const cancelDeferredRun = scheduleAfterInitialPaint(() => {
+      void run();
+    });
 
     return () => {
       isActive = false;
+      cancelDeferredRun();
     };
   }, [handleKeyMaterialWorkflowChange, loadKeyMaterialWorkflow]);
 
@@ -1304,12 +1372,14 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       setConstraintPreset(nextDraft.constraintPreset);
       setConstraintCustomRules(nextDraft.constraintCustomRules);
       setLastCreatedDraftKey(nextDraft.lastCreatedDraftKey);
+      setLastSelectedTaskId(nextDraft.lastSelectedTaskId);
     },
     [workflowMode],
   );
 
   const resetTaskCreationDraft = useCallback(() => {
     const defaults = applyParameterSettingsToTaskCreationState(defaultTaskCreationState, systemParameterSettings);
+    explicitNewTaskDraftModeRef.current = true;
     setIsNewTaskDraftMode(true);
     setSelectedTaskId("");
     setSelectedTaskStageProgress({});
@@ -1385,8 +1455,10 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
       const createdTask = data.task;
       setTasks((current) => upsertTaskRecord(current, createdTask));
+      explicitNewTaskDraftModeRef.current = false;
       setIsNewTaskDraftMode(false);
       setSelectedTaskId(createdTask.taskId);
+      setLastSelectedTaskId(createdTask.taskId);
       setMergeTaskSourceFromSelectedTask(true);
       setLastCreatedDraftKey(buildTaskCreationDraftKeyFromTask(createdTask));
       setSubtitleAudioResult(null);
@@ -1571,6 +1643,38 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     if (!usesCapturedMaterialFirstWorkflow(videoType)) {
       return null;
     }
+    const taskIdFromUrl =
+      typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("taskId");
+    const recoverableTaskId =
+      taskIdFromUrl && visibleTaskIdList.includes(taskIdFromUrl)
+        ? taskIdFromUrl
+        : lastSelectedTaskId && visibleTaskIdList.includes(lastSelectedTaskId)
+          ? lastSelectedTaskId
+          : "";
+    if (
+      !shouldAllowHotelAssetInputTaskEnsure({
+        isDraftHydrated,
+        isTaskIndexReady,
+        isNewTaskDraftMode,
+        isExplicitNewTaskDraftMode: explicitNewTaskDraftModeRef.current,
+        taskIdFromUrl,
+        taskIds: visibleTaskIdList,
+        selectedTaskId,
+        lastSelectedTaskId,
+      })
+    ) {
+      if (recoverableTaskId) {
+        setIsNewTaskDraftMode(false);
+        explicitNewTaskDraftModeRef.current = false;
+        setSelectedTaskId(recoverableTaskId);
+        setLastSelectedTaskId(recoverableTaskId);
+      }
+      throw new Error(
+        recoverableTaskId
+          ? "任务状态正在恢复，请稍后再上传酒店实拍图"
+          : "任务状态未恢复，请刷新或重新选择任务后再上传酒店实拍图",
+      );
+    }
     if (ensureHotelAssetInputTaskInFlightRef.current) {
       return ensureHotelAssetInputTaskInFlightRef.current;
     }
@@ -1603,8 +1707,10 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
 
       setTasks((current) => upsertTaskRecord(current, data.task!));
+      explicitNewTaskDraftModeRef.current = false;
       setIsNewTaskDraftMode(false);
       setSelectedTaskId(data.task.taskId);
+      setLastSelectedTaskId(data.task.taskId);
       setMergeTaskSourceFromSelectedTask(true);
       setLastCreatedDraftKey(buildTaskCreationDraftKeyFromTask(data.task));
       setSubtitleAudioResult(null);
@@ -1637,8 +1743,14 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     constraintPreset,
     currentParameterPayload,
     currentTaskSourcePayload,
+    isDraftHydrated,
+    isNewTaskDraftMode,
+    isTaskIndexReady,
+    lastSelectedTaskId,
     loadTaskShellSnapshot,
     selectedTask?.taskId,
+    selectedTaskId,
+    visibleTaskIdList,
     videoType,
   ]);
 
@@ -1648,10 +1760,14 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     }
 
     let isActive = true;
+    const controller = new AbortController();
 
     const loadPageData = async () => {
       try {
-        const response = await fetch("/api/video-tasks?includeVoiceOptions=0", { cache: "no-store" });
+        const response = await fetch("/api/video-tasks?includeVoiceOptions=0&resumePendingVideoJobs=0", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         const data = (await response.json()) as TaskCreationIndexPayload & { error?: string };
 
         if (!response.ok) {
@@ -1667,9 +1783,12 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
           setGeneratedVideos(data.generatedVideos ?? []);
           setProductOptions(data.productOptions ?? []);
           setReferenceVideoMaterialOptions(data.referenceVideoMaterialOptions ?? []);
+          setIsTaskIndexReady(true);
         });
-        setIsTaskIndexReady(true);
       } catch (loadError) {
+        if (controller.signal.aborted) {
+          return;
+        }
         if (!isActive) {
           return;
         }
@@ -1681,6 +1800,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
     return () => {
       isActive = false;
+      controller.abort();
     };
   }, [initialIndexData, pageLoadErrorMessage]);
 
@@ -1905,6 +2025,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
         constraintPreset,
         constraintCustomRules,
         lastCreatedDraftKey,
+        lastSelectedTaskId,
       }),
     );
   }, [
@@ -1934,6 +2055,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     imageWatermark,
     isDraftHydrated,
     lastCreatedDraftKey,
+    lastSelectedTaskId,
     taskCreateDraftStorageKey,
     videoAspectRatio,
     videoCameraControl,
@@ -1988,10 +2110,12 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       return;
     }
 
+    explicitNewTaskDraftModeRef.current = false;
     setVisualPrimaryAction(null);
     setClipPrimaryAction(null);
     setCompositionPrimaryAction(null);
 
+    setLastSelectedTaskId(selectedTask.taskId);
     setMergeTaskSourceFromSelectedTask(true);
     setLastCreatedDraftKey(buildTaskCreationDraftKeyFromTask(selectedTask));
     lastPersistedTaskSourceDraftKeyRef.current = buildTaskSourceDraftKey({
@@ -2228,18 +2352,22 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     if (
       !shouldSyncTaskSelectionFromUrl({
         taskIdFromUrl,
-        taskIds: visibleTasks.map((task) => task.taskId),
+        taskIds: visibleTaskIdList,
         selectedTaskId,
         isNewTaskDraftMode,
+        isExplicitNewTaskDraftMode: explicitNewTaskDraftModeRef.current,
       })
     ) {
       return;
     }
 
     if (taskIdFromUrl) {
+      explicitNewTaskDraftModeRef.current = false;
+      setIsNewTaskDraftMode(false);
       setSelectedTaskId(taskIdFromUrl);
+      setLastSelectedTaskId(taskIdFromUrl);
     }
-  }, [isNewTaskDraftMode, selectedTaskId, visibleTasks]);
+  }, [isNewTaskDraftMode, selectedTaskId, visibleTaskIdList, visibleTasks.length]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2248,6 +2376,20 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
     const currentUrl = new URL(window.location.href);
     const currentTaskIdInUrl = currentUrl.searchParams.get("taskId");
+    if (
+      shouldDeferTaskIdUrlSync({
+        isDraftHydrated,
+        isTaskIndexReady,
+        isNewTaskDraftMode,
+        isExplicitNewTaskDraftMode: explicitNewTaskDraftModeRef.current,
+        taskIdFromUrl: currentTaskIdInUrl,
+        taskIds: visibleTaskIdList,
+        selectedTaskId,
+      })
+    ) {
+      return;
+    }
+
     const nextTaskId = isNewTaskDraftMode ? "" : (selectedTask?.taskId ?? "");
 
     if (!nextTaskId) {
@@ -2265,7 +2407,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
     currentUrl.searchParams.set("taskId", nextTaskId);
     window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-  }, [isNewTaskDraftMode, selectedTask?.taskId]);
+  }, [isDraftHydrated, isNewTaskDraftMode, isTaskIndexReady, selectedTask?.taskId, selectedTaskId, visibleTaskIdList]);
 
   const videoTotalDurationSeconds =
     videoTypeProfile.defaultSegmentMode === "hybrid_intro_plus_montage"
@@ -2423,12 +2565,18 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       return;
     }
 
-    if (isNewTaskDraftMode) {
+    if (isNewTaskDraftMode && explicitNewTaskDraftModeRef.current) {
       setSelectedTaskId("");
       return;
     }
 
+    const taskIdFromUrl =
+      typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("taskId");
+
     if (!visibleTasks.length) {
+      if (taskIdFromUrl) {
+        return;
+      }
       setSelectedTaskId("");
       return;
     }
@@ -2443,20 +2591,43 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
         lastCreatedDraftKey,
       })
     ) {
+      explicitNewTaskDraftModeRef.current = false;
       setIsNewTaskDraftMode(true);
       setSelectedTaskId("");
       return;
     }
 
-    setSelectedTaskId((current) =>
-      current && visibleTasks.some((task) => task.taskId === current) ? current : visibleTasks[0].taskId,
-    );
-  }, [currentDraftKey, hasAnyCreateInput, isDraftHydrated, isNewTaskDraftMode, lastCreatedDraftKey, visibleTasks]);
+    const resolvedTaskId = resolveTaskSelectionAfterIndexReady({
+      taskIdFromUrl,
+      taskIds: visibleTaskIdList,
+      selectedTaskId,
+      isNewTaskDraftMode,
+      isExplicitNewTaskDraftMode: explicitNewTaskDraftModeRef.current,
+      lastSelectedTaskId,
+    });
+
+    if (resolvedTaskId) {
+      explicitNewTaskDraftModeRef.current = false;
+      setIsNewTaskDraftMode(false);
+    }
+    setSelectedTaskId((current) => (current === resolvedTaskId ? current : resolvedTaskId));
+  }, [
+    currentDraftKey,
+    hasAnyCreateInput,
+    isDraftHydrated,
+    isNewTaskDraftMode,
+    lastCreatedDraftKey,
+    lastSelectedTaskId,
+    selectedTaskId,
+    visibleTaskIdList,
+    visibleTasks.length,
+  ]);
 
   const hasExistingTaskForShotPlanRun = Boolean(selectedTask && !isNewTaskDraftMode);
-  const hasExistingTaskForRerun = Boolean(
-    hasExistingTaskForShotPlanRun && (selectedTask?.shotPlan || selectedTask?.directorPlan),
+  const hasGeneratedShotPlanForSelectedTask = Boolean(
+    hasExistingTaskForShotPlanRun && hasGeneratedShotPlanArtifacts(selectedTask),
   );
+  const hasExistingTaskForRerun = hasGeneratedShotPlanForSelectedTask;
   const scopedSelectedTaskStageProgress = useMemo(
     () => filterTaskStageProgressByTaskId(selectedTaskStageProgress, selectedTaskIdForHashScroll),
     [selectedTaskIdForHashScroll, selectedTaskStageProgress],
@@ -2493,6 +2664,9 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   );
   const createActionStatusLoading = stageProgressLoading && !isCreating && !shotPlanStageProgress;
   const createActionRunning = isCreating || isTaskStageProgressRunning(shotPlanStageProgress);
+  const createActionFailedWithoutPlan = Boolean(
+    shotPlanStageProgress?.status === "FAILED" && !hasGeneratedShotPlanForSelectedTask,
+  );
   const subtitleActionRunning = isTaskStageProgressRunning(subtitleStageProgress);
   const keyMaterialComplete = Boolean(
     selectedTask &&
@@ -2560,6 +2734,8 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       })
     : createActionHasDirtyChanges
       ? "更新镜头规划"
+      : createActionFailedWithoutPlan
+        ? "重新生成镜头规划"
       : getDirectorPrimaryStepButtonLabel(directorPrimaryStepActionKeys.buildShotPlan, {
           rerun: hasExistingTaskForRerun,
         });
@@ -2611,6 +2787,8 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     : 0;
   const keyMaterialActionBlockedReason = !selectedTask
     ? "请先生成镜头规划。"
+    : !hasGeneratedShotPlanForSelectedTask
+      ? "请先生成镜头规划。"
     : keyMaterialStatusLoading || stageProgressLoading
       ? "关键素材状态加载中，请稍后再试。"
       : subtitleHasMissingCueText
@@ -2621,6 +2799,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
   const keyMaterialActionState: TaskStepActionState = {
     label: keyMaterialStatusLoading ? "关键素材状态加载中..." : keyMaterialRuntime.label,
     isRunning: keyMaterialWorkflowRunning || keyMaterialStatusLoading,
+    busyDisplay: keyMaterialStatusLoading ? "status" : "progress",
     progressPercent: keyMaterialWorkflowRunning ? keyMaterialRuntime.progressPercent : null,
     canRun: !keyMaterialActionBlockedReason,
     blockedReason: keyMaterialActionBlockedReason,
@@ -2750,6 +2929,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       ? {
           label: videoGenerationActionLabel,
           isRunning: videoGenerationActionRunning,
+          busyDisplay: videoGenerationStatusLoading ? "status" : "progress",
           progressPercent: videoGenerationActionRunning ? videoGenerationActionProgressPercent : null,
           canRun: !videoGenerationActionBlockedReason,
           blockedReason: videoGenerationActionBlockedReason,
@@ -3038,7 +3218,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       hasSubtitle: Boolean(shot.hasSubtitle),
       requiresLipSync: Boolean(shot.requiresLipSync),
       narrationText: String(
-        ("narrationText" in shot && shot.narrationText ? shot.narrationText : shot.narrationHint) ?? "",
+        ("sourceSpokenText" in shot && shot.sourceSpokenText
+          ? shot.sourceSpokenText
+          : "narrationText" in shot && shot.narrationText
+            ? shot.narrationText
+            : "sourceSubtitleText" in shot && shot.sourceSubtitleText
+              ? shot.sourceSubtitleText
+              : shot.narrationHint) ?? "",
       ),
     }));
 
@@ -3078,10 +3264,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
     };
 
-    void run();
+    const cancelDeferredRun = scheduleAfterInitialPaint(() => {
+      void run();
+    });
 
     return () => {
       isActive = false;
+      cancelDeferredRun();
     };
   }, [handleSubtitleAudioResultChange, loadSubtitleAudioResult]);
 
@@ -3101,10 +3290,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
     };
 
-    void run();
+    const cancelDeferredRun = scheduleAfterInitialPaint(() => {
+      void run();
+    });
 
     return () => {
       isActive = false;
+      cancelDeferredRun();
     };
   }, [handleVideoGenerationWorkflowChange, loadVideoGenerationWorkflow, selectedTaskIdForHashScroll]);
 
@@ -3303,6 +3495,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
             setTasks((current) => upsertTaskRecord(current, createdTask));
             setIsNewTaskDraftMode(false);
             setSelectedTaskId(createdTask.taskId);
+            setLastSelectedTaskId(createdTask.taskId);
             setMergeTaskSourceFromSelectedTask(true);
             setLastCreatedDraftKey(buildTaskCreationDraftKeyFromTask(createdTask));
             setSubtitleAudioResult(null);
@@ -3339,6 +3532,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       }
       setIsNewTaskDraftMode(false);
       setSelectedTaskId(data.task.taskId);
+      setLastSelectedTaskId(data.task.taskId);
       setMergeTaskSourceFromSelectedTask(true);
       setLastCreatedDraftKey(buildTaskCreationDraftKeyFromTask(data.task));
       setSubtitleAudioResult(null);
@@ -3825,6 +4019,37 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
     [loadTaskShellSnapshot, selectedTaskIdForHashScroll],
   );
 
+  const handleHotelAssetTaskChange = useCallback(
+    (updatedTask: VideoTaskRecord) => {
+      handleReplaceTask(updatedTask);
+      if (updatedTask.shotPlan || updatedTask.directorPlan) {
+        return;
+      }
+
+      setGeneratedVideos((current) => replaceGeneratedVideoRecord(current, updatedTask.taskId, null));
+      setSubtitleAudioResult(null);
+      setSubtitleAudioLoadStatus("empty");
+      handleKeyMaterialWorkflowChange(null);
+      setKeyMaterialLoadStatus("idle");
+      handleVideoGenerationWorkflowChange(null);
+      setVideoGenerationLoadStatus("idle");
+      handleSelectedTaskStageProgressChange({});
+      setSelectedTaskStageProgressLoadStatus("idle");
+      setVisualPrimaryAction(null);
+      setClipPrimaryAction(null);
+      setCompositionPrimaryAction(null);
+      setVisualPipelineSummary(null);
+      setClipPipelineSummary(null);
+      setLipSyncReady(false);
+    },
+    [
+      handleKeyMaterialWorkflowChange,
+      handleReplaceTask,
+      handleSelectedTaskStageProgressChange,
+      handleVideoGenerationWorkflowChange,
+    ],
+  );
+
   const taskDetailModuleConfigs = useMemo(
     () =>
       taskDetailModules.flatMap((module) => {
@@ -3840,7 +4065,6 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
             {
               ...module,
               title: "第三步：素材镜头工作台",
-              placeholder: "完成故事板后，这里会合并处理镜头顺序、台词音频、字幕节奏和素材镜头确认。",
               combinedMaterialWorkbench: true,
             },
           ];
@@ -3892,6 +4116,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
 
         <section className="voice-page-stack">
           {error ? <div className="error-box">{error}</div> : null}
+          {!isTaskIndexReady ? <div className="task-module-empty">任务数据加载中...</div> : null}
 
           <GenerationTasksPanel
             tasks={visibleTasks}
@@ -3908,12 +4133,15 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
             onSelectTask={(taskId) => {
               setIsNewTaskDraftMode(false);
               setSelectedTaskId(taskId);
+              setLastSelectedTaskId(taskId);
             }}
             onDeleteTask={(taskId) => {
               setTasks((current) => current.filter((task) => task.taskId !== taskId));
               setGeneratedVideos((current) => current.filter((item) => item.taskId !== taskId));
               setHighlightedTaskId((current) => (current === taskId ? "" : current));
+              setLastSelectedTaskId((current) => (current === taskId ? "" : current));
             }}
+            onError={(message) => setError(message)}
           />
 
           <PipelineFlow task={selectedTask} stageRuntime={pipelineStageRuntime} metrics={pipelineMetricItems} />
@@ -4038,27 +4266,85 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                         </select>
                       </label>
                     </div>
-                    <div className="task-prompt-optimization-grid">
-                      <label className="setting-field task-prompt-editor-card">
-                        <span>{workflowModeConfig?.userPromptFieldLabel ?? "输入你对视频的要求和想法"}</span>
-                        <textarea
-                          className="prompt-box compact task-editor-textarea task-prompt-editor-textarea"
-                          value={createUserPrompt}
-                          onChange={(event) => {
-                            setCreateUserPrompt(event.target.value);
-                            setPromptOptimizationMessage("");
-                          }}
-                          placeholder={
-                            workflowModeConfig?.userPromptPlaceholder ??
-                            "输入你希望额外强调的卖点、风格、场景或视频方向。"
-                          }
-                        />
-                      </label>
-                      <label className="setting-field task-prompt-editor-card">
-                        <span className="task-prompt-editor-head">
-                          <span>{workflowModeConfig?.optimizedPromptFieldLabel ?? "系统优化后的创作提示词"}</span>
+                    <section className="task-prompt-optimization-panel" aria-label="提示词优化工作区">
+                      <div className="task-prompt-optimization-header">
+                        <div>
+                          <h4>提示词优化</h4>
+                          <p>把原始素材要求整理成更清晰的剪辑指令，生成视频计划时优先使用右侧内容。</p>
+                        </div>
+                        <span
+                          className={`task-prompt-optimization-status ${
+                            isOptimizingUserPrompt
+                              ? "is-running"
+                              : createOptimizedUserPrompt.trim()
+                                ? "is-ready"
+                                : createUserPrompt.trim()
+                                  ? "is-waiting"
+                                  : ""
+                          }`}
+                        >
+                          {isOptimizingUserPrompt
+                            ? "优化中"
+                            : createOptimizedUserPrompt.trim()
+                              ? "已优化"
+                              : createUserPrompt.trim()
+                                ? "可优化"
+                                : "待输入"}
+                        </span>
+                      </div>
+                      <div className="task-prompt-optimization-grid">
+                        <div className="task-prompt-editor-card task-prompt-editor-card-source">
+                          <div className="task-prompt-editor-title-row">
+                            <span className="task-prompt-editor-icon" aria-hidden="true">
+                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <path
+                                  d="M3.4 11.9 4 9.1l6.7-6.7a1.5 1.5 0 0 1 2.1 2.1L6.1 11.2l-2.7.7Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.5"
+                                  strokeLinejoin="round"
+                                />
+                                <path d="M9.7 3.4 11.8 5.5" stroke="currentColor" strokeWidth="1.5" />
+                                <path d="M3 13.2h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                              </svg>
+                            </span>
+                            <div>
+                              <label htmlFor="task-create-user-prompt">
+                                {workflowModeConfig?.userPromptFieldLabel ?? "输入你对视频的要求和想法"}
+                              </label>
+                              <p>写清楚卖点、场景、节奏和必须保留的真实素材信息。</p>
+                            </div>
+                            <span className="task-prompt-editor-count">{createUserPrompt.length} 字</span>
+                          </div>
+                          <textarea
+                            id="task-create-user-prompt"
+                            className="prompt-box compact task-editor-textarea task-prompt-editor-textarea"
+                            value={createUserPrompt}
+                            onChange={(event) => {
+                              setCreateUserPrompt(event.target.value);
+                              setPromptOptimizationMessage("");
+                            }}
+                            placeholder={
+                              workflowModeConfig?.userPromptPlaceholder ??
+                              "输入你希望额外强调的卖点、风格、场景或视频方向。"
+                            }
+                          />
+                          <p className="task-prompt-editor-helper">建议包含：目标人群、核心利益点、拍摄氛围和避雷要求。</p>
+                        </div>
+
+                        <div className="task-prompt-optimization-action" aria-hidden="false">
+                          <span className="task-prompt-flow-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                              <path
+                                d="M4 11h12.5M12.4 6.9 16.5 11l-4.1 4.1"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </span>
                           <button
-                            className="btn-secondary small task-prompt-optimize-button"
+                            className="btn-primary small task-prompt-optimize-button"
                             type="button"
                             disabled={isOptimizingUserPrompt || !createUserPrompt.trim()}
                             onClick={(event) => {
@@ -4068,23 +4354,52 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                           >
                             {isOptimizingUserPrompt ? "优化中…" : "优化提示词"}
                           </button>
-                        </span>
-                        <textarea
-                          className="prompt-box compact task-editor-textarea task-prompt-editor-textarea"
-                          value={createOptimizedUserPrompt}
-                          onChange={(event) => setCreateOptimizedUserPrompt(event.target.value)}
-                          placeholder="点击“优化提示词”后生成，也可以手动修改。生成视频计划时会优先使用这里。"
-                        />
-                        {promptOptimizationMessage ? (
-                          <small className="task-prompt-optimization-message">{promptOptimizationMessage}</small>
-                        ) : null}
-                      </label>
-                    </div>
+                          <small>{createUserPrompt.trim() ? "点击后生成右侧提示词" : "先填写左侧内容"}</small>
+                        </div>
+
+                        <div className="task-prompt-editor-card task-prompt-editor-card-result">
+                          <div className="task-prompt-editor-title-row">
+                            <span className="task-prompt-editor-icon is-green" aria-hidden="true">
+                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <path
+                                  d="M8 1.7c.5 3.1 2.2 4.8 5.3 5.3-3.1.5-4.8 2.2-5.3 5.3C7.5 9.2 5.8 7.5 2.7 7 5.8 6.5 7.5 4.8 8 1.7Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.4"
+                                  strokeLinejoin="round"
+                                />
+                                <path
+                                  d="M12.6 10.2c.2 1.2.9 1.9 2.1 2.1-1.2.2-1.9.9-2.1 2.1-.2-1.2-.9-1.9-2.1-2.1 1.2-.2 1.9-.9 2.1-2.1Z"
+                                  fill="currentColor"
+                                />
+                              </svg>
+                            </span>
+                            <div>
+                              <label htmlFor="task-create-optimized-user-prompt">
+                                {workflowModeConfig?.optimizedPromptFieldLabel ?? "系统优化后的创作提示词"}
+                              </label>
+                              <p>可直接编辑，后续镜头计划会优先读取这里。</p>
+                            </div>
+                            <span className="task-prompt-editor-count">{createOptimizedUserPrompt.length} 字</span>
+                          </div>
+                          <textarea
+                            id="task-create-optimized-user-prompt"
+                            className="prompt-box compact task-editor-textarea task-prompt-editor-textarea"
+                            value={createOptimizedUserPrompt}
+                            onChange={(event) => setCreateOptimizedUserPrompt(event.target.value)}
+                            placeholder="点击“优化提示词”后生成，也可以手动修改。生成视频计划时会优先使用这里。"
+                          />
+                          <p className="task-prompt-editor-helper task-prompt-editor-helper-result">
+                            {promptOptimizationMessage || "优化后会补齐结构、表达重点和素材使用边界。"}
+                          </p>
+                        </div>
+                      </div>
+                    </section>
                     <HotelAssetPanel
                       taskId={selectedTask?.taskId ?? null}
                       videoType={videoType}
                       ensureTaskId={ensureHotelAssetInputTask}
                       onAssetCountChange={handleHotelAssetCountChange}
+                      onTaskChange={handleHotelAssetTaskChange}
                     />
                   </div>
                 </div>
@@ -4094,6 +4409,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                     state={{
                       label: createActionLabel,
                       isRunning: createActionRunning || createActionStatusLoading,
+                      busyDisplay: createActionStatusLoading ? "status" : "progress",
                       progressPercent: createActionRunning ? createActionProgressPercent : null,
                       canRun: !createActionBlockedReason && !createActionStatusLoading,
                       blockedReason: createActionStatusLoading
@@ -4813,7 +5129,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                       />
                     ) : module.targetStatus === "COMPOSITION_READY" ? (
                       <div className="task-module-empty">{module.placeholder}</div>
-                    ) : module.placeholder ? (
+                    ) : module.targetStatus !== "SUBTITLE_AUDIO_READY" && module.placeholder ? (
                       <div className="task-module-empty">{module.placeholder}</div>
                     ) : null}
                   </section>

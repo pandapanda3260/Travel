@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
+import { resolveNarrationClipWordTimestamps } from "../../../../lib/audio-alignment";
 import { buildSubtitleDisplayUnits, splitSegmentWordTimelineBySubtitleEntries } from "../../../../lib/subtitle-display";
 import type { SubtitleDisplayCueInput } from "../../../../lib/subtitle-display";
 import {
@@ -13,6 +14,8 @@ import {
   type SubtitleRenderAspectRatio,
   type SubtitleConfig,
 } from "../../../../lib/subtitle-style-config";
+import { resolveNarrationClipSubtitleText } from "../../../../lib/subtitle-text-contract";
+import type { AudioAlignment } from "../../../../lib/narration";
 import type { SegmentSubtitlePlan, TimedWord } from "../../../../lib/video-task-schema";
 
 export type SubtitlePreviewMaterial = {
@@ -35,9 +38,13 @@ export type SubtitlePreviewNarrationClip = {
   startAtSeconds: number;
   durationSeconds: number;
   audioDurationSeconds?: number | null;
+  fullSemanticSentence?: string | null;
   narrationText: string;
+  spokenText?: string | null;
   subtitleText: string;
+  hasSubtitle?: boolean;
   words?: TimedWord[];
+  audioAlignment?: AudioAlignment | null;
   subtitleDisplayCues?: SubtitleDisplayCueInput[] | null;
 };
 
@@ -150,7 +157,7 @@ function buildSubtitlePreviewEntries(
   const entries: SubtitlePreviewEntry[] = [];
 
   for (const clip of [...narrationClips].sort((left, right) => left.startAtSeconds - right.startAtSeconds)) {
-    const rawText = (clip.subtitleText || clip.narrationText || "").trim();
+    const rawText = resolveNarrationClipSubtitleText(clip).trim();
     if (!rawText) {
       continue;
     }
@@ -159,7 +166,8 @@ function buildSubtitlePreviewEntries(
       (clip.segmentId ? materialMap.get(clip.segmentId) : null) ??
       materials.find((item) => item.segmentIndex === clip.segmentIndex || item.shotIndex === clip.shotIndex) ??
       null;
-    const wordTimeline = clip.words?.length ? clip.words : (material?.wordTimeline ?? []);
+    const structuredWords = resolveNarrationClipWordTimestamps(clip);
+    const wordTimeline = structuredWords.length ? structuredWords : (material?.wordTimeline ?? []);
     const displayUnits = buildSubtitleDisplayUnits({
       text: rawText,
       durationSeconds: clip.audioDurationSeconds ?? clip.durationSeconds,

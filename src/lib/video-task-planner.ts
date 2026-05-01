@@ -447,7 +447,7 @@ function buildShotPlanSystemPrompt(constraints: TaskConstraints, videoType?: Vid
         "5. 先判断商业打法：交易型种草、攻略路线型、品牌展示型或体验推荐型。交易型种草要按“停留钩子 -> 身份确认 -> 机会抛出 -> 核心利益 -> 权益轰炸 -> 价值锚定 -> 风险解除 -> 行动收口”推进。",
         "6. 酒店/本地生活交易型内容不是慢铺垫介绍。前 3 秒必须给地域/人群/强利益，前 8 秒必须讲清主体和机会；可以直接讲最大卖点，但不能散乱堆卖点。",
         "7. 每个镜头尽量输出 commercialPhase、commercialIntent、evidenceTarget、conversionRole：说明它在回答用户哪个决策问题、证明哪个利益点。",
-        "8. 台词和字幕要像真实短视频推荐：短句、具体、有成交节奏；字幕提炼关键词，不必逐字复述口播。",
+        "8. 台词和字幕要像真实短视频推荐：短句、具体、有成交节奏；字幕文本必须与最终口播/音频逐字一致，禁止摘要、提炼、改写或省略。",
       ]
     : [];
 
@@ -2089,7 +2089,7 @@ function buildRealPhotoNarrationBlueprintSystemPrompt(videoType: VideoTaskVideoT
     "3. 先写 spokenText，再决定该句对应哪张图。每句台词必须有对应素材证据。",
     "4. 镜头数不得超过可用素材数；素材多于镜头时筛选，素材少时减少镜头。",
     "5. spokenText 要像真人短视频口播：具体、短句、有承接，不要宣传片腔、不要空泛形容词。",
-    "6. subtitleText 是屏幕字幕摘要，不必逐字复述 spokenText。",
+    "6. subtitleText 必须与 spokenText 逐字一致，用于后续 TTS 与字幕同源；禁止摘要、提炼、改写或省略。",
     "7. targetMaterialIds 只能使用输入里给出的 assetId，不要编造。",
     "",
     `视频类型：${videoType}`,
@@ -2108,7 +2108,7 @@ function buildRealPhotoNarrationBlueprintSystemPrompt(videoType: VideoTaskVideoT
             title: "阶段标题",
             intent: "这一句在商业叙事中的作用",
             spokenText: "真人口播台词",
-            subtitleText: "屏幕字幕摘要",
+            subtitleText: "与 spokenText 完全一致的字幕文本",
             targetMaterialIds: ["asset-id"],
             materialReason: "为什么这张素材证明这句台词",
           },

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -60,8 +60,25 @@ const navigationGroups: NavigationGroup[] = [
   },
 ];
 
-export function GlobalSidebar({ user }: { user: SidebarUserSummary | null }) {
+type SidebarUserPayload = {
+  user?: SidebarUserSummary;
+  error?: string;
+};
+
+const taskCreationSoftNavigationHrefs = new Set([
+  "/studio/task-creation/real-photo-video",
+  "/studio/task-creation/ai-image-video",
+]);
+
+function shouldUseTaskCreationSoftNavigation(fromPathname: string, toHref: string) {
+  return taskCreationSoftNavigationHrefs.has(fromPathname) && taskCreationSoftNavigationHrefs.has(toHref);
+}
+
+export function GlobalSidebar({ user: initialUser = null }: { user?: SidebarUserSummary | null }) {
   const pathname = usePathname() ?? "/";
+  const shouldShowSidebar = shouldRenderGlobalSidebar(pathname);
+  const sessionFetchStartedRef = useRef(false);
+  const [resolvedUser, setResolvedUser] = useState<SidebarUserSummary | null>(initialUser);
   const [pendingNav, setPendingNav] = useState<{ href: string; fromPathname: string } | null>(null);
   const activeHref =
     navigationGroups
@@ -69,7 +86,33 @@ export function GlobalSidebar({ user }: { user: SidebarUserSummary | null }) {
       .filter((item) => isActivePath(pathname, item.href))
       .sort((left, right) => right.href.length - left.href.length)[0]?.href ?? "";
 
-  if (!shouldRenderGlobalSidebar(pathname)) {
+  useEffect(() => {
+    if (!shouldShowSidebar || resolvedUser || sessionFetchStartedRef.current) {
+      return;
+    }
+
+    let isActive = true;
+    sessionFetchStartedRef.current = true;
+    fetch("/api/account/sidebar?details=0", { cache: "no-store" })
+      .then(async (response) => {
+        const data = (await response.json().catch(() => ({}))) as SidebarUserPayload;
+        if (!response.ok) {
+          throw new Error(data.error ?? "账号摘要同步失败");
+        }
+        if (isActive && data.user) {
+          setResolvedUser(data.user);
+        }
+      })
+      .catch(() => {
+        sessionFetchStartedRef.current = false;
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [resolvedUser, shouldShowSidebar]);
+
+  if (!shouldShowSidebar) {
     return null;
   }
 
@@ -97,7 +140,17 @@ export function GlobalSidebar({ user }: { user: SidebarUserSummary | null }) {
                     key={item.href}
                     href={item.href}
                     prefetch
-                    onClick={() => {
+                    onClick={(event) => {
+                      if (shouldUseTaskCreationSoftNavigation(pathname, item.href)) {
+                        event.preventDefault();
+                        window.history.pushState({ travelSoftNavigation: true }, "", item.href);
+                        window.dispatchEvent(
+                          new CustomEvent("travel:task-creation-mode-change", { detail: { href: item.href } }),
+                        );
+                        window.scrollTo({ top: 0, behavior: "instant" });
+                        return;
+                      }
+
                       if (!active) {
                         setPendingNav({ href: item.href, fromPathname: pathname });
                       }
@@ -115,7 +168,7 @@ export function GlobalSidebar({ user }: { user: SidebarUserSummary | null }) {
         ))}
       </nav>
 
-      <GlobalSidebarAccountMenu user={user} />
+      <GlobalSidebarAccountMenu user={resolvedUser} />
     </aside>
   );
 }

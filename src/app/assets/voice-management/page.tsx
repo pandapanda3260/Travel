@@ -1,6 +1,6 @@
-import { requireUserPageSession } from "../../../lib/auth-session";
 import { getVoiceManagementRuntime } from "../../../lib/voice-management-config";
-import VoiceManagementPageClient, { type VoiceManagementInitialData } from "./voice-management-page-client";
+import type { VoiceManagementInitialData } from "./voice-management-page-client";
+import { VoiceManagementPageLoader } from "./voice-management-page-loader";
 
 function buildVoiceRuntimePayload() {
   const runtime = getVoiceManagementRuntime();
@@ -40,8 +40,7 @@ function buildEmptyPayload(): VoiceManagementInitialData {
   };
 }
 
-export default async function VoiceManagementPage() {
-  await requireUserPageSession();
+export default function VoiceManagementPage() {
   let initialData = buildEmptyPayload();
   let initialError: string | null = null;
 
@@ -51,5 +50,5 @@ export default async function VoiceManagementPage() {
     initialError = error instanceof Error ? error.message : "音色管理页面加载失败";
   }
 
-  return <VoiceManagementPageClient initialData={initialData} initialError={initialError} />;
+  return <VoiceManagementPageLoader initialData={initialData} initialError={initialError} />;
 }

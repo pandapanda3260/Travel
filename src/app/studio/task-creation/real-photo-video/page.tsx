@@ -1,7 +1,5 @@
-import { TaskCreationWorkflowPage } from "../_components/task-creation-workflow-page";
-
-export const dynamic = "force-dynamic";
+import { TaskCreationWorkflowPageLoader } from "../_components/task-creation-workflow-page-loader";
 
 export default function RealPhotoVideoTaskCreationPage() {
-  return <TaskCreationWorkflowPage workflowMode="real_photo_to_video" />;
+  return <TaskCreationWorkflowPageLoader workflowMode="real_photo_to_video" />;
 }

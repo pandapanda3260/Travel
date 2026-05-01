@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { PageBrandTitle } from "../../_components/page-brand-title";
+import { RouteLoadingShell } from "../../_components/route-loading-shell";
 import { ModuleStatusBadge, ModuleTitle } from "../../studio/task-creation/_components/task-ui";
 
 type ProductArchiveKeyInfo = {
@@ -127,9 +128,11 @@ function validateImageUploadFile(file: File | null | undefined) {
 export default function ProductInfoPageClient({
   initialData,
   initialError = null,
+  deferInitialLoad = false,
 }: {
   initialData: ProductArchivesPayload;
   initialError?: string | null;
+  deferInitialLoad?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const createArchiveFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -143,7 +146,7 @@ export default function ProductInfoPageClient({
   const [runtime, setRuntime] = useState<ProductArchiveRuntime | null>(initialData.runtime ?? null);
   const [selectedArchiveId, setSelectedArchiveId] = useState("");
   const [loadingStatus, setLoadingStatus] = useState<"idle" | "loading" | "success" | "error">(() =>
-    initialError ? "error" : "success",
+    deferInitialLoad ? "loading" : initialError ? "error" : "success",
   );
   const [isCreating, setIsCreating] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -159,6 +162,52 @@ export default function ProductInfoPageClient({
       Object.values(activeTimers).forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
+
+  useEffect(() => {
+    if (!deferInitialLoad) {
+      return;
+    }
+
+    let isActive = true;
+    const controller = new AbortController();
+
+    async function loadArchives() {
+      setLoadingStatus("loading");
+      setError(null);
+
+      try {
+        const response = await fetch("/api/product-archives", { cache: "no-store", signal: controller.signal });
+        const data = (await response.json().catch(() => ({}))) as ProductArchivesPayload;
+        if (!response.ok) {
+          throw new Error(data.error ?? "商品信息页面加载失败");
+        }
+        if (!isActive) {
+          return;
+        }
+        setArchives(sortArchivesByCreatedAtDesc(data.archives ?? []));
+        if (data.runtime) {
+          setRuntime(data.runtime);
+        }
+        setLoadingStatus("success");
+      } catch (loadError) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (!isActive) {
+          return;
+        }
+        setError(loadError instanceof Error ? loadError.message : "商品信息页面加载失败");
+        setLoadingStatus("error");
+      }
+    }
+
+    void loadArchives();
+
+    return () => {
+      isActive = false;
+      controller.abort();
+    };
+  }, [deferInitialLoad]);
 
   useEffect(() => {
     if (!archives.length) {
@@ -365,13 +414,7 @@ export default function ProductInfoPageClient({
 
   if (loadingStatus === "loading" && !archives.length) {
     return (
-      <main className="shell">
-        <section className="content">
-          <section className="panel product-archive-panel">
-            <div className="product-archive-empty">商品信息页面加载中...</div>
-          </section>
-        </section>
-      </main>
+      <RouteLoadingShell pageName="Product Info" title="商品档案创建" description="正在加载商品档案，稍后可创建新的商品档案。" />
     );
   }
 

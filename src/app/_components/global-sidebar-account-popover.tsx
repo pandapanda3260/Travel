@@ -38,10 +38,12 @@ export function GlobalSidebarAccountPopover({
   planLabel,
   onClose,
   onNicknameUpdated,
+  accountDetailsLoadStatus,
 }: {
   user: SidebarUserSummary;
   avatarText: string;
   planLabel: string;
+  accountDetailsLoadStatus?: "idle" | "loading" | "success" | "error";
   onClose: () => void;
   onNicknameUpdated: (nickname: string) => void;
 }) {
@@ -52,6 +54,7 @@ export function GlobalSidebarAccountPopover({
   const [nicknameError, setNicknameError] = useState<string | null>(null);
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [isSavingNickname, setIsSavingNickname] = useState(false);
+  const detailsLoading = accountDetailsLoadStatus === "loading";
 
   useEffect(() => {
     setNicknameDraft(user.nickname);
@@ -212,6 +215,9 @@ export function GlobalSidebarAccountPopover({
             </Link>
           </div>
           {nicknameError ? <p className="sidebar-account-profile-error">{nicknameError}</p> : null}
+          {accountDetailsLoadStatus === "error" ? (
+            <p className="sidebar-account-profile-error">账号概览同步失败，稍后重新打开可重试。</p>
+          ) : null}
           <span>账号 ID · {buildSidebarAccountId(user.userId)}</span>
           <div className="sidebar-account-badges">
             <span className="sidebar-account-badge">主账号</span>
@@ -230,18 +236,18 @@ export function GlobalSidebarAccountPopover({
         </div>
         <div className="sidebar-account-metric">
           <span>会话</span>
-          <strong>{user.activeSessionCount}</strong>
+          <strong>{detailsLoading ? "同步中..." : user.activeSessionCount}</strong>
         </div>
         <div className="sidebar-account-metric">
           <span>手机号</span>
-          <strong>{user.maskedPhone || "待修正"}</strong>
+          <strong>{detailsLoading && !user.maskedPhone ? "同步中..." : user.maskedPhone || "待修正"}</strong>
         </div>
       </div>
 
       <div className="sidebar-account-points-panel">
         <div className="sidebar-account-points-copy">
           <span>当前剩余积分</span>
-          <strong>{formatPoints(user.availablePoints)}</strong>
+          <strong>{detailsLoading && user.availablePoints === 0 ? "同步中..." : formatPoints(user.availablePoints)}</strong>
         </div>
         <Link href="/settings/usage" className="sidebar-account-points-link" onClick={onClose}>
           用量账单

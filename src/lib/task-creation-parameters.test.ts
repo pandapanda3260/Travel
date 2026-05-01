@@ -29,15 +29,22 @@ import {
   normalizeSubtitleCueTiming,
   splitSegmentWordTimelineBySubtitleEntries,
 } from "./subtitle-display";
+import { getSubtitleFontSizeDisplayValue, getSubtitleOutputTypographyMetrics } from "./subtitle-style-config";
 import { normalizeSubtitlePlanSource } from "./subtitle-plan-source";
 import { countSubtitleDisplayCharacters, splitTextIntoPhrases, wrapSubtitleText } from "./subtitle-text-utils";
+import {
+  normalizeNarrationClipTextContract,
+  normalizeSubtitleContractText,
+  validateSubtitleTextIntegrity,
+} from "./subtitle-text-contract";
+import { normalizeNarrationResultClipForTextContract } from "./narration-result-store";
 import { buildUnifiedSubtitleAndNarrationText } from "./text-provider";
 import { deriveVideoTaskStructure } from "./video-task-structure";
 import { buildVideoTypePromptBlock, getVideoTypeCategoryPrompt } from "./video-type-prompts";
 import { validateVisualImages } from "./generation-validator";
 import { isSeedanceSensitivePromptError, sanitizeSeedancePromptForModeration } from "./video-provider";
 import { appendMainCharacterAppearancePrompt } from "./main-character-appearance-policy";
-import { buildTaskClipShotPayloads } from "./task-clip-store";
+import { buildTaskClipGenerationPrompt, buildTaskClipShotPayloads } from "./task-clip-store";
 import { resolveTaskClipCompletionState } from "./task-clip-completion";
 import { resolveDirectMaterialClipPlan } from "./video-material-direct-clip";
 import { validateShotPlan } from "./video-task-planner";
@@ -51,6 +58,7 @@ import {
 import { getExpectedVisualReferenceShotCount } from "./video-task-stage-counts";
 import {
   buildTaskCreationDraftKey,
+  defaultTaskCreationAudioVoiceId,
   getCompositionBackgroundMusicVolumeGain,
   getDefaultTaskCreationParameterState,
   getTaskCreationExpectedDurationDefaults,
@@ -409,7 +417,7 @@ test("hydrateTaskCreationParameterState 为图片、视频、音频参数补齐�
   assert.equal(hydrated.videoCameraControl, "auto");
   assert.equal(hydrated.videoNegativePrompt, defaultVideoNegativePrompt);
   assert.equal(hydrated.audioStoryboardEnabled, false);
-  assert.equal(hydrated.audioVoiceId, "zh_female_vv_uranus_bigtts");
+  assert.equal(hydrated.audioVoiceId, defaultTaskCreationAudioVoiceId);
   assert.deepEqual(hydrated.audioStoryboardVoiceIds, []);
   assert.equal(hydrated.audioFormat, "mp3");
   assert.equal(hydrated.audioSampleRate, 24000);
@@ -420,6 +428,12 @@ test("hydrateTaskCreationParameterState 为图片、视频、音频参数补齐�
   assert.equal(hydrated.compositionBackgroundMusicUrl, "");
   assert.equal(hydrated.compositionBackgroundMusicVolume, 6);
   assert.equal(hydrated.compositionSubtitleConfig.enabled, true);
+  assert.equal(
+    getSubtitleFontSizeDisplayValue(
+      getSubtitleOutputTypographyMetrics(hydrated.compositionSubtitleConfig, hydrated.videoAspectRatio).fontSizePx,
+    ),
+    17,
+  );
   assert.equal(hydrated.constraintPreset, "travel_guide");
 });
 
@@ -946,11 +960,18 @@ test("视频拆解提示词保持结构化模块并保留既有 JSON 字段", ()
 test("旁白运行链路会拼接视频类型 narration stage 提示词", () => {
   const typePrompt = buildVideoTypePromptBlock("agency_guide_voiceover", "narration");
   const promptPattern = new RegExp(escapeRegex(typePrompt));
+  const polishPrompt = buildNarrationPolishSystemPrompt("agency_guide_voiceover");
+  const repairPrompt = buildNarrationRepairSystemPrompt("agency_guide_voiceover");
+  const subtitleAudioRepairPrompt = buildSubtitleAudioRepairSystemPrompt("agency_guide_voiceover");
 
   assert.ok(typePrompt.length > 0);
-  assert.match(buildNarrationPolishSystemPrompt("agency_guide_voiceover"), promptPattern);
-  assert.match(buildNarrationRepairSystemPrompt("agency_guide_voiceover"), promptPattern);
-  assert.match(buildSubtitleAudioRepairSystemPrompt("agency_guide_voiceover"), promptPattern);
+  assert.match(polishPrompt, promptPattern);
+  assert.match(repairPrompt, promptPattern);
+  assert.match(subtitleAudioRepairPrompt, promptPattern);
+  assert.match(polishPrompt, /完整语义句是后续配音和屏幕字幕的唯一文本源/u);
+  assert.match(repairPrompt, /完整语义句是后续配音和屏幕字幕的唯一文本源/u);
+  assert.match(subtitleAudioRepairPrompt, /完整语义句是后续配音和屏幕字幕的唯一文本源/u);
+  assert.doesNotMatch(polishPrompt, /字幕既能直接拿去配音/u);
 });
 
 test("分视频类型提示词为视觉/人物/字幕子步骤提供独立 stage 配置", () => {
@@ -1365,6 +1386,185 @@ test("buildUnifiedSubtitleAndNarrationText 会让字幕与配音共用同一份�
 
   assert.equal(unifiedText.length > 0, true);
   assert.equal(unifiedText.replace(/\s+/g, "").length <= getNarrationLengthGuidance(5).maxCharacters + 2, true);
+});
+
+test("normalizeNarrationClipTextContract 会以完整语义句统一 TTS 和字幕文本", () => {
+  const clip = normalizeNarrationClipTextContract({
+    id: "clip-1",
+    shotIndex: 1,
+    bindToSegmentId: "segment-1",
+    startAtSeconds: 0,
+    durationSeconds: 4,
+    audioDurationSeconds: null,
+    characterFocus: "旁白",
+    visualFocus: "酒店外观",
+    narrationText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    spokenText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    subtitleText: "太适合遛娃了",
+    note: "",
+    hasVoice: true,
+    hasSubtitle: true,
+  });
+
+  assert.equal(clip.fullSemanticSentence, "杭州这家全新开业亲子度假村真的太适合遛娃了");
+  assert.equal(clip.narrationText, clip.fullSemanticSentence);
+  assert.equal(clip.spokenText, clip.fullSemanticSentence);
+  assert.equal(clip.subtitleText, clip.fullSemanticSentence);
+});
+
+test("normalizeNarrationClipTextContract 会优先使用显式完整语义句作为唯一文本源", () => {
+  const clip = normalizeNarrationClipTextContract({
+    id: "clip-2",
+    shotIndex: 2,
+    bindToSegmentId: "segment-2",
+    startAtSeconds: 0,
+    durationSeconds: 4,
+    characterFocus: "旁白",
+    visualFocus: "客房",
+    fullSemanticSentence: "这间亲子房一推门就能看出空间很友好",
+    narrationText: "旧口播",
+    spokenText: "旧配音",
+    subtitleText: "旧字幕",
+    note: "",
+    hasVoice: true,
+    hasSubtitle: true,
+  });
+
+  assert.equal(clip.fullSemanticSentence, "这间亲子房一推门就能看出空间很友好");
+  assert.equal(clip.narrationText, clip.fullSemanticSentence);
+  assert.equal(clip.spokenText, clip.fullSemanticSentence);
+  assert.equal(clip.subtitleText, clip.fullSemanticSentence);
+});
+
+test("normalizeNarrationResultClipForTextContract 会在保存层清理旧摘要字幕和失效切屏", () => {
+  const clip = normalizeNarrationResultClipForTextContract({
+    id: "clip-store-1",
+    shotIndex: 1,
+    bindToSegmentId: "segment-1",
+    startAtSeconds: 0,
+    durationSeconds: 4,
+    audioDurationSeconds: null,
+    characterFocus: "旁白",
+    visualFocus: "酒店外观",
+    narrationText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    spokenText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    subtitleText: "太适合遛娃了",
+    subtitleDisplayCues: [{ text: "太适合遛娃了", lines: ["太适合遛娃了"] }],
+    note: "",
+    hasVoice: true,
+    hasSubtitle: true,
+  });
+
+  assert.equal(clip.fullSemanticSentence, "杭州这家全新开业亲子度假村真的太适合遛娃了");
+  assert.equal(clip.narrationText, clip.fullSemanticSentence);
+  assert.equal(clip.spokenText, clip.fullSemanticSentence);
+  assert.equal(clip.subtitleText, clip.fullSemanticSentence);
+  assert.equal(clip.subtitleDisplayCues, null);
+});
+
+test("buildTaskClipGenerationPrompt 只暴露配音字幕唯一文本源而不是两套文案", () => {
+  const prompt = buildTaskClipGenerationPrompt({
+    segmentId: "segment-1",
+    segmentMode: "single_speaking",
+    shotIndex: 1,
+    shotPrompt: "保留酒店外观和泳池的真实空间关系",
+    narrationClip: {
+      id: "clip-prompt-1",
+      shotIndex: 1,
+      bindToSegmentId: "segment-1",
+      startAtSeconds: 0,
+      durationSeconds: 4,
+      characterFocus: "旁白",
+      visualFocus: "酒店外观",
+      fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      narrationText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      spokenText: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+      subtitleText: "亲子度假首选",
+      note: "",
+      hasVoice: true,
+      hasSubtitle: true,
+    },
+    task: { parameters: buildTestParameterBundle() } as VideoTaskRecord,
+  });
+
+  assert.equal(prompt.includes("口播台词："), false);
+  assert.equal(prompt.includes("字幕文案："), false);
+  assert.equal(prompt.includes("配音与字幕唯一文本源"), true);
+  assert.equal(prompt.includes("杭州这家全新开业亲子度假村真的太适合遛娃了"), true);
+  assert.equal(prompt.includes("亲子度假首选"), false);
+});
+
+test("validateSubtitleTextIntegrity 会拒绝改字漏字的上屏字幕句和字幕行", () => {
+  const valid = validateSubtitleTextIntegrity({
+    fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    screenSubtitleSentences: [
+      {
+        text: "杭州这家全新开业亲子度假村",
+        lines: ["杭州这家全新开业", "亲子度假村"],
+      },
+      {
+        text: "真的太适合遛娃了",
+        lines: ["真的太适合", "遛娃了"],
+      },
+    ],
+  });
+
+  const missingCharacter = validateSubtitleTextIntegrity({
+    fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    screenSubtitleSentences: [
+      {
+        text: "杭州这家全新开业亲子度假村",
+        lines: ["杭州这家全新开业", "亲子度假村"],
+      },
+      {
+        text: "真的太适合遛娃",
+        lines: ["真的太适合", "遛娃"],
+      },
+    ],
+  });
+
+  const lineMismatch = validateSubtitleTextIntegrity({
+    fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    screenSubtitleSentences: [
+      {
+        text: "杭州这家全新开业亲子度假村",
+        lines: ["杭州这家全新开业", "亲子度假村"],
+      },
+      {
+        text: "真的太适合遛娃了",
+        lines: ["真的太适合", "遛娃"],
+      },
+    ],
+  });
+
+  assert.equal(valid.ok, true);
+  assert.equal(missingCharacter.ok, false);
+  assert.equal(lineMismatch.ok, false);
+});
+
+test("validateSubtitleTextIntegrity 会拒绝超过两行的上屏字幕句", () => {
+  const result = validateSubtitleTextIntegrity({
+    fullSemanticSentence: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+    screenSubtitleSentences: [
+      {
+        text: "杭州这家全新开业亲子度假村真的太适合遛娃了",
+        lines: ["杭州这家", "全新开业亲子度假村", "真的太适合遛娃了"],
+      },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+});
+
+test("normalizeSubtitleContractText 比对时只忽略排版符号但不忽略真实文字增删", () => {
+  assert.equal(
+    normalizeSubtitleContractText("杭州这家全新开业亲子度假村，真的太适合遛娃了"),
+    normalizeSubtitleContractText("杭州这家全新开业亲子度假村真的太适合遛娃了"),
+  );
+  assert.notEqual(
+    normalizeSubtitleContractText("杭州这家全新开业亲子度假村真的太适合遛娃了"),
+    normalizeSubtitleContractText("杭州这家全新开业亲子度假村真的太适合遛娃"),
+  );
 });
 
 test("buildSubtitleDisplayUnits 会在无词级时间时按文本权重切分且不超出片段窗口", () => {
@@ -1970,6 +2170,20 @@ test("getVideoAnalysisFrameBudget 会按片长计算视频分析帧上限", () =
 
 test("speaker display overrides 会把 S_LrhcVlzY1 显示为沙僧", () => {
   assert.equal(getSpeakerDisplayNameOverride("S_LrhcVlzY1"), "沙僧");
+});
+
+test("speaker display overrides 会把 S_IrhcVlzY1 显示为轻盈朵朵", () => {
+  assert.equal(getSpeakerDisplayNameOverride("S_IrhcVlzY1"), "轻盈朵朵");
+});
+
+test("resolveTaskVoiceOptionLabel 会把轻盈朵朵复刻音色原始 ID 替换为友好名称", () => {
+  assert.equal(
+    resolveTaskVoiceOptionLabel({
+      label: "S_IrhcVlzY1（复刻）",
+      value: "S_IrhcVlzY1",
+    }),
+    "轻盈朵朵（复刻）",
+  );
 });
 
 test("resolveTaskVoiceOptionLabel 会把历史遗留的复刻音色原始 ID 替换为沙僧", () => {

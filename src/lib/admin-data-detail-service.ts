@@ -741,7 +741,7 @@ function buildFocusedTaskProfile(taskId: string, role: AdminRole): AdminDataFocu
   const failedJobs = jobs.filter((item) => item.status === "FAILED");
   const clipShots = listTaskClipShots(taskId);
   const visualShots = listTaskVisualImageShots(taskId);
-  const narrationResult = getTaskClipNarrationResult(taskId);
+  const narrationResult = getTaskClipNarrationResult(taskId, task);
   const narrationRecords = listNarrationResults().filter((item) => item.taskId === taskId);
   const compositions = listTaskVideoCompositions(taskId);
   const selectedVisualCount = visualShots.filter((item) => Boolean(item.selectedCandidateId)).length;

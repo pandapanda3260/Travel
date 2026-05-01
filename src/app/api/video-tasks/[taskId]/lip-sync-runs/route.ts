@@ -54,7 +54,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const typeProfile = getVideoTaskTypeProfile(task.parameters.video.videoType);
 
     if (body.action === "sync_all") {
-      const narrationResult = getTaskClipNarrationResult(taskId);
+      const narrationResult = getTaskClipNarrationResult(taskId, task);
       const shotDefinitions = parseTaskClipShots(task, narrationResult);
       const clipRecords = listTaskClipShots(taskId);
       const results: Array<{ shotIndex: number; jobId: string | null; error: string | null }> = [];

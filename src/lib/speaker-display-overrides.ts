@@ -3,6 +3,7 @@
  * 用于复刻音色、导入槽位等场景下在界面与下拉框中显示友好名称。
  */
 const SPEAKER_DISPLAY_NAME_OVERRIDES: Readonly<Record<string, string>> = {
+  S_IrhcVlzY1: "轻盈朵朵",
   S_JrhcVlzY1: "李占宁",
   S_LrhcVlzY1: "沙僧",
 };

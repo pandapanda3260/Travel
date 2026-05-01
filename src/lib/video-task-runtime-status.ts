@@ -38,7 +38,7 @@ export function reconcileVideoTaskRuntimeStatus(taskId: string) {
 
   try {
     const clipCompletionState = resolveTaskClipCompletionState({
-      shotDefinitions: parseTaskClipShots(task, getTaskClipNarrationResult(taskId)),
+      shotDefinitions: parseTaskClipShots(task, getTaskClipNarrationResult(taskId, task)),
       clipRecords: listTaskClipShots(taskId),
       jobs: listVideoJobs(),
     });

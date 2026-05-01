@@ -2,6 +2,11 @@ import type { NarrationDraftClip } from "./narration";
 import { countNarrationCharacters, sanitizeNarrationText } from "./narration";
 import { parseNarrationScriptLines } from "./narration-script";
 import {
+  isRealPhotoStructuralNarrationText,
+  restoreRealPhotoNarrationShotPlan,
+} from "./real-photo-narration-source";
+import { resolveNarrationClipSubtitleText } from "./subtitle-text-contract";
+import {
   getVideoTaskTypeProfile,
   type SegmentSubtitlePlan,
   type ShotPlan,
@@ -60,7 +65,15 @@ function sanitizeSubtitleText(text: string | null | undefined) {
 
 function buildFallbackSegmentText(shots: ShotPlanItem[]) {
   return shots
-    .map((shot) => sanitizeSubtitleText(shot.narrationHint))
+    .map((shot) =>
+      sanitizeSubtitleText(
+        shot.sourceSubtitleText ||
+          shot.sourceSpokenText ||
+          ("subtitleText" in shot ? String(shot.subtitleText ?? "") : "") ||
+          ("narrationText" in shot ? String(shot.narrationText ?? "") : "") ||
+          shot.narrationHint,
+      ),
+    )
     .filter(Boolean)
     .join("，");
 }
@@ -75,9 +88,10 @@ export function normalizeSubtitlePlanSource(shotPlan: ShotPlan, videoType: Video
     return shotPlan;
   }
 
-  const segmentGroups = groupShotsBySegment(shotPlan.shots);
+  const sourcePlan = restoreRealPhotoNarrationShotPlan(shotPlan);
+  const segmentGroups = groupShotsBySegment(sourcePlan.shots);
   const segmentPlanMap = new Map<string, SegmentSubtitlePlan>();
-  for (const segment of shotPlan.subtitlePlan ?? []) {
+  for (const segment of sourcePlan.subtitlePlan ?? []) {
     const segmentIndex = Number(segment.segmentIndex) || 0;
     const segmentId = String(segment.segmentId ?? "").trim() || `segment-${segmentIndex}`;
     segmentPlanMap.set(getSegmentSortKey(segmentIndex, segmentId), {
@@ -116,7 +130,10 @@ export function normalizeSubtitlePlanSource(shotPlan: ShotPlan, videoType: Video
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
     if (usesSegmentLevelSubtitleSource(videoType)) {
-      const mergedText = validSubtitles.map((subtitle) => subtitle.text).filter(Boolean).join("，") || fallbackText;
+      const existingText = validSubtitles.map((subtitle) => subtitle.text).filter(Boolean).join("，");
+      const shouldPreferRecoveredRealPhotoText =
+        Boolean(fallbackText) && (!existingText || isRealPhotoStructuralNarrationText(existingText, group.shots, sourcePlan));
+      const mergedText = shouldPreferRecoveredRealPhotoText ? fallbackText : existingText || fallbackText;
       const text = sanitizeSubtitleText(mergedText);
       return {
         segmentIndex: group.segmentIndex,
@@ -156,7 +173,7 @@ export function normalizeSubtitlePlanSource(shotPlan: ShotPlan, videoType: Video
   });
 
   return {
-    ...shotPlan,
+    ...sourcePlan,
     subtitlePlan: normalizedSubtitlePlan,
   };
 }
@@ -270,7 +287,7 @@ export function syncNarrationClipsIntoSubtitlePlan(
         return segment;
       }
 
-      const text = sanitizeSubtitleText(clip.subtitleText || clip.narrationText);
+      const text = sanitizeSubtitleText(resolveNarrationClipSubtitleText(clip));
       const currentSubtitle = segment.subtitles[0];
       return {
         ...segment,

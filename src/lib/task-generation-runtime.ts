@@ -1,6 +1,12 @@
 import { getTextGenerationRuntime } from "./text-provider-config";
 import { getGenerationRuntime as getOpenAiGenerationRuntime } from "./vision-provider-config";
-import { assertModelUsagePreflight, recordModelUsage, resolveDefaultModelPricingKey } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  estimateTextModelUsageMetrics,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+  resolveDefaultModelPricingKey,
+} from "./model-usage-service";
 
 export type TaskGenerationRuntime = {
   provider: "openai" | "ark";
@@ -60,59 +66,69 @@ export async function callTaskGenerationLlm(input: {
   }
 
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
-  assertModelUsagePreflight({
+  const estimatedMetrics = estimateTextModelUsageMetrics({
+    inputText: `${input.systemPrompt}\n${input.userContent}`,
+    maxOutputTokens: input.maxCompletionTokens ?? 2_000,
+  });
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "llm.chat",
+    estimatedMetrics,
   });
 
-  const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${runtime.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: runtime.modelId,
-      temperature: input.temperature ?? 0.35,
-      ...(runtime.provider === "openai" && input.maxCompletionTokens
-        ? { max_completion_tokens: input.maxCompletionTokens }
-        : {}),
-      messages: [
-        { role: "system", content: input.systemPrompt },
-        { role: "user", content: input.userContent },
-      ],
-    }),
-  });
+  try {
+    const response = await fetch(`${runtime.apiBase}${runtime.chatEndpoint}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${runtime.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: runtime.modelId,
+        temperature: input.temperature ?? 0.35,
+        ...(runtime.provider === "openai" && input.maxCompletionTokens
+          ? { max_completion_tokens: input.maxCompletionTokens }
+          : {}),
+        messages: [
+          { role: "system", content: input.systemPrompt },
+          { role: "user", content: input.userContent },
+        ],
+      }),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    error?: { message?: string };
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      prompt_tokens_details?: {
-        cached_tokens?: number;
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        prompt_tokens_details?: {
+          cached_tokens?: number;
+        };
       };
     };
-  };
 
-  if (!response.ok) {
-    throw new Error(payload.error?.message ?? `${runtime.providerLabel} 调用失败`);
+    if (!response.ok) {
+      throw new Error(payload.error?.message ?? `${runtime.providerLabel} 调用失败`);
+    }
+
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "llm.chat",
+      provider: runtime.providerLabel,
+      modelId: runtime.modelId,
+      metrics: {
+        inputTokens: Number(payload.usage?.prompt_tokens ?? estimatedMetrics.inputTokens ?? 0),
+        outputTokens: Number(payload.usage?.completion_tokens ?? estimatedMetrics.outputTokens ?? 0),
+        cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
+      },
+      requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
+      remark: "任务生成文本调用",
+    });
+
+    return payload.choices?.[0]?.message?.content ?? null;
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "llm.chat",
-    provider: runtime.providerLabel,
-    modelId: runtime.modelId,
-    metrics: {
-      inputTokens: Number(payload.usage?.prompt_tokens ?? 0),
-      outputTokens: Number(payload.usage?.completion_tokens ?? 0),
-      cachedInputTokens: Number(payload.usage?.prompt_tokens_details?.cached_tokens ?? 0),
-    },
-    requestId: response.headers.get("x-request-id") ?? crypto.randomUUID(),
-    remark: "任务生成文本调用",
-  });
-
-  return payload.choices?.[0]?.message?.content ?? null;
 }

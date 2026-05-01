@@ -9,6 +9,7 @@ import {
   type VideoTaskGeneratedVideoRecord,
   type VideoTaskRecord,
 } from "../../../../lib/video-task-schema";
+import { parseApiResponse } from "./api-response";
 import { ModuleTitle } from "./task-ui";
 
 type GenerationSettings = {
@@ -52,6 +53,14 @@ type TaskListRow = {
   statusLabel: string;
   statusTone: "default" | "warning" | "pending";
   videoJobId: string | null;
+};
+
+type DeleteTaskResponse = {
+  ok?: boolean;
+  deletedTaskId?: string;
+  error?: string;
+  code?: string;
+  redirectTo?: string;
 };
 
 function formatSecondsLabel(seconds: number | null) {
@@ -103,6 +112,7 @@ export function GenerationTasksPanel({
   emptyPreviewLabel = "视频预览",
   onSelectTask,
   onDeleteTask,
+  onError,
 }: {
   tasks: VideoTaskRecord[];
   generatedVideos: VideoTaskGeneratedVideoRecord[];
@@ -117,8 +127,11 @@ export function GenerationTasksPanel({
   emptyPreviewLabel?: string;
   onSelectTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
+  onError?: (message: string | null) => void;
 }) {
   const [manualActiveTaskId, setManualActiveTaskId] = useState("");
+  const [deletingTaskId, setDeletingTaskId] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const activeTaskId = draftMode
     ? ""
@@ -214,15 +227,49 @@ export function GenerationTasksPanel({
   );
 
   async function handleDeleteRow(row: TaskListRow) {
-    const response = await fetch(`/api/video-tasks/${row.taskId}`, { method: "DELETE" });
-    if (!response.ok) {
+    if (deletingTaskId) {
       return;
     }
 
-    onDeleteTask(row.taskId);
-    setManualActiveTaskId((current) => (current === row.taskId ? "" : current));
-    if (selectedTaskId === row.taskId) {
-      onSelectTask("");
+    setDeletingTaskId(row.taskId);
+    setDeleteError(null);
+    onError?.(null);
+
+    try {
+      const response = await fetch(`/api/video-tasks/${row.taskId}`, { method: "DELETE" });
+      const data = await parseApiResponse<DeleteTaskResponse>(response);
+
+      if (response.status === 404) {
+        onDeleteTask(row.taskId);
+        setManualActiveTaskId((current) => (current === row.taskId ? "" : current));
+        if (selectedTaskId === row.taskId) {
+          onSelectTask("");
+        }
+        return;
+      }
+
+      if (!response.ok || data.ok === false) {
+        const message = data.error ?? `删除任务失败，状态码 ${response.status}`;
+        if (response.status === 401 && data.redirectTo && typeof window !== "undefined") {
+          setDeleteError(message);
+          onError?.(message);
+          window.location.assign(data.redirectTo);
+          return;
+        }
+        throw new Error(message);
+      }
+
+      onDeleteTask(row.taskId);
+      setManualActiveTaskId((current) => (current === row.taskId ? "" : current));
+      if (selectedTaskId === row.taskId) {
+        onSelectTask("");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除任务失败";
+      setDeleteError(message);
+      onError?.(message);
+    } finally {
+      setDeletingTaskId("");
     }
   }
 
@@ -235,6 +282,7 @@ export function GenerationTasksPanel({
           level="primary"
           action={<span className="table-meta">{rows.length} 条记录</span>}
         />
+        {deleteError ? <div className="error-box compact">{deleteError}</div> : null}
 
         <div className="table-wrap fixed-table-wrap">
           <table className="task-table jobs-table">
@@ -312,9 +360,10 @@ export function GenerationTasksPanel({
                       <button
                         className="btn-pill btn-pill-danger"
                         type="button"
+                        disabled={Boolean(deletingTaskId)}
                         onClick={() => void handleDeleteRow(row)}
                       >
-                        删除
+                        {deletingTaskId === row.taskId ? "删除中..." : "删除"}
                       </button>
                     </div>
                   </td>

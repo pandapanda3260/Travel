@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { recordAdminDataEvent } from "../../../lib/admin-data-analytics";
 import { requireUserApiSession, userApiUnauthorizedResponse } from "../../../lib/auth-session";
 import { grantGrowthForEvent } from "../../../lib/member-service";
-import { grantPointsForEvent } from "../../../lib/points-service";
 import { createProductArchive, listAccessibleProductArchives } from "../../../lib/product-archive-store";
 import { getProductArchiveVisionProviderMeta } from "../../../lib/product-archive-vision";
 
@@ -35,14 +34,6 @@ export async function POST(request: NextRequest) {
       objectId: archive.archiveId,
     });
     grantGrowthForEvent({
-      userId: session.userId,
-      eventType: "product_archive_create",
-      sourceType: "rule",
-      sourceBizId: archive.archiveId,
-      idempotentKey: `archive_create:${archive.archiveId}`,
-      remark: "创建商品档案",
-    });
-    grantPointsForEvent({
       userId: session.userId,
       eventType: "product_archive_create",
       sourceType: "rule",

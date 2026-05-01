@@ -89,6 +89,8 @@ export const audioVoiceOptions = [
   { label: "M191", value: "zh_male_m191_uranus_bigtts" },
 ] as const;
 
+export const defaultTaskCreationAudioVoiceId = "S_IrhcVlzY1";
+
 export const audioFormatOptions = [
   { label: "MP3", value: "mp3", description: "兼容性最好，适合预览与成片链路。" },
   { label: "OGG Opus", value: "ogg_opus", description: "体积更小，适合流式传输。" },
@@ -186,6 +188,7 @@ export type TaskCreationParameterState = {
   constraintPreset: TaskConstraintPresetKey;
   constraintCustomRules: string;
   lastCreatedDraftKey: string;
+  lastSelectedTaskId: string;
 };
 
 const defaultExpectedDurationDefaults: Record<
@@ -333,7 +336,7 @@ export function getDefaultTaskCreationParameterState(): TaskCreationParameterSta
     videoWatermark: false,
     videoNegativePrompt: defaultVideoNegativePrompt,
     audioStoryboardEnabled: false,
-    audioVoiceId: "zh_female_vv_uranus_bigtts",
+    audioVoiceId: defaultTaskCreationAudioVoiceId,
     audioStoryboardVoiceIds: [],
     audioFormat: "mp3",
     audioSampleRate: 24000,
@@ -347,6 +350,7 @@ export function getDefaultTaskCreationParameterState(): TaskCreationParameterSta
     constraintPreset: videoTypeDefaults.constraintPreset as TaskConstraintPresetKey,
     constraintCustomRules: "",
     lastCreatedDraftKey: "",
+    lastSelectedTaskId: "",
   };
 }
 
@@ -478,6 +482,7 @@ export function hydrateTaskCreationParameterState(rawDraft: unknown): TaskCreati
         : videoTypeDefaults.constraintPreset,
     constraintCustomRules: draft.constraintCustomRules ?? defaults.constraintCustomRules,
     lastCreatedDraftKey: draft.lastCreatedDraftKey ?? defaults.lastCreatedDraftKey,
+    lastSelectedTaskId: draft.lastSelectedTaskId?.trim() ?? defaults.lastSelectedTaskId,
   };
 }
 

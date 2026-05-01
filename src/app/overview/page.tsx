@@ -1,20 +1,8 @@
-import { OverviewServiceReportPanel } from "./_components/overview-service-report-panel";
+import { OverviewServiceReportClientPanel } from "./_components/overview-service-report-client-panel";
 import { PageBrandTitle } from "../_components/page-brand-title";
 import { buildOverviewPipelineModelMap, overviewPipelineStageGroups } from "../../lib/overview-pipeline-report";
-import { buildOverviewServiceReport, type OverviewServiceReportEntry } from "../../lib/overview-service-report";
-
-export const dynamic = "force-dynamic";
 
 export default function OverviewPage() {
-  let serviceReports: OverviewServiceReportEntry[] = [];
-  let serviceReportError: string | null = null;
-
-  try {
-    serviceReports = buildOverviewServiceReport();
-  } catch (error) {
-    serviceReportError = error instanceof Error ? error.message : "概览服务统计加载失败";
-  }
-
   const pipelineStages = buildOverviewPipelineModelMap();
   const groupedPipelineStages = overviewPipelineStageGroups
     .map((group) => ({
@@ -88,7 +76,7 @@ export default function OverviewPage() {
         </section>
 
         <div className="overview-dashboard">
-          <OverviewServiceReportPanel reports={serviceReports} error={serviceReportError} />
+          <OverviewServiceReportClientPanel />
 
           <section className="panel workflow-overview-panel overview-section-panel overview-main-panel">
             <div className="panel-header compact">

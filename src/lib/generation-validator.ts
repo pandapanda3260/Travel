@@ -5,7 +5,12 @@ import {
   getNarrationDurationOverflowTolerance,
   isNarrationSpeechRateTooSlow,
 } from "./narration";
+import {
+  getRealPhotoNarrationBlueprintFromShotPlan,
+  isRealPhotoStructuralNarrationText,
+} from "./real-photo-narration-source";
 import { countSubtitlePlanEntries, usesSegmentLevelSubtitleSource } from "./subtitle-plan-source";
+import { resolveNarrationClipFullSemanticText } from "./subtitle-text-contract";
 import type { TaskClipShotPayload } from "./task-clip-store";
 import { getExpectedClipSegmentCount, getExpectedVisualReferenceShotCount } from "./video-task-stage-counts";
 import type { TimedWord, VideoTaskRecord } from "./video-task-schema";
@@ -145,6 +150,7 @@ export function inspectNarrationAudioQuality(input: {
 export function validateNarrationResult(result: NarrationResultRecord, task: VideoTaskRecord): ValidationReport {
   const issues: ValidationIssue[] = [];
   const directorPlan = getTaskDirectorPlan(task);
+  const realPhotoBlueprint = getRealPhotoNarrationBlueprintFromShotPlan(task.shotPlan);
   const expectedFromSubtitlePlan = countSubtitlePlanEntries(directorPlan.subtitlePlan);
   const expected = expectedFromSubtitlePlan > 0 ? expectedFromSubtitlePlan : directorPlan.audioCues.length;
   const unitLabel = usesSegmentLevelSubtitleSource(task.parameters.video.videoType) ? "片段" : "镜头";
@@ -191,8 +197,31 @@ export function validateNarrationResult(result: NarrationResultRecord, task: Vid
       });
     }
 
-    if (clip.hasVoice !== false && clip.audioDurationSeconds && clip.narrationText.trim()) {
-      const speechUnits = countNarrationSpeechUnits(clip.narrationText);
+    const fullSemanticText = resolveNarrationClipFullSemanticText(clip);
+    const relatedStoryShots = directorPlan.storyShots.filter(
+      (shot) =>
+        (clip.segmentId && shot.segmentId === clip.segmentId) ||
+        (clip.bindToSegmentId && shot.segmentId === clip.bindToSegmentId) ||
+        (clip.segmentIndex != null && shot.segmentIndex === clip.segmentIndex),
+    );
+    const effectiveRelatedStoryShots = relatedStoryShots.length
+      ? relatedStoryShots
+      : directorPlan.storyShots.filter((shot) => shot.shotIndex === clip.shotIndex);
+    if (
+      realPhotoBlueprint &&
+      fullSemanticText.trim() &&
+      isRealPhotoStructuralNarrationText(fullSemanticText, effectiveRelatedStoryShots, task.shotPlan)
+    ) {
+      issues.push({
+        severity: "error",
+        shotIndex: clipIndex,
+        category: "content",
+        message: `${unitLabel} ${clipIndex} 台词是叙事阶段标题，不是真人口播文案`,
+      });
+    }
+
+    if (clip.hasVoice !== false && clip.audioDurationSeconds && fullSemanticText.trim()) {
+      const speechUnits = countNarrationSpeechUnits(fullSemanticText);
       const unitsPerSecond = speechUnits > 0 ? speechUnits / clip.audioDurationSeconds : 0;
       if (unitsPerSecond > 0 && unitsPerSecond < 1.45) {
         issues.push({
@@ -201,7 +230,7 @@ export function validateNarrationResult(result: NarrationResultRecord, task: Vid
           category: "duration",
           message: `${unitLabel} ${clipIndex} 语速异常偏慢（约 ${formatValidationRate(unitsPerSecond)} 字/秒），建议重生成音频`,
         });
-      } else if (isNarrationSpeechRateTooSlow(clip.narrationText, clip.audioDurationSeconds)) {
+      } else if (isNarrationSpeechRateTooSlow(fullSemanticText, clip.audioDurationSeconds)) {
         issues.push({
           severity: "warning",
           shotIndex: clipIndex,
@@ -216,7 +245,7 @@ export function validateNarrationResult(result: NarrationResultRecord, task: Vid
         ...inspectNarrationAudioQuality({
           unitLabel,
           clipIndex,
-          narrationText: clip.narrationText,
+          narrationText: fullSemanticText,
           subtitleText: clip.subtitleText,
           spokenText: clip.spokenText,
           targetDurationSeconds: clip.durationSeconds,

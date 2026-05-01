@@ -7,11 +7,15 @@ import {
   buildShotPlanFromRealPhotoNarrationBlueprint,
   normalizeRealPhotoNarrationBlueprintCandidate,
 } from "./real-photo-narration-workflow";
-import { resolveTaskClipPayloadDurationSeconds } from "./task-clip-store";
-import { buildDirectorPlanFromTaskData } from "./video-task-director";
+import { validateNarrationResult } from "./generation-validator";
+import type { NarrationResultRecord } from "./narration-result-store";
+import { normalizeSubtitlePlanSource } from "./subtitle-plan-source";
+import { resolveTaskClipPayloadDurationSeconds, resolveTaskClipPayloadText } from "./task-clip-store";
+import { recoverNarrationResultTextFromTask } from "./task-narration-result-recovery";
+import { buildDirectorPlanFromTaskData, buildShotPlanFromDirectorPlan } from "./video-task-director";
 import { validateShotPlan } from "./video-task-planner";
 import type { TaskHotelAssetRecord } from "./task-hotel-asset-store";
-import type { HotelAssetSceneType, VideoTaskParameterBundle, VideoTaskSource } from "./video-task-schema";
+import type { HotelAssetSceneType, VideoTaskParameterBundle, VideoTaskRecord, VideoTaskSource } from "./video-task-schema";
 
 const now = "2026-04-29T08:00:00.000Z";
 
@@ -169,6 +173,7 @@ test("fallback narration blueprint 先生成真人表达骨架，并保持 60 �
   assert.ok(!blueprint.beats[0].spokenText.includes("核心卖点"));
   assert.ok(blueprint.beats.every((beat) => beat.spokenText.trim().length >= 8));
   assert.ok(blueprint.beats.every((beat) => beat.subtitleText.trim().length >= 4));
+  assert.ok(blueprint.beats.every((beat) => beat.subtitleText === beat.spokenText));
 });
 
 test("shot plan 从台词蓝图反推，镜头数不超过素材数，并保留图片原始意愿", () => {
@@ -196,6 +201,7 @@ test("shot plan 从台词蓝图反推，镜头数不超过素材数，并保留�
     assert.ok(beat, `shot ${shot.shotIndex} should keep narration beat id`);
     assert.equal(shot.sourceSpokenText, beat.spokenText);
     assert.equal(shot.sourceSubtitleText, beat.subtitleText);
+    assert.equal(shot.sourceSubtitleText, shot.sourceSpokenText);
     assert.equal(shot.durationSeconds, beat.estimatedDurationSeconds);
     assert.equal(shot.assetId, beat.targetMaterialIds[0]);
   }
@@ -232,6 +238,7 @@ test("normalize blueprint candidate 会保留 LLM 台词，但过滤不存在的
 
   assert.equal(normalized.structureInfluenceScore, 60);
   assert.equal(normalized.beats[0]?.spokenText, "如果只看价格，你可能会错过这家更适合带娃的原因");
+  assert.equal(normalized.beats[0]?.subtitleText, normalized.beats[0]?.spokenText);
   assert.deepEqual(normalized.beats[0]?.targetMaterialIds, ["img-opening"]);
   assert.equal(normalized.beats[1]?.spokenText, fallback.beats[1]?.spokenText);
 });
@@ -281,9 +288,216 @@ test("director plan 使用叙事蓝图 spokenText 作为口播源，而不是短
   });
 
   assert.equal(directorPlan.storyShots[0]?.narrationText, shotPlan.shots[0]?.sourceSpokenText);
-  assert.equal(directorPlan.storyShots[0]?.subtitleText, shotPlan.shots[0]?.sourceSubtitleText);
+  assert.equal(directorPlan.storyShots[0]?.subtitleText, shotPlan.shots[0]?.sourceSpokenText);
   assert.equal(directorPlan.audioCues[0]?.narrationText, shotPlan.shots[0]?.sourceSpokenText);
+  assert.equal(directorPlan.audioCues[0]?.subtitleText, directorPlan.audioCues[0]?.narrationText);
   assert.equal(directorPlan.audioCues[0]?.sourceSpokenText, shotPlan.shots[0]?.sourceSpokenText);
+});
+
+test("实拍计划回建 shotPlan 时保留真人台词源和叙事蓝图", () => {
+  const parameters = buildParameters();
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters,
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters,
+  });
+  const directorPlan = buildDirectorPlanFromTaskData({
+    draftBundle: {
+      textToImagePrompt: "",
+      imageToVideoPrompt: "",
+      narrationScript: shotPlan.shots.map((shot) => `镜头${shot.shotIndex}：${shot.narrationHint}`).join("\n"),
+    },
+    shotPlan,
+    parameters,
+  });
+
+  const rebuiltShotPlan = buildShotPlanFromDirectorPlan(directorPlan, shotPlan);
+
+  assert.equal(rebuiltShotPlan.realPhotoNarrationBlueprint?.beats[0]?.spokenText, blueprint.beats[0]?.spokenText);
+  assert.equal(rebuiltShotPlan.realPhotoMaterialBrief?.items[0]?.assetId, materialBrief.items[0]?.assetId);
+  assert.equal(rebuiltShotPlan.shots[0]?.sourceSpokenText, blueprint.beats[0]?.spokenText);
+  assert.equal(rebuiltShotPlan.shots[0]?.sourceSubtitleText, blueprint.beats[0]?.subtitleText);
+  assert.equal(rebuiltShotPlan.shots[0]?.narrationBeatId, blueprint.beats[0]?.beatId);
+});
+
+test("实拍片段字幕源优先使用真人台词，不把 narrationHint 当台词", () => {
+  const parameters = buildParameters();
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters,
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters,
+  });
+
+  const normalized = normalizeSubtitlePlanSource(shotPlan, parameters.video.videoType);
+
+  assert.equal(normalized.subtitlePlan?.[0]?.subtitles[0]?.text, blueprint.beats[0]?.spokenText);
+  assert.notEqual(normalized.subtitlePlan?.[0]?.subtitles[0]?.text, shotPlan.shots[0]?.narrationHint);
+});
+
+test("实拍任务存在旧 directorPlan 时也会从蓝图恢复真人台词源", () => {
+  const parameters = buildParameters();
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters,
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters,
+  });
+  const validDirectorPlan = buildDirectorPlanFromTaskData({
+    draftBundle: {
+      textToImagePrompt: "",
+      imageToVideoPrompt: "",
+      narrationScript: shotPlan.shots.map((shot) => `镜头${shot.shotIndex}：${shot.narrationHint}`).join("\n"),
+    },
+    shotPlan,
+    parameters,
+  });
+  const staleDirectorPlan = {
+    ...validDirectorPlan,
+    storyShots: validDirectorPlan.storyShots.map((shot) => ({
+      ...shot,
+      narrationText: shot.narrationHint,
+      subtitleText: shot.narrationHint,
+      sourceSpokenText: null,
+      sourceSubtitleText: null,
+    })),
+    audioCues: validDirectorPlan.audioCues.map((cue) => ({
+      ...cue,
+      narrationText: shotPlan.shots[cue.shotIndex ? cue.shotIndex - 1 : 0]?.narrationHint ?? cue.narrationText,
+      subtitleText: shotPlan.shots[cue.shotIndex ? cue.shotIndex - 1 : 0]?.narrationHint ?? cue.subtitleText,
+      sourceSpokenText: null,
+      sourceSubtitleText: null,
+    })),
+  };
+
+  const recovered = buildDirectorPlanFromTaskData({
+    draftBundle: {
+      textToImagePrompt: "",
+      imageToVideoPrompt: "",
+      narrationScript: staleDirectorPlan.storyShots.map((shot) => `镜头${shot.shotIndex}：${shot.narrationHint}`).join("\n"),
+    },
+    shotPlan,
+    directorPlan: staleDirectorPlan,
+    parameters,
+  });
+
+  assert.equal(recovered.storyShots[0]?.narrationText, blueprint.beats[0]?.spokenText);
+  assert.equal(recovered.audioCues[0]?.narrationText, blueprint.beats[0]?.spokenText);
+});
+
+test("实拍旧字幕音频结果中的阶段标题会被识别并按蓝图恢复", () => {
+  const parameters = buildParameters();
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters,
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters,
+  });
+  const directorPlan = buildDirectorPlanFromTaskData({
+    draftBundle: {
+      textToImagePrompt: "",
+      imageToVideoPrompt: "",
+      narrationScript: shotPlan.shots.map((shot) => `镜头${shot.shotIndex}：${shot.narrationHint}`).join("\n"),
+    },
+    shotPlan,
+    parameters,
+  });
+  const task = {
+    taskId: "task-real-photo",
+    ownerUserId: "user-1",
+    title: "实拍任务",
+    status: "SUBTITLE_AUDIO_READY",
+    source: buildSource(),
+    draftBundle: {
+      textToImagePrompt: "",
+      imageToVideoPrompt: "",
+      narrationScript: "片段1：先制造停留理由",
+    },
+    shotPlan,
+    directorPlan,
+    parameters,
+    createdAt: now,
+    updatedAt: now,
+    stageTimestamps: {
+      CREATED: now,
+      SUBTITLE_AUDIO_READY: now,
+    },
+  } satisfies VideoTaskRecord;
+  const staleResult = {
+    resultId: "result-real-photo",
+    taskId: task.taskId,
+    title: "字幕音频",
+    sourcePrompt: "片段1：先制造停留理由",
+    totalDurationSeconds: 7.7,
+    strategySummary: "",
+    compositionId: null,
+    compositionTitle: null,
+    voiceId: null,
+    subtitleSrtUrl: null,
+    mergedAudioUrl: null,
+    clips: [
+      {
+        id: "sub-1",
+        cueId: "sub-1",
+        shotIndex: 1,
+        segmentId: "segment-1",
+        segmentIndex: 1,
+        bindToSegmentId: "segment-1",
+        startAtSeconds: 0,
+        durationSeconds: 7.7,
+        audioDurationSeconds: null,
+        characterFocus: "旁白",
+        visualFocus: "开场",
+        fullSemanticSentence: "先制造停留理由",
+        narrationText: "",
+        subtitleText: "先制造停留理由",
+        spokenText: "",
+        note: "",
+        hasVoice: false,
+        hasSubtitle: true,
+        requiresLipSync: false,
+        voiceId: null,
+        audioUrl: "/generated-audio/stale.mp3",
+        words: [],
+      },
+    ],
+    createdAt: now,
+    updatedAt: now,
+  } satisfies NarrationResultRecord;
+
+  const staleValidation = validateNarrationResult(staleResult, task);
+  assert.equal(staleValidation.passed, false);
+
+  const recovered = recoverNarrationResultTextFromTask(task, staleResult);
+  assert.ok(recovered);
+  assert.equal(recovered.clips[0]?.fullSemanticSentence, blueprint.beats[0]?.spokenText);
+  assert.equal(recovered.clips[0]?.subtitleText, blueprint.beats[0]?.spokenText);
+  assert.equal(recovered.clips[0]?.audioUrl, null);
 });
 
 test("片段展示时长优先采用实际音频时长，其次才是计划镜头时长", () => {
@@ -304,5 +518,24 @@ test("片段展示时长优先采用实际音频时长，其次才是计划镜�
       fallbackDurationSeconds: 4,
     }),
     6.2,
+  );
+});
+
+test("片段详情展示会用恢复后的真人台词覆盖旧结构标题", () => {
+  assert.equal(
+    resolveTaskClipPayloadText({
+      recordText: "先制造停留理由",
+      recoveredText: "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住",
+      structuralRecordText: true,
+    }),
+    "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住",
+  );
+
+  assert.equal(
+    resolveTaskClipPayloadText({
+      recordText: "这是一句用户手动修改过的片段台词",
+      recoveredText: "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住",
+    }),
+    "这是一句用户手动修改过的片段台词",
   );
 });

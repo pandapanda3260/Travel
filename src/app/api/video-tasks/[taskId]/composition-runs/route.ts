@@ -4,6 +4,7 @@ import {
   directorPrimaryStepActionKeys,
   directorSecondaryStepActionKeys,
 } from "../../../../../lib/director-step-actions";
+import { resolveNarrationClipWordTimestamps } from "../../../../../lib/audio-alignment";
 import { getFfmpegLocalRuntime } from "../../../../../lib/local-service-runtime";
 import { writeSrtSubtitleFile } from "../../../../../lib/subtitle-export";
 import {
@@ -11,6 +12,10 @@ import {
   formatSubtitleDisplayUnitText,
   splitSegmentWordTimelineBySubtitleEntries,
 } from "../../../../../lib/subtitle-display";
+import {
+  resolveNarrationClipSpokenText,
+  resolveNarrationClipSubtitleText,
+} from "../../../../../lib/subtitle-text-contract";
 import { findNarrationClipsForSegment } from "../../../../../lib/video-composition-timeline";
 import {
   getDefaultSubtitleConfig,
@@ -393,7 +398,7 @@ async function buildCompositionPayload(taskId: string, options?: { readOnly?: bo
 
   const directorPlan = getTaskDirectorPlan(task);
   const clipShots = await buildTaskClipShotPayloads(task, options);
-  const narrationResult = getTaskClipNarrationResult(taskId);
+  const narrationResult = getTaskClipNarrationResult(taskId, task);
   const latestComposition = getLatestTaskVideoComposition(taskId);
   const latestPlayableComposition = getLatestCompletedTaskVideoComposition(taskId);
   const voiceSegments = directorPlan.renderSegments.filter((segment) => segment.hasVoice);
@@ -636,28 +641,33 @@ export async function POST(request: NextRequest, context: RouteContext) {
           );
           const sourceEntries =
             entry.narrationClips.length > 0
-              ? entry.narrationClips.map((clip, index) => ({
-                  id: clip.id || `${entry.item.segmentId}-clip-${index + 1}`,
-                  bindToSegmentId: entry.item.segmentId,
-                  sourceStartAtSeconds: clip.startAtSeconds,
-                  durationSeconds: clip.durationSeconds,
-                  audioDurationSeconds: clip.audioDurationSeconds ?? null,
-                  subtitleText: clip.subtitleText || clip.narrationText || "",
-                  hasSubtitle: clip.hasSubtitle !== false,
-                  hasVoice: clip.hasVoice !== false,
-                  audioUrl: clip.audioUrl ?? null,
-                  words: clip.words?.length
-                    ? clip.words
-                    : ((fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"]),
-                  subtitleDisplayCues: clip.subtitleDisplayCues ?? null,
-                  narrationClip: clip,
-                }))
+              ? entry.narrationClips.map((clip, index) => {
+                  const structuredWords = resolveNarrationClipWordTimestamps(clip);
+                  return {
+                    id: clip.id || `${entry.item.segmentId}-clip-${index + 1}`,
+                    bindToSegmentId: entry.item.segmentId,
+                    sourceStartAtSeconds: clip.startAtSeconds,
+                    durationSeconds: clip.durationSeconds,
+                    audioDurationSeconds: clip.audioDurationSeconds ?? null,
+                    voiceText: resolveNarrationClipSpokenText(clip),
+                    subtitleText: resolveNarrationClipSubtitleText(clip),
+                    hasSubtitle: clip.hasSubtitle !== false,
+                    hasVoice: clip.hasVoice !== false,
+                    audioUrl: clip.audioUrl ?? null,
+                    words: structuredWords.length
+                      ? structuredWords
+                      : ((fallbackSubtitleWords[index] ?? []) as NarrationDraftClip["words"]),
+                    subtitleDisplayCues: clip.subtitleDisplayCues ?? null,
+                    narrationClip: clip,
+                  };
+                })
               : entry.subtitleEntries.map((subtitle, index) => ({
                   id: `${entry.item.segmentId}-subtitle-${index + 1}`,
                   bindToSegmentId: entry.item.segmentId,
                   sourceStartAtSeconds: subtitle.startAtSeconds,
                   durationSeconds: subtitle.durationSeconds,
                   audioDurationSeconds: null,
+                  voiceText: "",
                   subtitleText: subtitle.text,
                   hasSubtitle: true,
                   hasVoice: false,
@@ -712,7 +722,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
               durationSeconds: audioWindow.durationSeconds,
               fadeOutSeconds: audioWindow.fadeOutSeconds,
               bindToSegmentId: `${taskId}-${voiceEntry.bindToSegmentId}`,
-              text: voiceEntry.subtitleText,
+              text: voiceEntry.voiceText,
               note: `片段 ${voiceEntry.entry.item.shotIndex} 音频`,
             } satisfies CompositionAudioClip;
           })

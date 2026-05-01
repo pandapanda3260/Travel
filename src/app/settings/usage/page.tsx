@@ -1,37 +1,63 @@
+import { Suspense } from "react";
+
 import { PageBrandTitle } from "../../_components/page-brand-title";
 import { formatDateTime } from "../../../lib/auth-display";
 import { requireUserPageSession } from "../../../lib/auth-session";
-import { getUserModelUsagePayload } from "../../../lib/model-usage-service";
+import { getCommercialCreditAccountPayload } from "../../../lib/commercial-billing-service";
+import { listCommercialOrdersByUserId } from "../../../lib/commercial-order-service";
 
 export const dynamic = "force-dynamic";
 
-function formatCurrency(value: number) {
+function formatCredits(value: number) {
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatMoney(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "未记录";
+  }
   return `¥${value.toFixed(value >= 1 ? 2 : 4)}`;
 }
 
-function formatPoints(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+function formatPercent(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "未记录";
+  }
+  return `${(value * 100).toFixed(1)}%`;
 }
 
-function getStatusLabel(status: "charged" | "unpriced" | "skipped") {
+function formatOrderStatus(status: string) {
   switch (status) {
-    case "charged":
-      return "已扣费";
-    case "unpriced":
-      return "待定价";
+    case "pending_payment":
+      return "待确认";
+    case "paid":
+      return "已支付";
+    case "fulfilled":
+      return "已到账";
+    case "refunded":
+      return "已退款";
+    case "closed":
+      return "已关闭";
     default:
-      return "未计费";
+      return status;
   }
 }
 
-function getStatusClass(status: "charged" | "unpriced" | "skipped") {
-  return status === "charged" ? "positive" : "negative";
+function UsageBillingFallback() {
+  return (
+    <main className="shell">
+      <section className="content member-center-page settings-console-page">
+        <section className="panel member-empty-panel">用量账单加载中...</section>
+      </section>
+    </main>
+  );
 }
 
-export default async function UsageBillingPage() {
+async function UsageBillingPageContent() {
   const session = await requireUserPageSession();
-  const usage = getUserModelUsagePayload(session.userId);
-  const riskCalls = usage.summary.unpricedCalls + usage.summary.skippedCalls;
+  const account = getCommercialCreditAccountPayload(session.userId);
+  const orders = listCommercialOrdersByUserId(session.userId, 20);
+  const usageTransactions = account.transactions.filter((record) => record.sourceType === "usage_charge");
 
   return (
     <main className="shell">
@@ -39,7 +65,7 @@ export default async function UsageBillingPage() {
         <section className="header-panel member-header-panel settings-console-header">
           <header className="topbar">
             <div className="topbar-main compact">
-              <PageBrandTitle pageName="Usage Billing" />
+              <PageBrandTitle pageName="用量账单" />
             </div>
           </header>
         </section>
@@ -47,36 +73,41 @@ export default async function UsageBillingPage() {
         <section className="member-hero panel">
           <div className="member-hero-main">
             <div className="member-hero-copy-stack">
-              <span className="settings-section-kicker">近 30 天</span>
-              <h2>AI 用量账单</h2>
-              <p className="member-hero-copy">展示近 30 天模型调用、金额估算和积分扣减流水。</p>
+              <span className="settings-section-kicker">商业账本</span>
+              <h2>{account.activeMembership?.planName ?? "未开通套餐"}</h2>
+              <p className="member-hero-copy">
+                {account.activeMembership
+                  ? `会员有效至 ${formatDateTime(account.activeMembership.endAt)}`
+                  : "开通会员后，真实 API 成本会按新积分规则结算"}
+              </p>
             </div>
             <div className="member-pill-row">
-              <span className="member-pill accent">剩余积分 {formatPoints(usage.pointsAccount?.availablePoints ?? 0)}</span>
-              <span className="member-pill">{riskCalls > 0 ? "存在待核对用量" : "账单正常"}</span>
+              <span className="member-pill accent">可用 {formatCredits(account.balance.availableCredits)}</span>
+              <span className="member-pill">冻结 {formatCredits(account.balance.frozenCredits)}</span>
+              <span className="member-pill">扣费 {usageTransactions.length} 笔</span>
             </div>
           </div>
 
           <div className="member-stat-grid settings-metric-grid">
             <article className="member-stat-card">
-              <span>近 30 天调用</span>
-              <strong>{usage.summary.totalCalls}</strong>
-              <p>已扣费 {usage.summary.chargedCalls}</p>
+              <span>可用积分</span>
+              <strong>{formatCredits(account.balance.availableCredits)}</strong>
+              <p>可用于真实 API 生成</p>
             </article>
             <article className="member-stat-card">
-              <span>模型费用</span>
-              <strong>{formatCurrency(usage.summary.totalAmountRmb)}</strong>
-              <p>供应商价格折算</p>
+              <span>冻结积分</span>
+              <strong>{formatCredits(account.balance.frozenCredits)}</strong>
+              <p>生成中任务占用</p>
             </article>
             <article className="member-stat-card">
-              <span>扣减积分</span>
-              <strong>{formatPoints(usage.summary.totalPoints)}</strong>
-              <p>按计费规则实时扣减</p>
+              <span>累计消耗</span>
+              <strong>{formatCredits(account.balance.lifetimeUsedCredits)}</strong>
+              <p>成功生成后确认扣除</p>
             </article>
             <article className="member-stat-card">
-              <span>待核对</span>
-              <strong>{riskCalls}</strong>
-              <p>待定价或未计费用量</p>
+              <span>订单数量</span>
+              <strong>{orders.length}</strong>
+              <p>最近 20 条商业订单</p>
             </article>
           </div>
         </section>
@@ -84,51 +115,87 @@ export default async function UsageBillingPage() {
         <section className="usage-billing-grid">
           <article className="panel member-surface usage-ledger-card">
             <div className="panel-header compact">
-              <h3>模型用量流水</h3>
-              <span className="table-meta">{usage.records.length} 条</span>
+              <h3>扣费明细</h3>
+              <span className="table-meta">{usageTransactions.length} 条</span>
             </div>
             <div className="member-record-list">
-              {usage.records.map((record) => (
-                <div key={record.usageId} className="member-record-item">
+              {usageTransactions.slice(0, 40).map((record) => (
+                <div key={record.transactionId} className="member-record-item">
                   <div>
-                    <strong>{record.pricingSnapshot.label ?? record.modelId ?? record.serviceName}</strong>
+                    <strong>{record.remark || record.featureCode || "用量扣费"}</strong>
                     <span>
-                      {getStatusLabel(record.status)} · {record.serviceName}
-                      {record.objectId ? ` · ${record.objectType ?? "对象"} ${record.objectId}` : ""}
+                      {record.provider ?? "供应商未记录"} · {record.modelId ?? "模型未记录"}
+                    </span>
+                    <span>
+                      成本 {formatMoney(record.realCostRmb)} · 收入 {formatMoney(record.chargedRevenueRmb)} · 毛利{" "}
+                      {formatPercent(record.grossMarginRate)}
                     </span>
                     <span>{formatDateTime(record.createdAt)}</span>
                   </div>
-                  <b className={getStatusClass(record.status)}>-{formatPoints(record.pointsCost)}</b>
+                  <b className="negative">{formatCredits(record.changeCredits)}</b>
                 </div>
               ))}
-              {usage.records.length === 0 ? <div className="member-empty-inline">暂无 AI 用量记录</div> : null}
+              {usageTransactions.length === 0 ? <div className="member-empty-inline">暂无扣费明细</div> : null}
             </div>
           </article>
 
           <article className="panel member-surface usage-detail-card">
             <div className="panel-header compact">
-              <h3>费用明细</h3>
+              <h3>积分流水</h3>
+              <span className="table-meta">{account.transactions.length} 条</span>
             </div>
             <div className="member-record-list compact">
-              {usage.records.slice(0, 20).map((record) => (
-                <div key={`${record.usageId}-amount`} className="member-record-item">
+              {account.transactions.slice(0, 40).map((record) => (
+                <div key={record.transactionId} className="member-record-item">
                   <div>
-                    <strong>{record.serviceName}</strong>
+                    <strong>{record.remark || record.eventType}</strong>
                     <span>
-                      {record.pricingKey ?? "未匹配定价"} · {record.provider ?? "未知供应商"}
+                      {record.featureCode ?? record.sourceType}
+                      {record.taskId ? ` · 任务 ${record.taskId}` : ""}
                     </span>
-                    <span>
-                      金额 {formatCurrency(record.amountRmb)} · 积分 {formatPoints(record.pointsCost)}
-                    </span>
+                    <span>{formatDateTime(record.createdAt)}</span>
                   </div>
-                  <b className={record.amountRmb > 0 ? "negative" : "positive"}>{formatCurrency(record.amountRmb)}</b>
+                  <b className={record.changeCredits >= 0 ? "positive" : "negative"}>
+                    {record.changeCredits >= 0 ? "+" : ""}
+                    {formatCredits(record.changeCredits)}
+                  </b>
                 </div>
               ))}
-              {usage.records.length === 0 ? <div className="member-empty-inline">暂无费用明细</div> : null}
+              {account.transactions.length === 0 ? <div className="member-empty-inline">暂无积分流水</div> : null}
             </div>
           </article>
         </section>
+
+        <section className="panel member-surface usage-detail-card">
+          <div className="panel-header compact">
+            <h3>订单记录</h3>
+            <span className="table-meta">{orders.length} 条</span>
+          </div>
+          <div className="member-record-list compact">
+            {orders.map((order) => (
+              <div key={order.orderId} className="member-record-item">
+                <div>
+                  <strong>{order.productName}</strong>
+                  <span>
+                    {formatOrderStatus(order.status)} · {formatCredits(order.credits)} 积分
+                  </span>
+                  <span>{formatDateTime(order.createdAt)}</span>
+                </div>
+                <b className={order.status === "fulfilled" ? "positive" : "negative"}>{formatMoney(order.amountRmb)}</b>
+              </div>
+            ))}
+            {orders.length === 0 ? <div className="member-empty-inline">暂无订单记录</div> : null}
+          </div>
+        </section>
       </section>
     </main>
+  );
+}
+
+export default function UsageBillingPage() {
+  return (
+    <Suspense fallback={<UsageBillingFallback />}>
+      <UsageBillingPageContent />
+    </Suspense>
   );
 }

@@ -1,6 +1,10 @@
 import { withAdminProviderCallTracking } from "./admin-data-flow-tracking";
 import { getVoiceManagementRuntime } from "./voice-management-config";
-import { assertModelUsagePreflight, recordModelUsage } from "./model-usage-service";
+import {
+  confirmCommercialModelUsageCharge,
+  prepareCommercialModelUsageCharge,
+  releaseCommercialModelUsageCharge,
+} from "./model-usage-service";
 import { callSpeechOpenApi } from "./volc-speech-openapi";
 
 export const supportedCloneFormats = ["wav", "mp3", "ogg", "m4a", "aac", "pcm"] as const;
@@ -204,95 +208,98 @@ export async function uploadVoiceClone(input: VoiceCloneUploadInput) {
   }
 
   const pricingKey = "doubao.voice.clone.2.0";
-  assertModelUsagePreflight({
+  const estimatedMetrics = {
+    characterCount: Array.from(input.transcript).length,
+    requestCount: 1,
+  };
+  const commercialCharge = prepareCommercialModelUsageCharge({
     pricingKey,
     serviceName: "voice.clone",
-    estimatedMetrics: {
-      characterCount: Array.from(input.transcript).length,
-      requestCount: 1,
-    },
+    estimatedMetrics,
   });
 
-  const response = await withAdminProviderCallTracking(
-    {
-      enabled: runtime.cloneEnabled,
-      serviceName: "voice.clone.upload",
-      provider: "火山引擎 · 声音复刻",
-      modelId: runtime.cloneResourceId,
-      objectType: "voice_clone",
-      objectId: input.speakerId,
-    },
-    () =>
-      fetch("https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer;${runtime.accessToken}`,
-          "Content-Type": "application/json",
-          "Resource-Id": runtime.cloneResourceId,
-        },
-        body: JSON.stringify({
-          appid: runtime.appId,
-          speaker_id: input.speakerId,
-          audios: [
-            {
-              audio_bytes: input.audioBuffer.toString("base64"),
-              audio_format: input.fileFormat,
-              text: input.transcript,
-            },
-          ],
-          source: 2,
-          language: input.language === "en" ? 1 : 0,
-          model_type: input.modelType,
-          extra_params: JSON.stringify({
-            demo_text: input.transcript.slice(0, 80),
-            enable_audio_denoise: input.enableDenoise ?? false,
+  try {
+    const response = await withAdminProviderCallTracking(
+      {
+        enabled: runtime.cloneEnabled,
+        serviceName: "voice.clone.upload",
+        provider: "火山引擎 · 声音复刻",
+        modelId: runtime.cloneResourceId,
+        objectType: "voice_clone",
+        objectId: input.speakerId,
+      },
+      () =>
+        fetch("https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer;${runtime.accessToken}`,
+            "Content-Type": "application/json",
+            "Resource-Id": runtime.cloneResourceId,
+          },
+          body: JSON.stringify({
+            appid: runtime.appId,
+            speaker_id: input.speakerId,
+            audios: [
+              {
+                audio_bytes: input.audioBuffer.toString("base64"),
+                audio_format: input.fileFormat,
+                text: input.transcript,
+              },
+            ],
+            source: 2,
+            language: input.language === "en" ? 1 : 0,
+            model_type: input.modelType,
+            extra_params: JSON.stringify({
+              demo_text: input.transcript.slice(0, 80),
+              enable_audio_denoise: input.enableDenoise ?? false,
+            }),
           }),
         }),
-      }),
-  );
+    );
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    BaseResp?: {
-      StatusCode?: number;
-      StatusMessage?: string;
+    const payload = (await response.json().catch(() => ({}))) as {
+      BaseResp?: {
+        StatusCode?: number;
+        StatusMessage?: string;
+      };
+      speaker_id?: string;
     };
-    speaker_id?: string;
-  };
 
-  if (!response.ok || payload.BaseResp?.StatusCode !== 0) {
-    const apiMsg = payload.BaseResp?.StatusMessage ?? "";
-    const code = payload.BaseResp?.StatusCode;
+    if (!response.ok || payload.BaseResp?.StatusCode !== 0) {
+      const apiMsg = payload.BaseResp?.StatusMessage ?? "";
+      const code = payload.BaseResp?.StatusCode;
 
-    if (apiMsg.includes("mismatched") || code === 1107) {
-      throw new Error(
-        `音色槽位 ID「${input.speakerId}」无法使用（${apiMsg}）。` +
-        "请确认该 ID 是从火山引擎控制台「声音复刻」中获取的有效槽位，且与当前 Resource-Id（" +
-        runtime.cloneResourceId +
-        "）匹配。",
-      );
+      if (apiMsg.includes("mismatched") || code === 1107) {
+        throw new Error(
+          `音色槽位 ID「${input.speakerId}」无法使用（${apiMsg}）。` +
+          "请确认该 ID 是从火山引擎控制台「声音复刻」中获取的有效槽位，且与当前 Resource-Id（" +
+          runtime.cloneResourceId +
+          "）匹配。",
+        );
+      }
+
+      throw new Error(apiMsg || "声音复刻提交失败");
     }
 
-    throw new Error(apiMsg || "声音复刻提交失败");
+    confirmCommercialModelUsageCharge(commercialCharge, {
+      pricingKey,
+      serviceName: "voice.clone",
+      provider: "火山引擎 · 声音复刻",
+      modelId: runtime.cloneResourceId,
+      metrics: estimatedMetrics,
+      requestId: payload.speaker_id ?? input.speakerId,
+      objectType: "voice_clone",
+      objectId: input.speakerId,
+      remark: "声音复刻训练提交",
+    });
+
+    return {
+      speakerId: payload.speaker_id ?? input.speakerId,
+    };
+  } catch (error) {
+    releaseCommercialModelUsageCharge(commercialCharge, "provider_failed");
+    throw error;
   }
-
-  recordModelUsage({
-    pricingKey,
-    serviceName: "voice.clone",
-    provider: "火山引擎 · 声音复刻",
-    modelId: runtime.cloneResourceId,
-    metrics: {
-      characterCount: Array.from(input.transcript).length,
-      requestCount: 1,
-    },
-    requestId: payload.speaker_id ?? input.speakerId,
-    objectType: "voice_clone",
-    objectId: input.speakerId,
-    remark: "声音复刻训练提交",
-  });
-
-  return {
-    speakerId: payload.speaker_id ?? input.speakerId,
-  };
 }
 
 export async function queryVoiceCloneStatus(speakerId: string): Promise<VoiceCloneStatusResult> {

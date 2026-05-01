@@ -270,8 +270,15 @@ function buildShotPayload(taskId: string) {
         generationMode: shot.generationMode ?? null,
         assetId: shot.assetId ?? null,
         assetSubjectSummary: shot.assetSubjectSummary ?? null,
-        narrationText: storyShot?.narrationText || shotPlanItem?.narrationHint || "",
-        subtitleText: storyShot?.subtitleText || storyShot?.narrationText || shotPlanItem?.narrationHint || "",
+        narrationText: storyShot?.sourceSpokenText || storyShot?.narrationText || shotPlanItem?.sourceSpokenText || "",
+        subtitleText:
+          storyShot?.sourceSubtitleText ||
+          storyShot?.subtitleText ||
+          storyShot?.sourceSpokenText ||
+          storyShot?.narrationText ||
+          shotPlanItem?.sourceSubtitleText ||
+          shotPlanItem?.sourceSpokenText ||
+          "",
         durationSeconds: storyShot?.durationSeconds ?? shotPlanItem?.durationSeconds ?? null,
         commercialPhase: storyShot?.commercialPhase ?? shotPlanItem?.commercialPhase ?? null,
         commercialIntent: storyShot?.commercialIntent ?? shotPlanItem?.commercialIntent ?? null,

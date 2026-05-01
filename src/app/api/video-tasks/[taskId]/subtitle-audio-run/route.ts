@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { synthesizeSpeechWithResourceFallbacks, type SpeechSynthesisRequest } from "../../../../../lib/audio-provider";
+import { buildAudioAlignment } from "../../../../../lib/audio-alignment";
 import { getSpeechSynthesisRuntime } from "../../../../../lib/audio-provider-config";
+import { resolveSubtitleAudioEditInvalidationScope } from "../../../../../lib/subtitle-audio-invalidation";
 import {
   createAdminTaskStageTracker,
   withAdminProviderCallTracking,
@@ -29,6 +31,7 @@ import {
   type NarrationDeliveryStrategy,
 } from "../../../../../lib/narration-standards";
 import { buildSubtitleAudioRepairSystemPrompt } from "../../../../../lib/narration-prompt-library";
+import { getRealPhotoNarrationBlueprintFromShotPlan } from "../../../../../lib/real-photo-narration-source";
 import {
   audioFormatOptions,
   audioLoudnessRateOptions,
@@ -47,10 +50,19 @@ import {
   normalizeSubtitleDisplayCues,
   type SubtitleDisplayCueInput,
 } from "../../../../../lib/subtitle-display";
+import {
+  resolveNarrationClipFullSemanticText,
+  resolveNarrationClipSpokenText,
+  resolveNarrationClipSubtitleText,
+} from "../../../../../lib/subtitle-text-contract";
+import { recoverNarrationResultTextFromTask } from "../../../../../lib/task-narration-result-recovery";
 import { buildDirectorPlanFromTaskData, getTaskDirectorPlan } from "../../../../../lib/video-task-director";
 import { validateNarrationResult } from "../../../../../lib/generation-validator";
 import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
-import { clearTaskClipAndCompositionOutputs } from "../../../../../lib/video-task-output-reset";
+import {
+  clearTaskClipAndCompositionOutputs,
+  clearTaskCompositionOutputs,
+} from "../../../../../lib/video-task-output-reset";
 import { getVideoTask, patchVideoTask } from "../../../../../lib/video-task-store";
 import {
   listTaskVisualImageShots,
@@ -58,7 +70,7 @@ import {
 } from "../../../../../lib/task-visual-image-store";
 import { getActiveKeyMaterialWorkflow } from "../../../../../lib/key-material-task-store";
 import type { VideoTaskDirectorPlan } from "../../../../../lib/video-task-schema";
-import { type VideoTaskVideoType } from "../../../../../lib/video-task-schema";
+import { getVideoTaskStatusIndex, type VideoTaskVideoType } from "../../../../../lib/video-task-schema";
 import { deriveVideoTaskStructure } from "../../../../../lib/video-task-structure";
 import { runWithModelUsageContext } from "../../../../../lib/model-usage-context";
 import { createProgressStream, type ProgressCallback } from "../../../../../lib/progress-stream";
@@ -107,7 +119,7 @@ type SubtitleAudioApiSettings = {
 };
 
 function getClipLineText(clip: NarrationDraftClip) {
-  return clip.narrationText || clip.subtitleText || "";
+  return resolveNarrationClipFullSemanticText(clip);
 }
 
 function getSubtitleDisplayCueSignature(cues: SubtitleDisplayCueInput[] | null | undefined) {
@@ -364,7 +376,7 @@ function rewriteNarrationScriptWithClips(script: string, clips: NarrationDraftCl
       const clip = label === "片段" ? segmentClipMap.get(targetIndex) : shotClipMap.get(targetIndex);
       const nextText =
         clip && (clip.hasVoice || clip.hasSubtitle)
-          ? sanitizeNarrationText(clip.narrationText || clip.subtitleText)
+          ? sanitizeNarrationText(getClipLineText(clip))
           : clip
             ? ""
             : fallbackText;
@@ -387,7 +399,7 @@ function buildNarrationScriptFromClips(clips: NarrationDraftClip[], videoType: V
         return "";
       }
       seenKeys.add(key);
-      const text = sanitizeNarrationText(clip.narrationText || clip.subtitleText, {
+      const text = sanitizeNarrationText(getClipLineText(clip), {
         stripLeadingDayPrefix: true,
       });
       return `${label}${targetIndex}：${text}`;
@@ -428,7 +440,7 @@ async function synthesizeNarrationClip(
   videoType: VideoTaskVideoType,
   deliveryStrategy?: NarrationDeliveryStrategy | null,
 ) {
-  const sourceText = clip.spokenText || clip.narrationText || clip.subtitleText;
+  const sourceText = resolveNarrationClipSpokenText(clip);
   if (clip.hasVoice === false || !sourceText.trim()) {
     return {
       ...clip,
@@ -436,9 +448,11 @@ async function synthesizeNarrationClip(
       audioUrl: null,
       audioDurationSeconds: null,
       words: [],
+      audioAlignment: null,
+      fullSemanticSentence: resolveNarrationClipFullSemanticText(clip),
       narrationText: "",
       spokenText: "",
-      subtitleText: clip.hasSubtitle === false ? "" : clip.subtitleText,
+      subtitleText: resolveNarrationClipSubtitleText(clip),
     } satisfies NarrationDraftClip;
   }
 
@@ -496,22 +510,24 @@ async function synthesizeNarrationClip(
       actualDurationSeconds != null ? isClipOverDuration(actualDurationSeconds, clip.durationSeconds) : false;
     const isSlow =
       actualDurationSeconds != null ? isNarrationSpeechRateTooSlow(currentText, actualDurationSeconds) : false;
+    const synthesizedText = sanitizeNarrationText(currentText, {
+      stripLeadingDayPrefix: true,
+    });
     const synthesizedClip = {
       ...clip,
-      narrationText: sanitizeNarrationText(currentText, {
-        stripLeadingDayPrefix: true,
-      }),
-      spokenText: currentText,
-      subtitleText:
-        clip.hasSubtitle === false
-          ? ""
-          : sanitizeNarrationText(clip.subtitleText || clip.narrationText || currentText, {
-              stripLeadingDayPrefix: true,
-            }),
+      fullSemanticSentence: synthesizedText,
+      narrationText: synthesizedText,
+      spokenText: synthesizedText,
+      subtitleText: clip.hasSubtitle === false ? "" : synthesizedText,
       voiceId: resolvedVoiceId ?? null,
       audioUrl: result.audioUrl,
       audioDurationSeconds: actualDurationSeconds,
       words: result.words,
+      audioAlignment: buildAudioAlignment({
+        audioDurationSeconds: actualDurationSeconds,
+        words: result.words,
+        fallbackDurationSeconds: clip.durationSeconds,
+      }),
     } satisfies NarrationDraftClip;
 
     if (!isOverflow && !isSlow) {
@@ -596,7 +612,7 @@ async function synthesizeNarrationClips(
 }
 
 function estimateSubtitleClipDurationMs(clip: NarrationDraftClip) {
-  const textLength = countNarrationCharacters(clip.narrationText || clip.subtitleText || "");
+  const textLength = countNarrationCharacters(getClipLineText(clip));
   const base = 1200;
   const audioBudget = Math.max(800, (clip.durationSeconds || 3) * 850);
   const textBudget = textLength * 55;
@@ -626,6 +642,8 @@ function buildNarrationDraftFromDirectorPlan(input: {
         const speechRate = sub.durationSeconds > 0 ? Math.round((sub.charCount / sub.durationSeconds) * 10) / 10 : 2.4;
         const hasVoice = coveredShots.some((shot) => shot.hasVoice) || Boolean(boundSegment?.hasVoice);
         const hasSubtitle = coveredShots.some((shot) => shot.hasSubtitle) || Boolean(boundSegment?.hasSubtitle);
+        const narrationText = anchorShot?.sourceSpokenText || sub.text;
+        const subtitleText = hasVoice ? narrationText : anchorShot?.sourceSubtitleText || sub.text;
 
         clips.push({
           id: `sub-${segPlan.segmentIndex}-${clips.length}`,
@@ -639,9 +657,10 @@ function buildNarrationDraftFromDirectorPlan(input: {
           audioDurationSeconds: null,
           characterFocus: boundSegment?.hasTalent ? "主角" : "旁白",
           visualFocus: anchorShot?.sceneDescription ?? boundSegment?.videoPrompt ?? `片段 ${segPlan.segmentIndex}`,
-          narrationText: anchorShot?.sourceSpokenText || sub.text,
-          subtitleText: anchorShot?.sourceSubtitleText || sub.text,
-          spokenText: anchorShot?.sourceSpokenText || null,
+          fullSemanticSentence: hasVoice ? narrationText : subtitleText,
+          narrationText,
+          subtitleText,
+          spokenText: hasVoice ? narrationText : anchorShot?.sourceSpokenText || null,
           note: `片段 ${segPlan.segmentIndex} | 情绪: ${emotion} | 语速: ${speechRate}字/秒 | 覆盖镜头: ${sub.coveredShotIndexes.join(",")}`,
           hasVoice,
           hasSubtitle,
@@ -649,6 +668,7 @@ function buildNarrationDraftFromDirectorPlan(input: {
           voiceId: null,
           audioUrl: null,
           words: [],
+          audioAlignment: null,
         });
       }
     }
@@ -656,6 +676,8 @@ function buildNarrationDraftFromDirectorPlan(input: {
     clips = input.directorPlan.audioCues.map((cue) => {
       const boundSegment =
         input.directorPlan.renderSegments.find((segment) => segment.segmentId === cue.targetSegmentId) ?? null;
+      const narrationText = cue.sourceSpokenText || cue.narrationText;
+      const subtitleText = cue.hasVoice ? narrationText : cue.sourceSubtitleText || cue.subtitleText;
 
       return {
         id: cue.cueId,
@@ -669,9 +691,10 @@ function buildNarrationDraftFromDirectorPlan(input: {
         audioDurationSeconds: cue.audioDurationSeconds ?? null,
         characterFocus: boundSegment?.hasTalent ? "主角" : "旁白",
         visualFocus: boundSegment?.videoPrompt ?? boundSegment?.imagePrompt ?? `片段 ${cue.targetSegmentIndex}`,
-        narrationText: cue.sourceSpokenText || cue.narrationText,
-        subtitleText: cue.sourceSubtitleText || cue.subtitleText,
-        spokenText: cue.sourceSpokenText || null,
+        fullSemanticSentence: cue.hasVoice ? narrationText : subtitleText,
+        narrationText,
+        subtitleText,
+        spokenText: cue.hasVoice ? narrationText : cue.sourceSpokenText || null,
         note: `片段 ${cue.targetSegmentIndex}${cue.requiresLipSync ? "（需口型）" : ""}`,
         hasVoice: cue.hasVoice,
         hasSubtitle: cue.hasSubtitle,
@@ -679,6 +702,11 @@ function buildNarrationDraftFromDirectorPlan(input: {
         voiceId: cue.voiceId,
         audioUrl: cue.audioUrl ?? null,
         words: cue.words ?? [],
+        audioAlignment: buildAudioAlignment({
+          audioDurationSeconds: cue.audioDurationSeconds ?? null,
+          words: cue.words ?? [],
+          fallbackDurationSeconds: cue.plannedDurationSeconds,
+        }),
       };
     });
   }
@@ -720,7 +748,7 @@ function loadLatestTaskSubtitleAudioPayload(taskId: string) {
 
   return {
     task,
-    result: latestResult,
+    result: task ? recoverNarrationResultTextFromTask(task, latestResult) : latestResult,
     runtime: {
       ttsProviderLabel: ttsRuntime.providerLabel,
       ttsResourceId: ttsRuntime.resourceId,
@@ -766,8 +794,11 @@ async function executeSubtitleAudioGeneration(input: {
     enableSubtitle: task.parameters.audio.enableSubtitle,
   });
   const subtitlePlanSourceScript = buildNarrationScriptFromSubtitlePlan(task.shotPlan, task.parameters.video.videoType);
+  const hasRealPhotoNarrationBlueprint = Boolean(getRealPhotoNarrationBlueprintFromShotPlan(task.shotPlan));
   const sourcePrompt = usesSegmentLevelSubtitleSource(task.parameters.video.videoType)
-    ? body.narrationScript?.trim() || subtitlePlanSourceScript || task.draftBundle.narrationScript.trim()
+    ? hasRealPhotoNarrationBlueprint
+      ? subtitlePlanSourceScript || body.narrationScript?.trim() || task.draftBundle.narrationScript.trim()
+      : body.narrationScript?.trim() || subtitlePlanSourceScript || task.draftBundle.narrationScript.trim()
     : body.narrationScript?.trim() || task.draftBundle.narrationScript.trim() || subtitlePlanSourceScript;
   const derivedStructure = deriveVideoTaskStructure({
     source: task.source,
@@ -886,7 +917,7 @@ async function executeSubtitleAudioGeneration(input: {
             : null,
         }));
 
-        const voicedClips = clipsWithVoices.filter((clip) => clip.hasVoice !== false && clip.narrationText.trim());
+          const voicedClips = clipsWithVoices.filter((clip) => clip.hasVoice !== false && getClipLineText(clip).trim());
         const tracker = new WeightedProgressTracker(
           emitProgress,
           [
@@ -894,7 +925,7 @@ async function executeSubtitleAudioGeneration(input: {
             { id: "create_result", weight: 6, estimatedMs: 400 },
             ...voicedClips.map((clip) => ({
               id: `clip-${clip.id}`,
-              weight: Math.max(1, countNarrationCharacters(clip.narrationText || clip.subtitleText || "") / 6),
+              weight: Math.max(1, countNarrationCharacters(getClipLineText(clip)) / 6),
               estimatedMs: estimateSubtitleClipDurationMs(clip),
               label: `${getNarrationUnitLabel(adjustedParameters.video.videoType)} ${
                 usesSegmentLevelSubtitleSource(adjustedParameters.video.videoType)
@@ -1190,6 +1221,7 @@ async function executeSubtitleAudioLineUpdate(input: {
     : null;
   const editedClip = {
     ...targetClip,
+    fullSemanticSentence: nextText,
     narrationText: targetClip.hasVoice === false ? "" : nextText,
     subtitleText: targetClip.hasSubtitle === false ? "" : nextText,
     subtitleDisplayCues: hasDisplayCueUpdate ? nextDisplayCues : textChanged ? null : targetClip.subtitleDisplayCues,
@@ -1198,6 +1230,7 @@ async function executeSubtitleAudioLineUpdate(input: {
     audioUrl: textChanged ? null : targetClip.audioUrl,
     audioDurationSeconds: textChanged ? null : targetClip.audioDurationSeconds,
     words: textChanged ? [] : targetClip.words,
+    audioAlignment: textChanged ? null : targetClip.audioAlignment,
   } satisfies NarrationDraftClip;
 
   return runWithModelUsageContext(
@@ -1257,10 +1290,19 @@ async function executeSubtitleAudioLineUpdate(input: {
       const previousDirectorPlan = getTaskDirectorPlan(taskForPatch);
       const visualStructureChanged =
         buildStoryShotSignature(previousDirectorPlan) !== buildStoryShotSignature(finalDirectorPlan);
+      const invalidationScope = resolveSubtitleAudioEditInvalidationScope({
+        textChanged,
+        displayCuesChanged,
+        visualStructureChanged,
+      });
       if (!visualStructureChanged) {
         autoSelectRecommendedCandidates(taskId);
       }
-      clearTaskClipAndCompositionOutputs(taskId);
+      if (invalidationScope === "clip_and_composition") {
+        clearTaskClipAndCompositionOutputs(taskId);
+      } else if (invalidationScope === "composition_only") {
+        clearTaskCompositionOutputs(taskId);
+      }
 
       const selectedVisualShotCount = visualStructureChanged ? 0 : countSelectedVisualShots(taskId, finalDirectorPlan);
       const allVisualShotsSelected =
@@ -1268,21 +1310,32 @@ async function executeSubtitleAudioLineUpdate(input: {
         finalDirectorPlan.storyShots.length > 0 &&
         selectedVisualShotCount >= finalDirectorPlan.storyShots.length;
       const baseTask = patchVideoTask(taskId, {
-        status: "CREATED",
+        status:
+          invalidationScope === "composition_only" &&
+          getVideoTaskStatusIndex(taskForPatch.status) >= getVideoTaskStatusIndex("COMPOSITION_READY")
+            ? "CLIPS_READY"
+            : invalidationScope === "composition_only"
+              ? taskForPatch.status
+              : "CREATED",
         draftBundle: finalDraftBundle,
         shotPlan: finalShotPlan,
         directorPlan: finalDirectorPlan,
-        stageTimestamps: {
-          SUBTITLE_AUDIO_READY: undefined,
-          IMAGES_READY: undefined,
-          CLIPS_READY: undefined,
-          COMPOSITION_READY: undefined,
-        },
+        stageTimestamps:
+          invalidationScope === "composition_only"
+            ? {
+                COMPOSITION_READY: undefined,
+              }
+            : {
+                SUBTITLE_AUDIO_READY: undefined,
+                IMAGES_READY: undefined,
+                CLIPS_READY: undefined,
+                COMPOSITION_READY: undefined,
+              },
       });
       const validation = baseTask && savedResult ? validateNarrationResult(savedResult, baseTask) : null;
       const saveTaskAt = new Date().toISOString();
       const nextTask =
-        validation?.passed && baseTask
+        validation?.passed && baseTask && invalidationScope !== "composition_only"
           ? patchVideoTask(taskId, {
               status: allVisualShotsSelected ? "IMAGES_READY" : "SUBTITLE_AUDIO_READY",
               stageTimestamps: {

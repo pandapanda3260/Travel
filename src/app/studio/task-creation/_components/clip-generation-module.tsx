@@ -729,6 +729,7 @@ export function ClipGenerationModule({
     onPrimaryActionChange({
       label: primaryActionLabel,
       isRunning: primaryRunning || isInitialClipListLoading,
+      busyDisplay: isInitialClipListLoading ? "status" : "progress",
       progressPercent: primaryProgressPercent,
       canRun: !clipActionBlockedReason,
       blockedReason: clipActionBlockedReason,
@@ -982,7 +983,11 @@ export function ClipGenerationModule({
                   disabled={generatingShotIndex === selectedShot.shotIndex}
                   onClick={() => void handleGenerateShot(selectedShot.shotIndex)}
                 >
-                  {generatingShotIndex === selectedShot.shotIndex ? "生成中..." : "重新生成该片段"}
+                  {generatingShotIndex === selectedShot.shotIndex
+                    ? "生成中..."
+                    : selectedShotPreview?.videoUrl || selectedShot.job || selectedShot.clipRecord
+                      ? "重新生成该片段"
+                      : "生成该片段"}
                 </button>
               </div>
             </div>

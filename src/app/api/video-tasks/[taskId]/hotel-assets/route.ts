@@ -10,6 +10,7 @@ import { generateSeedreamImages, type ImageGenerationResult } from "../../../../
 import { getImageCleaningRuntime } from "../../../../../lib/image-provider-config";
 import { runWithModelUsageContext } from "../../../../../lib/model-usage-context";
 import { requireOwnedVideoTask } from "../../../../../lib/video-task-route-guard";
+import { buildTaskHotelAssetAnalysisStats } from "../../../../../lib/task-hotel-asset-analysis-stats";
 import {
   analyzeHotelAssetImage,
   buildFallbackHotelAssetAnalysis,
@@ -26,6 +27,16 @@ import {
   patchTaskHotelAsset,
   type TaskHotelAssetRecord,
 } from "../../../../../lib/task-hotel-asset-store";
+import {
+  deleteTaskHotelAssetOptimizationHistoryForRoot,
+  findRootAssetIdForHotelAsset,
+  listDisposableEnhancedCandidateAssetIds,
+  listTaskHotelAssetOptimizationStates,
+  prepareNextTaskHotelAssetOptimizationRound,
+  removeTaskHotelAssetFromOptimizationStates,
+  replaceTaskHotelAssetOptimizationRoundCandidates,
+  selectTaskHotelAssetOptimizationVariant,
+} from "../../../../../lib/task-hotel-asset-optimization-store";
 import { resolveRuntimeAssetUrlToPath } from "../../../../../lib/runtime-storage";
 import { writeUploadedFileToPath } from "../../../../../lib/file-stream";
 import type { HotelAssetSceneType } from "../../../../../lib/video-task-schema";
@@ -37,8 +48,9 @@ type RouteContext = {
 };
 
 type PatchHotelAssetRequest = {
-  action?: "enhance_images";
+  action?: "enhance_images" | "select_asset_variant";
   assetId?: string;
+  rootAssetId?: string;
   displayName?: string;
   prompt?: string;
   sceneType?: HotelAssetSceneType;
@@ -100,6 +112,43 @@ function listTaskHotelAssetsForResponse(taskId: string) {
   return getHotelAssetDisplayOrder(listTaskHotelAssets(taskId));
 }
 
+function buildHotelAssetResponsePayload(taskId: string, task: unknown, extra?: Record<string, unknown>) {
+  const assets = listTaskHotelAssetsForResponse(taskId);
+  return {
+    task,
+    assets,
+    analysisStats: buildTaskHotelAssetAnalysisStats(assets),
+    optimizationStates: listTaskHotelAssetOptimizationStates(taskId),
+    runtime: getHotelAssetVisionProviderMeta(),
+    ...(extra ?? {}),
+  };
+}
+
+function logHotelAssetAnalysisEvent(
+  event: string,
+  input: {
+    taskId: string;
+    assetId?: string;
+    fileName?: string;
+    usedFallback?: boolean;
+  },
+) {
+  const assets = listTaskHotelAssetsForResponse(input.taskId);
+  const stats = buildTaskHotelAssetAnalysisStats(assets);
+  console.info("[hotel-assets:analysis]", {
+    event,
+    taskId: input.taskId,
+    assetId: input.assetId,
+    fileName: input.fileName,
+    usedFallback: input.usedFallback,
+    total: stats.total,
+    completed: stats.completed,
+    pending: stats.pending,
+    skipped: stats.skipped,
+    rejected: stats.rejected,
+  });
+}
+
 function buildHotelAssetEnhancementPrompt(asset: TaskHotelAssetRecord, prompt: string) {
   const userPrompt = prompt.trim();
   const sceneLabel = asset.subjectSummary || asset.fileName || "酒店实拍画面";
@@ -114,11 +163,16 @@ function buildHotelAssetEnhancementPrompt(asset: TaskHotelAssetRecord, prompt: s
   ].join("\n");
 }
 
+function isRootHotelAssetRecord(asset: Pick<TaskHotelAssetRecord, "sourceType" | "enhancedFromAssetId">) {
+  return asset.sourceType === "user_upload" && !asset.enhancedFromAssetId;
+}
+
 async function createEnhancedHotelAssetRecords(input: {
   taskId: string;
   ownerUserId: string | null;
   sourceAsset: TaskHotelAssetRecord;
   prompt: string;
+  preserveAssetIds?: string[];
 }) {
   const sourceBytes = readFileSync(resolveRuntimeAssetUrlToPath(input.sourceAsset.fileUrl));
   const referenceImageDataUrl = await buildAnalysisImageData(sourceBytes);
@@ -147,12 +201,14 @@ async function createEnhancedHotelAssetRecords(input: {
       )
     : await generateEnhancedImages();
 
-  const previousEnhancedAssets = listTaskHotelAssets(input.taskId).filter(
-    (asset) => asset.enhancedFromAssetId === input.sourceAsset.assetId,
-  );
+  const previousEnhancedAssetIds = listDisposableEnhancedCandidateAssetIds({
+    assets: listTaskHotelAssets(input.taskId),
+    sourceAssetId: input.sourceAsset.assetId,
+    preserveAssetIds: input.preserveAssetIds,
+  });
 
-  for (const asset of previousEnhancedAssets) {
-    deleteTaskHotelAsset(asset.assetId);
+  for (const assetId of previousEnhancedAssetIds) {
+    deleteTaskHotelAsset(assetId);
   }
 
   const nextSortOrderStart =
@@ -356,6 +412,7 @@ async function persistHotelAssetAnalysis(input: {
     sortOrder: asset.sortOrder,
   };
 
+  let usedFallback = false;
   const analysis =
     (await reanalyzeExistingAsset({
       asset,
@@ -363,8 +420,15 @@ async function persistHotelAssetAnalysis(input: {
       ownerUserId: input.ownerUserId,
       preferredSceneType: asset.sceneType,
       userNote: asset.userNote,
-    }).catch(() =>
-      buildFallbackHotelAssetAnalysis(
+    }).catch((error) => {
+      usedFallback = true;
+      console.warn("[hotel-assets:analysis] 模型解析失败，已使用本地兜底", {
+        taskId: input.taskId,
+        assetId: asset.assetId,
+        fileName: asset.fileName,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return buildFallbackHotelAssetAnalysis(
         buildHotelAssetFallbackInput({
           width: asset.width,
           height: asset.height,
@@ -372,8 +436,8 @@ async function persistHotelAssetAnalysis(input: {
           userNote: asset.userNote,
           preferredSceneType: asset.sceneType,
         }),
-      ),
-    )) ?? null;
+      );
+    })) ?? null;
 
   if (!analysis) {
     return;
@@ -405,6 +469,12 @@ async function persistHotelAssetAnalysis(input: {
     reviewStatus: analysis.reviewStatus,
     analyzedAt: new Date().toISOString(),
   });
+  logHotelAssetAnalysisEvent("completed", {
+    taskId: input.taskId,
+    assetId: latestAsset.assetId,
+    fileName: latestAsset.fileName,
+    usedFallback,
+  });
 
   if (shouldAutoGroupOnFirstAnalysis && latestAsset.sortOrder === analysisFingerprint.sortOrder) {
     autoGroupTaskHotelAssetByScene(input.taskId, latestAsset.assetId);
@@ -435,11 +505,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
     return access.response;
   }
 
-  return NextResponse.json({
-    task: access.task,
-    assets: listTaskHotelAssetsForResponse(taskId),
-    runtime: getHotelAssetVisionProviderMeta(),
-  });
+  return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task));
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
@@ -484,6 +550,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (replaceAssetId && (!replaceAsset || replaceAsset.taskId !== taskId)) {
       return NextResponse.json({ error: "需要替换的酒店素材不存在" }, { status: 404 });
     }
+    if (replaceAsset && !isRootHotelAssetRecord(replaceAsset)) {
+      return NextResponse.json({ error: "只能重新上传原始酒店实拍图" }, { status: 400 });
+    }
 
     const nextSortOrder = existingAssets.reduce((maxValue, asset) => Math.max(maxValue, asset.sortOrder), -1) + 1;
     const nextDefaultDisplayName = displayNameFromInput || `图片${nextSortOrder + 1}`;
@@ -502,12 +571,14 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     const asset = replaceAsset
       ? (() => {
+          deleteTaskHotelAssetOptimizationHistoryForRoot(taskId, replaceAsset.assetId);
           const previousFileUrl = replaceAsset.fileUrl;
           const updated = patchTaskHotelAsset(replaceAsset.assetId, {
             fileUrl: publicUrl,
             fileName: file.name,
             displayName: replaceAsset.displayName || nextDefaultDisplayName,
             sourceType: "user_upload",
+            enhancedFromAssetId: null,
             sceneType: pendingAnalysis.sceneType,
             subjectSummary: pendingAnalysis.subjectSummary,
             tags: pendingAnalysis.tags,
@@ -566,13 +637,15 @@ export async function POST(request: NextRequest, context: RouteContext) {
       ownerUserId: access.task.ownerUserId,
       autoGroupOnFirstAnalysis: false,
     });
-
-    return NextResponse.json({
-      task: access.task,
-      asset,
-      assets: listTaskHotelAssetsForResponse(taskId),
-      runtime: getHotelAssetVisionProviderMeta(),
+    logHotelAssetAnalysisEvent("queued", {
+      taskId,
+      assetId: asset.assetId,
+      fileName: asset.fileName,
     });
+
+    return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task, {
+      asset,
+    }));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "酒店素材上传失败" }, { status: 500 });
   }
@@ -599,21 +672,93 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       if (!asset || asset.taskId !== taskId) {
         return NextResponse.json({ error: "酒店素材不存在" }, { status: 404 });
       }
+      const allAssets = listTaskHotelAssets(taskId);
+      const rootAssetId = body.rootAssetId?.trim() || findRootAssetIdForHotelAsset(asset.assetId, allAssets);
+      const rootAsset = getTaskHotelAsset(rootAssetId);
+      if (!rootAsset || rootAsset.taskId !== taskId) {
+        return NextResponse.json({ error: "原始酒店素材不存在" }, { status: 404 });
+      }
+      if (!isRootHotelAssetRecord(rootAsset)) {
+        return NextResponse.json({ error: "原始酒店素材状态异常，请刷新后重试" }, { status: 400 });
+      }
+      const selectedRootAssetId = findRootAssetIdForHotelAsset(asset.assetId, allAssets);
+      if (selectedRootAssetId !== rootAsset.assetId) {
+        return NextResponse.json({ error: "当前图片不属于该原图的优化历史" }, { status: 400 });
+      }
+
+      const preparedRound = prepareNextTaskHotelAssetOptimizationRound({
+        taskId,
+        rootAssetId: rootAsset.assetId,
+      });
+      for (const staleAssetId of preparedRound.staleCandidateIds) {
+        const staleAsset = getTaskHotelAsset(staleAssetId);
+        if (staleAsset && staleAsset.taskId === taskId && staleAsset.assetId !== preparedRound.state.currentAssetId) {
+          deleteTaskHotelAsset(staleAsset.assetId);
+        }
+      }
+      const sourceAsset = getTaskHotelAsset(preparedRound.state.currentAssetId) ?? rootAsset;
 
       const enhancedAssets = await createEnhancedHotelAssetRecords({
         taskId,
         ownerUserId: access.task.ownerUserId,
-        sourceAsset: asset,
+        sourceAsset,
         prompt: typeof body.prompt === "string" ? body.prompt : "",
+        preserveAssetIds: [
+          rootAsset.assetId,
+          preparedRound.state.currentAssetId,
+          ...preparedRound.state.historyAssetIds,
+          ...preparedRound.state.currentRoundCandidateIds,
+        ],
+      });
+      const optimizationState = replaceTaskHotelAssetOptimizationRoundCandidates({
+        taskId,
+        rootAssetId: rootAsset.assetId,
+        candidateIds: enhancedAssets.map((enhancedAsset) => enhancedAsset.assetId),
       });
 
-      return NextResponse.json({
-        task: access.task,
-        asset,
+      return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task, {
+        asset: sourceAsset,
+        rootAsset,
         enhancedAssets,
-        assets: listTaskHotelAssetsForResponse(taskId),
-        runtime: getHotelAssetVisionProviderMeta(),
+        optimizationState,
+      }));
+    }
+
+    if (body?.action === "select_asset_variant") {
+      const assetId = body.assetId?.trim();
+      if (!assetId) {
+        return NextResponse.json({ error: "缺少需要选择的素材 ID" }, { status: 400 });
+      }
+      const asset = getTaskHotelAsset(assetId);
+      if (!asset || asset.taskId !== taskId) {
+        return NextResponse.json({ error: "酒店素材不存在" }, { status: 404 });
+      }
+
+      const allAssets = listTaskHotelAssets(taskId);
+      const resolvedRootAssetId = findRootAssetIdForHotelAsset(asset.assetId, allAssets);
+      const rootAssetId = body.rootAssetId?.trim() || resolvedRootAssetId;
+      if (rootAssetId !== resolvedRootAssetId) {
+        return NextResponse.json({ error: "选择的图片不属于该原图的优化历史" }, { status: 400 });
+      }
+      const rootAsset = getTaskHotelAsset(rootAssetId);
+      if (!rootAsset || rootAsset.taskId !== taskId) {
+        return NextResponse.json({ error: "原始酒店素材不存在" }, { status: 404 });
+      }
+      if (!isRootHotelAssetRecord(rootAsset)) {
+        return NextResponse.json({ error: "原始酒店素材状态异常，请刷新后重试" }, { status: 400 });
+      }
+
+      const optimizationState = selectTaskHotelAssetOptimizationVariant({
+        taskId,
+        rootAssetId,
+        assetId: asset.assetId,
       });
+
+      return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task, {
+        asset,
+        rootAsset,
+        optimizationState,
+      }));
     }
 
     if (Array.isArray(body?.assetOrders) && body.assetOrders.length > 0) {
@@ -631,11 +776,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         });
       }
 
-      return NextResponse.json({
-        task: access.task,
-        assets: listTaskHotelAssetsForResponse(taskId),
-        runtime: getHotelAssetVisionProviderMeta(),
-      });
+      return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task));
     }
 
     if (!body?.assetId?.trim()) {
@@ -687,14 +828,16 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         ownerUserId: access.task.ownerUserId,
         autoGroupOnFirstAnalysis: false,
       });
+      logHotelAssetAnalysisEvent("reanalysis_queued", {
+        taskId,
+        assetId: updated.assetId,
+        fileName: updated.fileName,
+      });
     }
 
-    return NextResponse.json({
-      task: access.task,
-      asset: updated,
-      assets: listTaskHotelAssetsForResponse(taskId),
-      runtime: getHotelAssetVisionProviderMeta(),
-    });
+      return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task, {
+        asset: updated,
+      }));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "酒店素材更新失败" }, { status: 500 });
   }
@@ -720,11 +863,16 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "酒店素材不存在" }, { status: 404 });
     }
 
+    const allAssets = listTaskHotelAssets(taskId);
+    const rootAssetId = findRootAssetIdForHotelAsset(assetId, allAssets);
+    if (isRootHotelAssetRecord(asset)) {
+      deleteTaskHotelAssetOptimizationHistoryForRoot(taskId, asset.assetId);
+    } else {
+      removeTaskHotelAssetFromOptimizationStates(taskId, assetId);
+    }
     deleteTaskHotelAsset(assetId);
-    return NextResponse.json({
-      task: access.task,
-      assets: listTaskHotelAssetsForResponse(taskId),
-    });
+
+    return NextResponse.json(buildHotelAssetResponsePayload(taskId, access.task));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "酒店素材删除失败" }, { status: 500 });
   }

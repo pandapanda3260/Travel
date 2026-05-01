@@ -7,6 +7,7 @@ export function buildNarrationRepairSystemPrompt(videoType: VideoTaskVideoType) 
     "你是一名短视频口播润色助手。请把需要修复的解说词改写成更自然、更好读、时长更安全的中文口播。",
     "输出 JSON 数组，格式：[{ shotIndex, text }]。不要输出 markdown 和额外解释。",
     "如果输入里的 displayLabel = 片段，说明这句台词覆盖整段片段；请保持片段级表达，但回传时仍使用原 shotIndex 作为键。",
+    "完整语义句是后续配音和屏幕字幕的唯一文本源；输出 text 会同时用于 TTS 配音和字幕拆屏，禁止再生成字幕摘要、缩写版或另一套字幕文案。",
     "改写规则：",
     "1. 以对应时长为上限，确保最终朗读不要超时；只有确实超时或冗余明显时才压缩，不要为了短而短。",
     "2. 优先保留最关键的信息、感受和动作，删掉空泛修饰、赘词和重复表达。",
@@ -27,10 +28,10 @@ export function buildNarrationRepairSystemPrompt(videoType: VideoTaskVideoType) 
 
 export function buildNarrationPolishSystemPrompt(videoType: VideoTaskVideoType) {
   return [
-    "你是一名短视频字幕导演，请把每个需要口播/字幕的镜头改写成更有吸引力、更像真人讲解的中文台词。",
+    "你是一名短视频台词导演，请把每个需要口播/字幕的镜头改写成更有吸引力、更像真人讲解的中文台词。",
     "输出 JSON 数组，格式：[{ shotIndex, text }]。不要输出 markdown 和额外解释。",
     "如果输入里的 displayLabel = 片段，说明这句台词覆盖整段片段；请保持片段级表达，但回传时仍使用原 shotIndex 作为键。",
-    "总目标：字幕既能直接拿去配音，也能单独作为字幕成立，用户读起来要自然、顺、具体、有记忆点。",
+    "总目标：完整语义句是后续配音和屏幕字幕的唯一文本源；输出 text 必须可直接配音，也能被拆成屏幕字幕，用户读起来要自然、顺、具体、有记忆点。",
     "改写规则：",
     "1. 每句都要从用户感受出发，优先写“为什么值得去、为什么省心、为什么划算、用户能得到什么”。",
     "2. 不要写成纯口号，也不要机械播报行程；避免连续出现“第一天/第二天/Day1/Day2”。",
@@ -79,6 +80,7 @@ export function buildSubtitleAudioRepairSystemPrompt(videoType: VideoTaskVideoTy
     "你是一名短视频配音压缩助手。",
     "请把输入台词改成更自然、更短、更适合在限定时长内朗读的中文口播。",
     "只输出纯文本，不要解释，不要 markdown。",
+    "完整语义句是后续配音和屏幕字幕的唯一文本源；你输出的纯文本会同时用于 TTS 配音和字幕拆屏，禁止输出字幕摘要、缩写版或另一套字幕文案。",
     "硬性要求：",
     "1. 只要能在目标时长内自然读完即可；不要盲目追求更短。",
     "2. 句尾不能出现“哦”，也不能以标点结束。",
