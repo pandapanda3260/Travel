@@ -11,6 +11,11 @@ import {
   getImageGenerationRuntime,
   getVideoPipelineImageGenerationRuntime,
 } from "./image-provider-config";
+import {
+  getImageGenerationSizeCandidates,
+  getImageGenerationSizeForAspectRatio,
+  getImageGenerationSizeOptions,
+} from "./image-generation-size-config";
 
 const IMAGE_MODEL_ENV_KEYS = [
   "TRAVEL_SHARED_ENV_FILE",
@@ -75,6 +80,24 @@ test("安全拦截降敏重试失败文案提示用户手动上传且不透出�
     "图片生成触发安全拦截，系统已自动降敏重试仍失败，请手动上传图片",
   );
   assert.doesNotMatch(SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE, /request id|sensitive information/i);
+});
+
+test("图片尺寸规则从统一配置读取并按视频比例返回推荐尺寸", () => {
+  assert.deepEqual(
+    getImageGenerationSizeOptions().map((item) => item.value),
+    ["2048x2048", "1664x2496", "2496x1664", "1600x2848", "2848x1600"],
+  );
+  assert.equal(getImageGenerationSizeForAspectRatio("9:16"), "1600x2848");
+  assert.equal(getImageGenerationSizeForAspectRatio("16:9"), "2848x1600");
+  assert.equal(getImageGenerationSizeForAspectRatio("1:1"), "2048x2048");
+  assert.deepEqual(
+    getImageGenerationSizeCandidates({
+      requestedSize: "1600x2848",
+      provider: "liangxin",
+      modelId: "gpt-image-2",
+    }),
+    ["1600x2848", "1088x1920", "1024x1824", "1024x1536"],
+  );
 });
 
 test("图片生成运行时默认使用 seedream 4.5", () => {
@@ -187,9 +210,195 @@ test("良心中转站 image2 adapter 使用 OpenAI 图片请求形态且不夹�
     assert.equal(calls[0]?.body.model, "gpt-image-2");
     assert.equal(calls[0]?.body.n, 2);
     assert.equal(calls[0]?.body.size, "1024x1024");
+    assert.equal(calls[0]?.body.output_format, "webp");
     assert.equal("negative_prompt" in calls[0]!.body, false);
     assert.equal("watermark" in calls[0]!.body, false);
     assert.equal("optimize_prompt_options" in calls[0]!.body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousStrictMode === undefined) {
+      delete process.env.USAGE_BILLING_STRICT_MODE;
+    } else {
+      process.env.USAGE_BILLING_STRICT_MODE = previousStrictMode;
+    }
+    if (previousRequirePricing === undefined) {
+      delete process.env.USAGE_BILLING_REQUIRE_PRICING;
+    } else {
+      process.env.USAGE_BILLING_REQUIRE_PRICING = previousRequirePricing;
+    }
+  }
+});
+
+test("良心中转站遇到不支持的尺寸时按配置降级到 fallback 尺寸", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const previousStrictMode = process.env.USAGE_BILLING_STRICT_MODE;
+  const previousRequirePricing = process.env.USAGE_BILLING_REQUIRE_PRICING;
+  process.env.USAGE_BILLING_STRICT_MODE = "false";
+  process.env.USAGE_BILLING_REQUIRE_PRICING = "false";
+  globalThis.fetch = (async (url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    calls.push({ url: String(url), body });
+    if (body.size === "1600x2848") {
+      return new Response(JSON.stringify({ error: { message: "unsupported size 1600x2848" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("fallback").toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const results = await generateSeedreamImages({
+      prompt: "竖版酒店测试图",
+      size: "1600x2848",
+      guidanceScale: 7.5,
+      watermark: false,
+      seed: null,
+      outputCount: 1,
+      runtimeOverride: {
+        provider: "liangxin",
+        liveEnabled: true,
+        hasApiKey: true,
+        apiBase: "https://gateway.example.com",
+        apiKey: "test-key",
+        modelId: "gpt-image-2",
+        quality: "high",
+        providerLabel: "test",
+        configFileName: "test",
+      },
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]?.body.size, "1600x2848");
+    assert.equal(calls[1]?.body.size, "1088x1920");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousStrictMode === undefined) {
+      delete process.env.USAGE_BILLING_STRICT_MODE;
+    } else {
+      process.env.USAGE_BILLING_STRICT_MODE = previousStrictMode;
+    }
+    if (previousRequirePricing === undefined) {
+      delete process.env.USAGE_BILLING_REQUIRE_PRICING;
+    } else {
+      process.env.USAGE_BILLING_REQUIRE_PRICING = previousRequirePricing;
+    }
+  }
+});
+
+test("良心中转站文生图请求包含 output_format webp", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const previousStrictMode = process.env.USAGE_BILLING_STRICT_MODE;
+  const previousRequirePricing = process.env.USAGE_BILLING_REQUIRE_PRICING;
+  process.env.USAGE_BILLING_STRICT_MODE = "false";
+  process.env.USAGE_BILLING_REQUIRE_PRICING = "false";
+  globalThis.fetch = (async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(
+      JSON.stringify({ data: [{ b64_json: Buffer.from("img").toString("base64") }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    await generateSeedreamImages({
+      prompt: "测试图",
+      size: "1024x1024",
+      guidanceScale: 7.5,
+      watermark: false,
+      seed: null,
+      outputCount: 1,
+      runtimeOverride: {
+        provider: "liangxin",
+        liveEnabled: true,
+        hasApiKey: true,
+        apiBase: "https://gateway.example.com",
+        apiKey: "test-key",
+        modelId: "gpt-image-2",
+        quality: null,
+        providerLabel: "test",
+        configFileName: "test",
+      },
+    });
+
+    assert.equal(calls[0]?.body.output_format, "webp");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousStrictMode === undefined) {
+      delete process.env.USAGE_BILLING_STRICT_MODE;
+    } else {
+      process.env.USAGE_BILLING_STRICT_MODE = previousStrictMode;
+    }
+    if (previousRequirePricing === undefined) {
+      delete process.env.USAGE_BILLING_REQUIRE_PRICING;
+    } else {
+      process.env.USAGE_BILLING_REQUIRE_PRICING = previousRequirePricing;
+    }
+  }
+});
+
+test("良心中转站图生图走 /images/edits 端点并传 FormData", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; bodyFormData: FormData | null }> = [];
+  const previousStrictMode = process.env.USAGE_BILLING_STRICT_MODE;
+  const previousRequirePricing = process.env.USAGE_BILLING_REQUIRE_PRICING;
+  process.env.USAGE_BILLING_STRICT_MODE = "false";
+  process.env.USAGE_BILLING_REQUIRE_PRICING = "false";
+  globalThis.fetch = (async (url, init) => {
+    calls.push({
+      url: String(url),
+      bodyFormData: init?.body instanceof FormData ? init.body : null,
+    });
+    return new Response(
+      JSON.stringify({ data: [{ b64_json: Buffer.from("edited").toString("base64") }] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const fakeImageDataUrl = `data:image/jpeg;base64,${Buffer.from("fake-jpeg").toString("base64")}`;
+    const results = await generateSeedreamImages({
+      prompt: "优化酒店实拍",
+      size: "1920x1920",
+      guidanceScale: 7.8,
+      watermark: false,
+      seed: null,
+      outputCount: 2,
+      referenceImageDataUrl: fakeImageDataUrl,
+      runtimeOverride: {
+        provider: "liangxin",
+        liveEnabled: true,
+        hasApiKey: true,
+        apiBase: "https://gateway.example.com",
+        apiKey: "test-key",
+        modelId: "gpt-image-2",
+        quality: "high",
+        providerLabel: "test",
+        configFileName: "test",
+      },
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0]?.url.endsWith("/v1/images/edits"));
+    assert.ok(calls[0]?.bodyFormData, "请求体应为 FormData");
+    const fd = calls[0]!.bodyFormData!;
+    assert.equal(fd.get("model"), "gpt-image-2");
+    assert.equal(fd.get("size"), "1920x1920");
+    assert.equal(fd.get("n"), "2");
+    assert.equal(fd.get("quality"), "high");
+    assert.ok(fd.get("prompt"));
+    assert.ok(fd.get("image") instanceof Blob, "image 应为 Blob");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousStrictMode === undefined) {

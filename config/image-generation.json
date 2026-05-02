@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "defaultProvider": "liangxin",
+  "providers": {
+    "liangxin": {
+      "models": {
+        "gpt-image-2": {
+          "quality": "high",
+          "outputFormat": "webp",
+          "normalizeToMultipleOf": 16,
+          "sizesByAspectRatio": {
+            "1:1": {
+              "label": "1:1 方图",
+              "preferred": "2048x2048",
+              "fallbacks": ["1024x1024"]
+            },
+            "2:3": {
+              "label": "2:3 竖图",
+              "preferred": "1664x2496",
+              "fallbacks": ["1024x1536"]
+            },
+            "3:2": {
+              "label": "3:2 横图",
+              "preferred": "2496x1664",
+              "fallbacks": ["1536x1024"]
+            },
+            "9:16": {
+              "label": "9:16 竖版",
+              "preferred": "1600x2848",
+              "fallbacks": ["1080x1920", "1024x1824", "1024x1536"]
+            },
+            "16:9": {
+              "label": "16:9 横版",
+              "preferred": "2848x1600",
+              "fallbacks": ["1920x1080", "1824x1024", "1536x1024"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

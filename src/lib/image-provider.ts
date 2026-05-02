@@ -1,4 +1,9 @@
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
+import {
+  getImageGenerationOutputFormat,
+  getImageGenerationSizeCandidates,
+  normalizeImageGenerationSizeForProvider,
+} from "./image-generation-size-config";
 import { getImageGenerationRuntime, type ImageGenerationRuntime } from "./image-provider-config";
 import { createMockImageResults } from "./mock-aigc-assets";
 import {
@@ -26,6 +31,8 @@ export type ImageGenerationResult = {
   b64Json: string | null;
 };
 
+type ProviderRequestError = Error & { retryable?: boolean };
+
 export const SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE =
   "图片生成触发安全拦截，系统已自动降敏重试仍失败，请手动上传图片";
 
@@ -42,6 +49,25 @@ function resolveLiangxinImageGenerationEndpoint(apiBase: string) {
     return `${normalizedApiBase}/images/generations`;
   }
   return `${normalizedApiBase}/v1/images/generations`;
+}
+
+export function resolveLiangxinImageEditsEndpoint(apiBase: string) {
+  const normalizedApiBase = apiBase.trim().replace(/\/+$/, "");
+  if (/\/images\/edits$/i.test(normalizedApiBase)) {
+    return normalizedApiBase;
+  }
+  if (/\/(?:v1|api\/v3)$/i.test(normalizedApiBase)) {
+    return `${normalizedApiBase}/images/edits`;
+  }
+  return `${normalizedApiBase}/v1/images/edits`;
+}
+
+function parseDataUrl(dataUrl: string) {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
+    return { mimeType: "image/jpeg", bytes: Buffer.from(dataUrl, "base64") };
+  }
+  return { mimeType: match[1]!, bytes: Buffer.from(match[2]!, "base64") };
 }
 
 const IMAGE_POSITIVE_SUFFIX =
@@ -69,12 +95,48 @@ function parseRequestedSize(size: string) {
   };
 }
 
-function normalizeSizeForLiangxin(size: string) {
-  const { width, height } = parseRequestedSize(size);
-  if (!width || !height) return size;
-  const w = Math.round(width / 16) * 16;
-  const h = Math.round(height / 16) * 16;
-  return `${w}x${h}`;
+function normalizeSizeForLiangxin(runtime: ImageGenerationRuntime, size: string) {
+  return normalizeImageGenerationSizeForProvider(size, runtime.provider, runtime.modelId);
+}
+
+function isUnsupportedImageSizeError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /size|resolution|dimension|width|height|unsupported|invalid|尺寸|分辨率|宽高|大小/i.test(message);
+}
+
+function buildProviderRequestError(status: number, message: string): ProviderRequestError {
+  const error = new Error(message) as ProviderRequestError;
+  if (status >= 400 && status < 500 && status !== 429) {
+    error.retryable = false;
+  }
+  return error;
+}
+
+async function runWithLiangxinImageSizeFallback<T>(
+  runtime: ImageGenerationRuntime,
+  requestedSize: string,
+  action: (size: string) => Promise<T>,
+) {
+  const sizeCandidates = getImageGenerationSizeCandidates({
+    requestedSize,
+    provider: runtime.provider,
+    modelId: runtime.modelId,
+  });
+  let lastError: unknown = null;
+
+  for (const [index, size] of sizeCandidates.entries()) {
+    try {
+      return await action(size);
+    } catch (error) {
+      lastError = error;
+      const canTryNext = index < sizeCandidates.length - 1 && isUnsupportedImageSizeError(error);
+      if (!canTryNext) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("图片生成尺寸降级后仍失败");
 }
 
 function buildOrientationGuardClause(size: string, includeOrientationLabel = true) {
@@ -304,7 +366,7 @@ async function requestSingleSeedreamImage(
     };
 
     if (!response.ok) {
-      throw new Error(payload.error?.message ?? payload.message ?? "图片生成失败");
+      throw buildProviderRequestError(response.status, payload.error?.message ?? payload.message ?? "图片生成失败");
     }
 
     const item = payload.data?.[0];
@@ -324,9 +386,9 @@ async function requestLiangxinImages(
   prompt: string,
   size: string,
   outputCount: number,
-  referenceImageDataUrl?: string | null,
 ) {
-  return withRetry(async () => {
+  return runWithLiangxinImageSizeFallback(runtime, size, (requestSize) => withRetry(async () => {
+    const outputFormat = getImageGenerationOutputFormat(runtime.provider, runtime.modelId);
     const response = await fetch(resolveLiangxinImageGenerationEndpoint(runtime.apiBase), {
       method: "POST",
       headers: {
@@ -336,8 +398,9 @@ async function requestLiangxinImages(
       body: JSON.stringify({
         model: runtime.modelId,
         prompt,
-        size: normalizeSizeForLiangxin(size),
+        size: normalizeSizeForLiangxin(runtime, requestSize),
         n: outputCount,
+        ...(outputFormat ? { output_format: outputFormat } : {}),
         ...(runtime.quality ? { quality: runtime.quality } : {}),
       }),
     });
@@ -366,7 +429,62 @@ async function requestLiangxinImages(
     }
 
     return results.slice(0, outputCount) satisfies ImageGenerationResult[];
-  });
+  }));
+}
+
+async function requestLiangxinImageEdits(
+  runtime: ImageGenerationRuntime,
+  prompt: string,
+  size: string,
+  outputCount: number,
+  referenceImageDataUrl: string,
+) {
+  return runWithLiangxinImageSizeFallback(runtime, size, (requestSize) => withRetry(async () => {
+    const { mimeType, bytes } = parseDataUrl(referenceImageDataUrl);
+    const extension = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
+    const formData = new FormData();
+    formData.append("model", runtime.modelId);
+    formData.append("prompt", prompt);
+    formData.append("image", new Blob([new Uint8Array(bytes)], { type: mimeType }), `reference.${extension}`);
+    formData.append("size", normalizeSizeForLiangxin(runtime, requestSize));
+    formData.append("n", String(outputCount));
+    if (runtime.quality) {
+      formData.append("quality", runtime.quality);
+    }
+
+    const response = await fetch(resolveLiangxinImageEditsEndpoint(runtime.apiBase), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtime.apiKey}`,
+      },
+      body: formData,
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      message?: string;
+      data?: Array<{ url?: string; b64_json?: string; b64Json?: string }>;
+      images?: Array<{ url?: string; b64_json?: string; b64Json?: string }>;
+    };
+
+    if (!response.ok) {
+      throw buildProviderRequestError(response.status, payload.error?.message ?? payload.message ?? "图片编辑失败");
+    }
+
+    const items = payload.data ?? payload.images ?? [];
+    const results = items
+      .map((item) => ({
+        url: item.url ?? null,
+        b64Json: item.b64_json ?? item.b64Json ?? null,
+      }))
+      .filter((item) => item.url || item.b64Json);
+
+    if (!results.length) {
+      throw new Error("图片编辑结果为空");
+    }
+
+    return results.slice(0, outputCount) satisfies ImageGenerationResult[];
+  }));
 }
 
 export async function generateSeedreamImages(input: ImageGenerationRequest) {
@@ -395,7 +513,10 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
   });
   const requestBatch =
     runtime.provider === "liangxin"
-      ? (prompt: string) => requestLiangxinImages(runtime, prompt, input.size, outputCount, input.referenceImageDataUrl)
+      ? (prompt: string) =>
+          input.referenceImageDataUrl
+            ? requestLiangxinImageEdits(runtime, prompt, input.size, outputCount, input.referenceImageDataUrl)
+            : requestLiangxinImages(runtime, prompt, input.size, outputCount)
       : (prompt: string) =>
           Promise.all(
             Array.from({ length: outputCount }, () =>

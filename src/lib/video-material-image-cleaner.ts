@@ -1,7 +1,9 @@
 import sharp from "sharp";
 
 import { getEffectiveConstraintPrompt } from "./constraint-prompt-store";
+import { resolveClosestImageGenerationSize } from "./image-generation-size-config";
 import { getImageCleaningRuntime } from "./image-provider-config";
+import { resolveLiangxinImageEditsEndpoint } from "./image-provider";
 import {
   confirmCommercialModelUsageCharge,
   prepareCommercialModelUsageCharge,
@@ -9,14 +11,6 @@ import {
   resolveDefaultModelPricingKey,
 } from "./model-usage-service";
 import { withRetry } from "./retry";
-
-const supportedImageSizes = [
-  { value: "2048x2048", ratio: 1 },
-  { value: "1664x2496", ratio: 1664 / 2496 },
-  { value: "2496x1664", ratio: 2496 / 1664 },
-  { value: "1600x2848", ratio: 1600 / 2848 },
-  { value: "2848x1600", ratio: 2848 / 1600 },
-] as const;
 
 function normalizeApiBase(apiBase: string) {
   return apiBase.endsWith("/api/v3") ? apiBase : `${apiBase.replace(/\/$/, "")}/api/v3`;
@@ -27,16 +21,7 @@ function buildDataUrl(contentType: string, bytes: Buffer) {
 }
 
 function resolveCleaningSize(width: number | null, height: number | null) {
-  if (!width || !height || width <= 0 || height <= 0) {
-    return "1600x2848";
-  }
-
-  const ratio = width / height;
-  return supportedImageSizes.reduce((best, candidate) => {
-    const bestDistance = Math.abs(best.ratio - ratio);
-    const candidateDistance = Math.abs(candidate.ratio - ratio);
-    return candidateDistance < bestDistance ? candidate : best;
-  }).value;
+  return resolveClosestImageGenerationSize(width, height);
 }
 
 async function detectResultMetadata(bytes: Buffer) {
@@ -68,6 +53,64 @@ function getFormatExtension(format: string | null) {
     default:
       return "jpg";
   }
+}
+
+async function fetchSeedreamCleaningResult(
+  runtime: ReturnType<typeof getImageCleaningRuntime>,
+  prompt: string,
+  negativePrompt: string,
+  sourceBytes: Buffer,
+  sourceMimeType: string,
+  size: string,
+) {
+  return fetch(`${normalizeApiBase(runtime.apiBase)}/images/generations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${runtime.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: runtime.modelId,
+      prompt,
+      negative_prompt: negativePrompt,
+      image: buildDataUrl(sourceMimeType, sourceBytes),
+      size,
+      response_format: "url",
+      stream: false,
+      watermark: false,
+    }),
+  });
+}
+
+async function fetchLiangxinCleaningResult(
+  runtime: ReturnType<typeof getImageCleaningRuntime>,
+  prompt: string,
+  negativePrompt: string,
+  sourceBytes: Buffer,
+  sourceMimeType: string,
+  size: string,
+) {
+  const combinedPrompt = negativePrompt
+    ? `${prompt}\n\nAvoid: ${negativePrompt}`
+    : prompt;
+  const extension = sourceMimeType.includes("png") ? "png" : sourceMimeType.includes("webp") ? "webp" : "jpg";
+  const formData = new FormData();
+  formData.append("model", runtime.modelId);
+  formData.append("prompt", combinedPrompt);
+  formData.append("image", new Blob([new Uint8Array(sourceBytes)], { type: sourceMimeType }), `source.${extension}`);
+  formData.append("size", size);
+  formData.append("n", "1");
+  if (runtime.quality) {
+    formData.append("quality", runtime.quality);
+  }
+
+  return fetch(resolveLiangxinImageEditsEndpoint(runtime.apiBase), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${runtime.apiKey}`,
+    },
+    body: formData,
+  });
 }
 
 export async function cleanVideoMaterialImage(input: {
@@ -105,23 +148,11 @@ export async function cleanVideoMaterialImage(input: {
 
   try {
     const response = await withRetry(async () => {
-      const requestResponse = await fetch(`${normalizeApiBase(runtime.apiBase)}/images/generations`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${runtime.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: runtime.modelId,
-          prompt,
-          negative_prompt: negativePrompt,
-          image: buildDataUrl(input.sourceMimeType, input.sourceBytes),
-          size: resolveCleaningSize(input.width, input.height),
-          response_format: "url",
-          stream: false,
-          watermark: false,
-        }),
-      });
+      const size = resolveCleaningSize(input.width, input.height);
+      const requestResponse =
+        runtime.provider === "liangxin"
+          ? await fetchLiangxinCleaningResult(runtime, prompt, negativePrompt, input.sourceBytes, input.sourceMimeType, size)
+          : await fetchSeedreamCleaningResult(runtime, prompt, negativePrompt, input.sourceBytes, input.sourceMimeType, size);
 
       const payload = (await requestResponse.json().catch(() => ({}))) as {
         error?: { message?: string };

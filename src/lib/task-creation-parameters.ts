@@ -15,14 +15,13 @@ import {
   type VideoTaskVideoType,
 } from "./video-task-schema";
 import { getDefaultSubtitleConfig, hydrateSubtitleConfig, type SubtitleConfig } from "./subtitle-style-config";
+import {
+  getImageGenerationSizeForAspectRatio,
+  getImageGenerationSizeOptions,
+  type VideoGenerationAspectRatio,
+} from "./image-generation-size-config";
 
-export const imageSizeOptions = [
-  { label: "1:1 方图", value: "2048x2048" },
-  { label: "2:3 竖图", value: "1664x2496" },
-  { label: "3:2 横图", value: "2496x1664" },
-  { label: "9:16 竖版", value: "1600x2848" },
-  { label: "16:9 横版", value: "2848x1600" },
-] as const;
+export const imageSizeOptions = getImageGenerationSizeOptions();
 
 export const imageGuidanceOptions = [
   { label: "自然写实", value: 6.5 },
@@ -248,15 +247,7 @@ export function getTaskCreationExpectedDurationDefaults(
 }
 
 export function getTaskCreationImageSizeForAspectRatio(aspectRatio: (typeof videoAspectRatioOptions)[number]) {
-  switch (aspectRatio) {
-    case "16:9":
-      return "2848x1600" as const;
-    case "1:1":
-      return "2048x2048" as const;
-    case "9:16":
-    default:
-      return "1600x2848" as const;
-  }
+  return getImageGenerationSizeForAspectRatio(aspectRatio as VideoGenerationAspectRatio);
 }
 
 function getEstimatedTotalDurationSeconds(input: {
