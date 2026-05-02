@@ -118,6 +118,10 @@ function getDefaultDisplayName(index: number) {
   return `图片${index + 1}`;
 }
 
+function isAssetMustUse(asset: Pick<TaskHotelAssetRecord, "mustUse" | "forbidden">) {
+  return !asset.forbidden && asset.mustUse !== false;
+}
+
 function isRootHotelAssetRecord(asset: TaskHotelAssetRecord) {
   return asset.sourceType === "user_upload" && !asset.enhancedFromAssetId;
 }

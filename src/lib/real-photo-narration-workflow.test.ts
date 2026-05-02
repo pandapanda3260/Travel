@@ -15,7 +15,7 @@ import { recoverNarrationResultTextFromTask } from "./task-narration-result-reco
 import { buildDirectorPlanFromTaskData, buildShotPlanFromDirectorPlan } from "./video-task-director";
 import { validateShotPlan } from "./video-task-planner";
 import type { TaskHotelAssetRecord } from "./task-hotel-asset-store";
-import type { HotelAssetSceneType, VideoTaskParameterBundle, VideoTaskRecord, VideoTaskSource } from "./video-task-schema";
+import type { HotelAssetSceneType, RealPhotoMaterialBrief, RealPhotoNarrationBlueprint, VideoTaskParameterBundle, VideoTaskRecord, VideoTaskSource } from "./video-task-schema";
 
 const now = "2026-04-29T08:00:00.000Z";
 
@@ -198,7 +198,7 @@ test("shot plan 从台词蓝图反推，镜头数不超过素材数，并保留�
   });
 
   assert.ok(shotPlan.shots.length <= materialBrief.items.length);
-  assert.equal(shotPlan.shots.length, blueprint.beats.length);
+  assert.ok(shotPlan.shots.length >= blueprint.beats.length);
   assert.equal(shotPlan.shots[0]?.assetId, "img-opening");
   assert.match(shotPlan.shots[0]?.narrationIntent ?? "", /开篇|停留|第一眼/);
 
@@ -623,4 +623,250 @@ test("片段详情展示会用恢复后的真人台词覆盖旧结构标题", ()
     }),
     "这是一句用户手动修改过的片段台词",
   );
+});
+
+// ---------------------------------------------------------------------------
+// P3: preRoll / postRoll 留白
+// ---------------------------------------------------------------------------
+
+test("P3: 5-beat 计划的 preRoll/postRoll 按位置分配（开头大、中间小、结尾大）", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: buildParameters(),
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  assert.ok(shotPlan.shots.length >= 5);
+  const first = shotPlan.shots[0]!;
+  const last = shotPlan.shots[shotPlan.shots.length - 1]!;
+  const mid = shotPlan.shots[2]!;
+
+  assert.equal(first.preRollSeconds, 0.8);
+  assert.equal(first.postRollSeconds, 0.3);
+  assert.equal(mid.preRollSeconds, 0.3);
+  assert.equal(mid.postRollSeconds, 0.3);
+  assert.equal(last.preRollSeconds, 0.3);
+  assert.equal(last.postRollSeconds, 0.8);
+});
+
+test("P3: durationSeconds 不包含留白，留白是独立字段", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: buildParameters(),
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  for (const shot of shotPlan.shots) {
+    const beat = blueprint.beats.find((b) => b.beatId === shot.narrationBeatId);
+    if (beat && shot.hasVoice) {
+      assert.equal(shot.durationSeconds, beat.estimatedDurationSeconds);
+    }
+  }
+});
+
+test("P3: 单镜头计划留白对称 0.5/0.5", () => {
+  const singleAsset = [asset("img-only", "exterior", "唯一素材", "仅此一张", 0)];
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: singleAsset, now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: { ...buildParameters(), video: { ...buildParameters().video, storyShotCount: 1, segmentCount: 1 } },
+    materialBrief,
+    now,
+  });
+
+  const singleBeatBlueprint: typeof blueprint = {
+    ...blueprint,
+    beats: [blueprint.beats[0]!],
+    totalEstimatedDurationSeconds: blueprint.beats[0]!.estimatedDurationSeconds,
+  };
+
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint: singleBeatBlueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  assert.equal(shotPlan.shots.length, 1);
+  assert.equal(shotPlan.shots[0]!.preRollSeconds, 0.5);
+  assert.equal(shotPlan.shots[0]!.postRollSeconds, 0.5);
+});
+
+// ---------------------------------------------------------------------------
+// P5: Beat:Shot 1:N 拆分
+// ---------------------------------------------------------------------------
+
+function buildMultiMaterialBlueprint(
+  materialBrief: RealPhotoMaterialBrief,
+): RealPhotoNarrationBlueprint {
+  const ids = materialBrief.items.map((i) => i.assetId);
+  return {
+    version: 1,
+    structureInfluenceScore: 60,
+    narrativeSummary: "测试多素材拆分",
+    speakingStyle: "口语化",
+    targetAudience: "亲子家庭",
+    coreQuestion: "值不值得带娃来",
+    beats: [
+      {
+        beatId: "beat-1",
+        phase: "opening_hook",
+        title: "开篇",
+        intent: "吸引注意力",
+        spokenText: "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住",
+        subtitleText: "先别急着看价格，真正适不适合亲子度假，先看孩子能不能玩得住",
+        estimatedDurationSeconds: 4.5,
+        targetMaterialIds: [ids[0]!],
+        materialReason: "开篇",
+        structureStrength: "strong",
+      },
+      {
+        beatId: "beat-2",
+        phase: "material_evidence",
+        title: "多素材证据",
+        intent: "展示多个角度",
+        spokenText: "你看这个餐厅有专门的儿童区，房间也配了儿童床，活动项目更是从早排到晚，根本不怕娃无聊",
+        subtitleText: "你看这个餐厅有专门的儿童区，房间也配了儿童床，活动项目更是从早排到晚，根本不怕娃无聊",
+        estimatedDurationSeconds: 8,
+        targetMaterialIds: ids.slice(1, 4),
+        materialReason: "多角度证据",
+        structureStrength: "medium",
+      },
+      {
+        beatId: "beat-3",
+        phase: "action_close",
+        title: "收尾",
+        intent: "行动建议",
+        spokenText: "五一带娃就冲这个四天三晚的套餐，链接放评论区了",
+        subtitleText: "五一带娃就冲这个四天三晚的套餐，链接放评论区了",
+        estimatedDurationSeconds: 3.5,
+        targetMaterialIds: [ids[4]!],
+        materialReason: "收尾",
+        structureStrength: "strong",
+      },
+    ],
+    totalEstimatedDurationSeconds: 16,
+    materialStrategy: "测试",
+    warnings: [],
+    generatedAt: now,
+  };
+}
+
+test("P5: 3 张素材 + 8s 时长的 beat 拆成 3 个子镜头", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat2Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-2");
+  assert.equal(beat2Shots.length, 3);
+
+  assert.equal(beat2Shots[0]!.hasVoice, true);
+  assert.equal(beat2Shots[0]!.sourceSpokenText, blueprint.beats[1]!.spokenText);
+  assert.equal(beat2Shots[1]!.hasVoice, false);
+  assert.equal(beat2Shots[1]!.sourceSpokenText, null);
+  assert.equal(beat2Shots[2]!.hasVoice, false);
+  assert.equal(beat2Shots[2]!.sourceSpokenText, null);
+});
+
+test("P5: 短时长 beat (< 4s) 不拆分即使有多张素材", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const ids = materialBrief.items.map((i) => i.assetId);
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+  blueprint.beats[2] = {
+    ...blueprint.beats[2]!,
+    targetMaterialIds: [ids[4]!, ids[5]!],
+    estimatedDurationSeconds: 3,
+  };
+
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat3Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-3");
+  assert.equal(beat3Shots.length, 1);
+});
+
+test("P5: 单张素材 beat 不拆分即使时长充足", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat1Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-1");
+  assert.equal(beat1Shots.length, 1);
+});
+
+test("P5: 子镜头 durationSeconds 之和等于原 beat estimatedDurationSeconds", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat2Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-2");
+  const totalDuration = Math.round(beat2Shots.reduce((sum, s) => sum + s.durationSeconds, 0) * 10) / 10;
+  assert.equal(totalDuration, 8);
+});
+
+test("P5: 子镜头共享 segmentId，shotIndex 顺序递增", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat2Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-2");
+  const segmentIds = new Set(beat2Shots.map((s) => s.segmentId));
+  assert.equal(segmentIds.size, 1);
+
+  for (let i = 0; i < shotPlan.shots.length - 1; i++) {
+    assert.ok(shotPlan.shots[i]!.shotIndex < shotPlan.shots[i + 1]!.shotIndex);
+  }
+});
+
+test("P3+P5 联动: 中间 beat 拆 3 个子镜头时 preRoll 只在第一个、postRoll 只在最后一个", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildMultiMaterialBlueprint(materialBrief);
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const beat2Shots = shotPlan.shots.filter((s) => s.narrationBeatId === "beat-2");
+  assert.equal(beat2Shots.length, 3);
+
+  assert.equal(beat2Shots[0]!.preRollSeconds, 0.3);
+  assert.equal(beat2Shots[0]!.postRollSeconds, 0);
+  assert.equal(beat2Shots[1]!.preRollSeconds, 0);
+  assert.equal(beat2Shots[1]!.postRollSeconds, 0);
+  assert.equal(beat2Shots[2]!.preRollSeconds, 0);
+  assert.equal(beat2Shots[2]!.postRollSeconds, 0.3);
 });

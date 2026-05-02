@@ -306,6 +306,10 @@ export function parseTaskClipShots(task: VideoTaskRecord, narrationResult?: Narr
         words: [],
       };
 
+    const matchingStoryShot =
+      directorPlan.storyShots.find((s) => s.segmentId === segment.segmentId) ??
+      directorPlan.storyShots.find((s) => s.shotIndex === segment.segmentIndex);
+
     return {
       segmentId: segment.segmentId,
       segmentIndex: segment.segmentIndex,
@@ -317,6 +321,8 @@ export function parseTaskClipShots(task: VideoTaskRecord, narrationResult?: Narr
       requiresLipSync: segment.requiresLipSync,
       videoPrompt: segment.videoPrompt,
       narrationClip,
+      preRollSeconds: matchingStoryShot?.preRollSeconds ?? 0,
+      postRollSeconds: matchingStoryShot?.postRollSeconds ?? 0,
     };
   });
 }

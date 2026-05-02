@@ -262,11 +262,14 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
 
   const clipPayloads = await buildTaskClipShotPayloads(task, { readOnly: true });
   const currentShotPayload = clipPayloads.find((item) => item.shotIndex === shotIndex) ?? null;
+  const shotPreRoll = shotDefinition.preRollSeconds ?? 0;
+  const shotPostRoll = shotDefinition.postRollSeconds ?? 0;
+  const rollPadding = shotPreRoll + shotPostRoll;
   const preferredDurationSeconds = Math.max(
     1,
-    narrationClip.audioDurationSeconds ?? 0,
-    narrationClip.durationSeconds || 0,
-    shotDefinition.durationSeconds || 0,
+    (narrationClip.audioDurationSeconds ?? 0) + rollPadding,
+    (narrationClip.durationSeconds || 0) + rollPadding,
+    (shotDefinition.durationSeconds || 0) + rollPadding,
   );
   const directMaterialClipPlan =
     !shotDefinition.requiresLipSync && currentShotPayload
@@ -476,10 +479,10 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
       }
 
       const segmentDuration = clampSeedanceSegmentDurationSeconds(
-        naturalNarrationDuration ||
+        (naturalNarrationDuration ||
           shotDefinition.durationSeconds ||
           narrationClip.durationSeconds ||
-          task.parameters.video.durationSeconds,
+          task.parameters.video.durationSeconds) + rollPadding,
       );
 
       const seedancePrompt = buildSeedanceSegmentPrompt({
@@ -534,7 +537,7 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
     } else {
       generationSettings = {
         ...defaults,
-        durationSeconds: Math.max(3, Math.round(naturalNarrationDuration || task.parameters.video.durationSeconds)),
+        durationSeconds: Math.max(3, Math.round((naturalNarrationDuration || task.parameters.video.durationSeconds) + rollPadding)),
         mode: task.parameters.video.mode,
         aspectRatio: task.parameters.video.aspectRatio,
         cfgScale: task.parameters.video.cfgScale,

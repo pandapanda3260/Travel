@@ -353,19 +353,11 @@ function loadTaskVisualImagesPayload(taskId: string) {
   };
 }
 
-function shouldSeedReferenceBackedShot(shot: TaskVisualImageShotDraft) {
+function shouldUseReferenceForImageGeneration(shot: TaskVisualImageShotDraft) {
   return Boolean(
     !shot.needsAiFallback &&
     shot.referenceImageUrl &&
     (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v"),
-  );
-}
-
-function shouldUseReferenceForImageGeneration(shot: TaskVisualImageShotDraft) {
-  return Boolean(
-    !shot.needsAiFallback &&
-      shot.referenceImageUrl &&
-      (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v"),
   );
 }
 
@@ -377,7 +369,7 @@ async function syncCapturedMaterialVisualShots(input: {
   const syncedShotIndexes: number[] = [];
 
   for (const shot of parseTaskVisualImageShots(input.task)) {
-    if (!shouldSeedReferenceBackedShot(shot) || !shot.referenceImageUrl) {
+    if (!shouldUseReferenceForImageGeneration(shot) || !shot.referenceImageUrl) {
       continue;
     }
 
@@ -438,7 +430,7 @@ async function executeVisualImageBatchGeneration(input: {
     existingShots.filter((shot) => shot.candidates.length > 0).map((shot) => shot.shotIndex),
   );
   const targets = regenerateAll
-    ? shotDrafts.filter((shot) => !shouldSeedReferenceBackedShot(shot))
+    ? shotDrafts.filter((shot) => !shouldUseReferenceForImageGeneration(shot))
     : shotDrafts.filter((shot) => !existingShotIndices.has(shot.shotIndex));
 
   return runWithModelUsageContext(

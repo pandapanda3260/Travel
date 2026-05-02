@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-const LEGACY_SHARED_TRAVEL_ENV_FILE = "/Users/bytedance/Desktop/Travel 相关文件/key/travel.env.local";
 const DEFAULT_SHARED_TRAVEL_ENV_FILE_CANDIDATES = ["travel.shared.env.local", "travel.env.shared.local"];
 
 function joinProjectPath(fileName: string) {
@@ -21,7 +20,7 @@ export function getSharedTravelEnvFilePath() {
     }
   }
 
-  return existsSync(LEGACY_SHARED_TRAVEL_ENV_FILE) ? LEGACY_SHARED_TRAVEL_ENV_FILE : "";
+  return "";
 }
 
 export function getEnvConfigDisplayName(fileName: string) {

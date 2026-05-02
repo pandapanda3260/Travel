@@ -466,7 +466,7 @@ function applyMaterialPreferenceRules(input: {
     }
     targetBeat.targetMaterialIds = [assetId, ...targetBeat.targetMaterialIds.filter((targetId) => targetId !== assetId)].slice(
       0,
-      2,
+      3,
     );
     warnings.push(`素材 ${assetId} 被用户标记为必须使用，已优先分配到 ${targetBeat.title}。`);
   }
@@ -533,7 +533,7 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
       spokenText,
       subtitleText,
       estimatedDurationSeconds: estimateBeatDurationSeconds(spokenText),
-      targetMaterialIds: targetMaterialIds.length ? targetMaterialIds.slice(0, 2) : fallbackBeat.targetMaterialIds,
+      targetMaterialIds: targetMaterialIds.length ? targetMaterialIds.slice(0, 3) : fallbackBeat.targetMaterialIds,
       materialReason: readString(candidateBeat.materialReason) || fallbackBeat.materialReason,
     };
   });
@@ -602,6 +602,23 @@ function mapAssetSourceType(sourceType: RealPhotoMaterialBriefItem["sourceType"]
   }
 }
 
+function computeShotRollSeconds(input: {
+  phase: RealPhotoNarrationPhase;
+  index: number;
+  totalCount: number;
+}): { preRollSeconds: number; postRollSeconds: number } {
+  if (input.totalCount <= 1) {
+    return { preRollSeconds: 0.5, postRollSeconds: 0.5 };
+  }
+  if (input.index === 0) {
+    return { preRollSeconds: 0.8, postRollSeconds: 0.3 };
+  }
+  if (input.index === input.totalCount - 1) {
+    return { preRollSeconds: 0.3, postRollSeconds: 0.8 };
+  }
+  return { preRollSeconds: 0.3, postRollSeconds: 0.3 };
+}
+
 function decideFallbackNeed(
   material: RealPhotoMaterialBriefItem | null,
 ): { needsAiFallback: boolean; fallbackReason: string | null } {
@@ -626,6 +643,7 @@ function buildShotFromBeat(input: {
   material: RealPhotoMaterialBriefItem | null;
   parameters: VideoTaskParameterBundle;
   startAtSeconds: number;
+  totalCount: number;
 }): ShotPlanItem {
   const shotIndex = input.index + 1;
   const material = input.material;
@@ -702,8 +720,7 @@ function buildShotFromBeat(input: {
     sourceTrace: needsAiFallback ? null : mapSourceTrace(material?.sourceType),
     needsAiFallback,
     fallbackReason,
-    preRollSeconds: 0,
-    postRollSeconds: 0,
+    ...computeShotRollSeconds({ phase: input.beat.phase, index: input.index, totalCount: input.totalCount }),
     transitionType: "narration-led",
     negativePrompt: null,
     userOverride: false,
@@ -731,22 +748,144 @@ function buildShotFromBeat(input: {
   };
 }
 
+function decideSubShotCount(beat: RealPhotoNarrationBeat): number {
+  if (beat.targetMaterialIds.length <= 1) {
+    return 1;
+  }
+  if (beat.estimatedDurationSeconds < 4) {
+    return 1;
+  }
+  return Math.min(beat.targetMaterialIds.length, Math.floor(beat.estimatedDurationSeconds / 2.5), 3);
+}
+
+function distributeSubShotDurations(totalDuration: number, count: number): number[] {
+  if (count <= 1) {
+    return [totalDuration];
+  }
+  const firstRatio = count === 2 ? 0.55 : 0.4;
+  const first = Math.round(totalDuration * firstRatio * 10) / 10;
+  const remainderPerShot = Math.round(((totalDuration - first) / (count - 1)) * 10) / 10;
+  const result = [first];
+  for (let i = 1; i < count - 1; i++) {
+    result.push(remainderPerShot);
+  }
+  result.push(Math.round((totalDuration - result.reduce((sum, d) => sum + d, 0)) * 10) / 10);
+  return result;
+}
+
+function buildSubShotsFromBeat(input: {
+  beat: RealPhotoNarrationBeat;
+  beatIndex: number;
+  materialById: Map<string, RealPhotoMaterialBriefItem>;
+  parameters: VideoTaskParameterBundle;
+  startAtSeconds: number;
+  shotIndexOffset: number;
+  totalBeatCount: number;
+}): ShotPlanItem[] {
+  const count = decideSubShotCount(input.beat);
+  if (count <= 1) {
+    const material =
+      input.beat.targetMaterialIds.map((id) => input.materialById.get(id) ?? null).find(Boolean) ?? null;
+    return [
+      buildShotFromBeat({
+        beat: input.beat,
+        index: input.shotIndexOffset,
+        material,
+        parameters: input.parameters,
+        startAtSeconds: input.startAtSeconds,
+        totalCount: input.totalBeatCount,
+      }),
+    ];
+  }
+
+  const durations = distributeSubShotDurations(input.beat.estimatedDurationSeconds, count);
+  const rolls = computeShotRollSeconds({
+    phase: input.beat.phase,
+    index: input.beatIndex,
+    totalCount: input.totalBeatCount,
+  });
+  const result: ShotPlanItem[] = [];
+  let cursor = input.startAtSeconds;
+
+  for (let sub = 0; sub < count; sub++) {
+    const materialId = input.beat.targetMaterialIds[sub];
+    const material = materialId ? (input.materialById.get(materialId) ?? null) : null;
+    const subDuration = durations[sub];
+
+    if (sub === 0) {
+      const shot = buildShotFromBeat({
+        beat: { ...input.beat, estimatedDurationSeconds: subDuration },
+        index: input.shotIndexOffset,
+        material,
+        parameters: input.parameters,
+        startAtSeconds: Math.round(cursor * 10) / 10,
+        totalCount: input.totalBeatCount,
+      });
+      shot.preRollSeconds = rolls.preRollSeconds;
+      shot.postRollSeconds = 0;
+      result.push(shot);
+    } else {
+      const primary = result[0];
+      const { needsAiFallback, fallbackReason } = decideFallbackNeed(material);
+      const shotIndex = input.shotIndexOffset + sub + 1;
+      result.push({
+        ...primary,
+        shotId: `${primary.shotId}-sub-${sub + 1}`,
+        shotIndex,
+        durationSeconds: subDuration,
+        startAtSeconds: Math.round(cursor * 10) / 10,
+        endAtSeconds: Math.round((cursor + subDuration) * 10) / 10,
+        hasVoice: false,
+        hasSubtitle: false,
+        sourceSpokenText: null,
+        sourceSubtitleText: null,
+        narrationEstimatedDurationSeconds: 0,
+        assetId: needsAiFallback ? null : (material?.assetId ?? null),
+        referenceImageUrl: needsAiFallback ? null : (material?.fileUrl ?? null),
+        assetSourceType: needsAiFallback ? null : mapAssetSourceType(material?.sourceType),
+        assetSubjectSummary: material?.subjectSummary ?? null,
+        sourceTrace: needsAiFallback ? null : mapSourceTrace(material?.sourceType),
+        targetMaterialIds: needsAiFallback ? [] : (materialId ? [materialId] : []),
+        backupAssetIds: [],
+        generationMode: needsAiFallback
+          ? "ai_generated_broll"
+          : material?.needEnhancement
+            ? "photo_enhanced_i2v"
+            : "photo_direct_i2v",
+        needsAiFallback,
+        fallbackReason,
+        needImageEnhancement: needsAiFallback ? false : (material?.needEnhancement ?? false),
+        preRollSeconds: 0,
+        postRollSeconds: sub === count - 1 ? rolls.postRollSeconds : 0,
+        userOverride: false,
+      });
+    }
+    cursor += subDuration;
+  }
+
+  return result;
+}
+
 export function buildShotPlanFromRealPhotoNarrationBlueprint(
   input: BuildShotPlanFromRealPhotoNarrationBlueprintInput,
 ): ShotPlan {
   const materialById = new Map(input.materialBrief.items.map((item) => [item.assetId, item]));
+  const totalCount = input.blueprint.beats.length;
   let cursor = 0;
-  const shots = input.blueprint.beats.map((beat, index) => {
-    const material = beat.targetMaterialIds.map((assetId) => materialById.get(assetId) ?? null).find(Boolean) ?? null;
-    const shot = buildShotFromBeat({
+  let shotIndexOffset = 0;
+  const shots = input.blueprint.beats.flatMap((beat, beatIndex) => {
+    const subShots = buildSubShotsFromBeat({
       beat,
-      index,
-      material,
+      beatIndex,
+      materialById,
       parameters: input.parameters,
       startAtSeconds: Math.round(cursor * 10) / 10,
+      shotIndexOffset,
+      totalBeatCount: totalCount,
     });
-    cursor += shot.durationSeconds;
-    return shot;
+    for (const s of subShots) cursor += s.durationSeconds;
+    shotIndexOffset += subShots.length;
+    return subShots;
   });
 
   return {
