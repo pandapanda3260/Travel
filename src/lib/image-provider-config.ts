@@ -73,6 +73,7 @@ function getBaseImageRuntimeConfig() {
     const apiKey = process.env.LIANGXIN_IMAGE_API_KEY ?? localConfig.LIANGXIN_IMAGE_API_KEY ?? "";
     const apiBase = normalizeHttpBaseUrl(process.env.LIANGXIN_IMAGE_BASE_URL ?? localConfig.LIANGXIN_IMAGE_BASE_URL ?? "");
     const modelId = resolveLiangxinImageModelId(process.env.LIANGXIN_IMAGE_MODEL, localConfig.LIANGXIN_IMAGE_MODEL);
+    const quality = (process.env.LIANGXIN_IMAGE_QUALITY ?? localConfig.LIANGXIN_IMAGE_QUALITY ?? "").trim() || null;
     const liveEnabled = parseBoolean(
       process.env.LIANGXIN_IMAGE_LIVE_ENABLED ?? localConfig.LIANGXIN_IMAGE_LIVE_ENABLED,
       true,
@@ -87,6 +88,7 @@ function getBaseImageRuntimeConfig() {
       localConfig,
       modelId,
       provider,
+      quality,
     };
   }
 
@@ -115,6 +117,7 @@ function getBaseImageRuntimeConfig() {
     localConfig,
     modelId,
     provider,
+    quality: null,
   };
 }
 
@@ -128,6 +131,7 @@ export function getImageGenerationRuntime(): ImageGenerationRuntime {
     apiBase: base.apiBase,
     apiKey: base.apiKey,
     modelId: base.modelId,
+    quality: base.quality ?? null,
     providerLabel:
       base.provider === "liangxin" ? formatLiangxinProviderLabel(base.modelId) : formatSeedreamProviderLabel(base.modelId),
     configFileName: base.configFileName,
@@ -151,6 +155,7 @@ export function getVideoPipelineImageGenerationRuntime(): ImageGenerationRuntime
     apiBase: base.apiBase,
     apiKey: base.apiKey,
     modelId,
+    quality: base.quality ?? null,
     providerLabel:
       base.provider === "liangxin" ? formatLiangxinProviderLabel(modelId) : formatSeedreamProviderLabel(modelId),
     configFileName: base.configFileName,
@@ -171,6 +176,7 @@ export function getImageCleaningRuntime(): ImageGenerationRuntime {
     apiBase: base.apiBase,
     apiKey: base.apiKey,
     modelId: cleanModelId,
+    quality: base.quality ?? null,
     providerLabel:
       base.provider === "liangxin"
         ? formatLiangxinProviderLabel(cleanModelId, "清洗")

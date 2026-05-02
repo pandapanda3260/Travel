@@ -3673,7 +3673,7 @@ textarea {
   }
 
   .task-subtitle-settings-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   }
 
   .task-subtitle-setting-field-wide {
@@ -3683,7 +3683,7 @@ textarea {
 
 @media (max-width: 920px) {
   .task-subtitle-settings-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
   }
 }
 

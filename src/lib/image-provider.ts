@@ -336,8 +336,9 @@ async function requestLiangxinImages(
       body: JSON.stringify({
         model: runtime.modelId,
         prompt,
-        size,
+        size: normalizeSizeForLiangxin(size),
         n: outputCount,
+        ...(runtime.quality ? { quality: runtime.quality } : {}),
         ...(referenceImageDataUrl ? { image: referenceImageDataUrl } : {}),
       }),
     });
