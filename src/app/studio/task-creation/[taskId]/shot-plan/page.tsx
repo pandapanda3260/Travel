@@ -38,7 +38,7 @@ export default async function ShotPlanPromptTablePage({ params, searchParams }: 
   const videoTypeProfile = getVideoTaskTypeProfile(task.parameters.video.videoType);
   const workflowMode = getTaskCreationWorkflowModeForTask(task);
   const workflowConfig = getTaskCreationWorkflowModeConfig(workflowMode);
-  const returnHref = `${workflowConfig.href}?taskId=${encodeURIComponent(task.taskId)}`;
+  const returnHref = `${workflowConfig.href}?taskId=${encodeURIComponent(task.taskId)}#shot-plan-detail-entry`;
 
   return (
     <ShotPlanEditor

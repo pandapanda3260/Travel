@@ -1267,11 +1267,38 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       return;
     }
 
-    // 兼容旧的回跳链接：清掉 hash，避免后续刷新或状态切换时再触发锚点定位。
-    const currentUrl = new URL(window.location.href);
-    currentUrl.hash = "";
-    window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}`);
-  }, []);
+    let isCancelled = false;
+    let attemptCount = 0;
+    const maxAttemptCount = 30;
+
+    const scrollToShotPlanEntry = () => {
+      if (isCancelled || window.location.hash !== "#shot-plan-detail-entry") {
+        return;
+      }
+
+      const target = document.getElementById("shot-plan-detail-entry");
+      if (!target) {
+        attemptCount += 1;
+        if (attemptCount <= maxAttemptCount) {
+          window.setTimeout(scrollToShotPlanEntry, 100);
+        }
+        return;
+      }
+
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+
+      // 定位完成后清掉 hash，避免后续刷新或状态切换时重复跳转。
+      const currentUrl = new URL(window.location.href);
+      currentUrl.hash = "";
+      window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}`);
+    };
+
+    window.requestAnimationFrame(scrollToShotPlanEntry);
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedTask?.taskId]);
 
   const storyboardVoiceSlotCount = useMemo(
     () =>
@@ -4467,7 +4494,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                   <>
                     <div className="task-plan-workbench">
                       <div className="task-plan-content-stack">
-                        <div className="task-plan-detail-entry">
+                        <div className="task-plan-detail-entry" id="shot-plan-detail-entry">
                           <div className="task-plan-detail-entry-copy">
                             <strong>
                               {selectedTaskCapturedMaterialFirst
@@ -4509,7 +4536,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             className="btn-primary small task-plan-detail-entry-button"
                             href={`/studio/task-creation/${selectedTask.taskId}/shot-plan`}
                           >
-                            详情查看与编辑
+                            编辑镜头计划
                           </Link>
                         </div>
                         {selectedTaskCapturedMaterialFirst && shotPlanDisplay ? (
