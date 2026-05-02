@@ -4089,7 +4089,7 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       handleVideoGenerationWorkflowChange(null);
       setVideoGenerationLoadStatus("idle");
       handleSelectedTaskStageProgressChange({});
-      setSelectedTaskStageProgressLoadStatus("idle");
+      setSelectedTaskStageProgressLoadStatus("success");
       setVisualPrimaryAction(null);
       setClipPrimaryAction(null);
       setCompositionPrimaryAction(null);

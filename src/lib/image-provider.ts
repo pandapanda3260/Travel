@@ -413,7 +413,7 @@ async function requestLiangxinImages(
     };
 
     if (!response.ok) {
-      throw new Error(payload.error?.message ?? payload.message ?? "图片生成失败");
+      throw buildProviderRequestError(response.status, payload.error?.message ?? payload.message ?? "图片生成失败");
     }
 
     const items = payload.data ?? payload.images ?? [];
