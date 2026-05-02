@@ -126,6 +126,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
   const [deletingAssetId, setDeletingAssetId] = useState("");
   const [enhancingAssetId, setEnhancingAssetId] = useState("");
   const [selectingAssetId, setSelectingAssetId] = useState("");
+  const [draggingAssetId, setDraggingAssetId] = useState("");
   const [activeAssetId, setActiveAssetId] = useState("");
   const [previewAssetId, setPreviewAssetId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -462,6 +463,86 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
 	    },
 	    [applyHotelAssetResponse, taskId],
 	  );
+
+  const handleAssetPreferenceChange = useCallback(
+    async (assetId: string, updates: Pick<TaskHotelAssetRecord, "mustUse" | "forbidden">) => {
+      if (!taskId || hasAssetOperationInFlight) {
+        return;
+      }
+      setError(null);
+      setAssetSyncState(assetId, {
+        phase: "saving",
+        message: "正在保存使用规则…",
+      });
+      try {
+        await patchAsset(
+          {
+            assetId,
+            ...updates,
+          },
+          "素材使用规则保存失败",
+        );
+        setAssetSyncState(assetId, {
+          phase: "saved",
+          message: "使用规则已保存",
+        });
+      } catch (preferenceError) {
+        setError(preferenceError instanceof Error ? preferenceError.message : "素材使用规则保存失败");
+        setAssetSyncState(assetId, {
+          phase: "error",
+          message: "保存失败",
+        });
+      }
+    },
+    [hasAssetOperationInFlight, patchAsset, setAssetSyncState, taskId],
+  );
+
+  const handleReorderRootAsset = useCallback(
+    async (sourceAssetId: string, targetAssetId: string) => {
+      if (!taskId || sourceAssetId === targetAssetId || hasAssetOperationInFlight) {
+        return;
+      }
+      const sourceIndex = rootAssets.findIndex((asset) => asset.assetId === sourceAssetId);
+      const targetIndex = rootAssets.findIndex((asset) => asset.assetId === targetAssetId);
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return;
+      }
+
+      const previousAssets = assetsRef.current;
+      const reorderedRootAssets = [...rootAssets];
+      const [movedAsset] = reorderedRootAssets.splice(sourceIndex, 1);
+      reorderedRootAssets.splice(targetIndex, 0, movedAsset);
+      const rootOrderMap = new Map(reorderedRootAssets.map((asset, index) => [asset.assetId, index]));
+      const assetOrders = reorderedRootAssets.map((asset, index) => ({
+        assetId: asset.assetId,
+        sortOrder: index,
+      }));
+
+      setError(null);
+      setDraggingAssetId("");
+      setAssets((currentAssets) =>
+        getHotelAssetDisplayOrder(
+          currentAssets.map((asset) => {
+            const nextSortOrder = rootOrderMap.get(asset.assetId);
+            return nextSortOrder == null ? asset : { ...asset, sortOrder: nextSortOrder };
+          }),
+        ),
+      );
+
+      try {
+        await patchAsset(
+          {
+            assetOrders,
+          },
+          "图片排序保存失败",
+        );
+      } catch (reorderError) {
+        setAssets(previousAssets);
+        setError(reorderError instanceof Error ? reorderError.message : "图片排序保存失败");
+      }
+    },
+    [hasAssetOperationInFlight, patchAsset, rootAssets, taskId],
+  );
 
   const getAssetById = useCallback((assetId: string) => {
     return assetsRef.current.find((asset) => asset.assetId === assetId) ?? null;

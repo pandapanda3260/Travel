@@ -1,6 +1,6 @@
 "use client";
 
-import { BarChart3, Check, LogOut, PencilLine, Settings2, ShieldCheck, Sparkles, X } from "lucide-react";
+import { BarChart3, Check, LogIn, LogOut, PencilLine, Settings2, ShieldCheck, Sparkles, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -40,7 +40,7 @@ export function GlobalSidebarAccountPopover({
   onNicknameUpdated,
   accountDetailsLoadStatus,
 }: {
-  user: SidebarUserSummary;
+  user: SidebarUserSummary | null;
   avatarText: string;
   planLabel: string;
   accountDetailsLoadStatus?: "idle" | "loading" | "success" | "error";
@@ -50,15 +50,16 @@ export function GlobalSidebarAccountPopover({
   const router = useRouter();
   const nicknameInputRef = useRef<HTMLInputElement | null>(null);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [nicknameDraft, setNicknameDraft] = useState(user.nickname);
+  const [nicknameDraft, setNicknameDraft] = useState(user?.nickname ?? "");
   const [nicknameError, setNicknameError] = useState<string | null>(null);
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [isSavingNickname, setIsSavingNickname] = useState(false);
   const detailsLoading = accountDetailsLoadStatus === "loading";
+  const isAuthenticated = Boolean(user);
 
   useEffect(() => {
-    setNicknameDraft(user.nickname);
-  }, [user.nickname]);
+    setNicknameDraft(user?.nickname ?? "");
+  }, [user?.nickname]);
 
   useEffect(() => {
     if (!isEditingNickname) {
@@ -70,7 +71,7 @@ export function GlobalSidebarAccountPopover({
   }, [isEditingNickname]);
 
   async function handleNicknameSave() {
-    if (isSavingNickname) {
+    if (!user || isSavingNickname) {
       return;
     }
 
@@ -114,12 +115,22 @@ export function GlobalSidebarAccountPopover({
   }
 
   function handleNicknameCancel() {
-    setNicknameDraft(user.nickname);
+    setNicknameDraft(user?.nickname ?? "");
     setNicknameError(null);
     setIsEditingNickname(false);
   }
 
+  function handleLogin() {
+    onClose();
+    router.push("/login");
+  }
+
   async function handleLogout() {
+    if (!isAuthenticated) {
+      handleLogin();
+      return;
+    }
+
     if (isLoggingOut) {
       return;
     }
@@ -139,16 +150,16 @@ export function GlobalSidebarAccountPopover({
     <div className="sidebar-account-popover">
       <div className="sidebar-account-popover-head">
         <span
-          className={`sidebar-account-avatar large ${user.avatar ? "image-fill" : ""}`}
-          style={user.avatar ? { backgroundImage: `url(${user.avatar})` } : undefined}
+          className={`sidebar-account-avatar large ${user?.avatar ? "image-fill" : ""}`}
+          style={user?.avatar ? { backgroundImage: `url(${user.avatar})` } : undefined}
           aria-hidden="true"
         >
-          {user.avatar ? null : avatarText}
+          {user?.avatar ? null : avatarText}
         </span>
         <div className="sidebar-account-profile-copy">
           <div className="sidebar-account-profile-row">
             <div className="sidebar-account-nickname-group">
-              {isEditingNickname ? (
+              {user && isEditingNickname ? (
                 <>
                   <input
                     ref={nicknameInputRef}
@@ -194,90 +205,100 @@ export function GlobalSidebarAccountPopover({
                 </>
               ) : (
                 <>
-                  <strong>{user.nickname}</strong>
-                  <button
-                    type="button"
-                    className="sidebar-account-nickname-icon"
-                    onClick={() => {
-                      setNicknameDraft(user.nickname);
-                      setNicknameError(null);
-                      setIsEditingNickname(true);
-                    }}
-                    aria-label="修改昵称"
-                  >
-                    <PencilLine size={13} />
-                  </button>
+                  <strong>{user?.nickname ?? ""}</strong>
+                  {user ? (
+                    <button
+                      type="button"
+                      className="sidebar-account-nickname-icon"
+                      onClick={() => {
+                        setNicknameDraft(user.nickname);
+                        setNicknameError(null);
+                        setIsEditingNickname(true);
+                      }}
+                      aria-label="修改昵称"
+                    >
+                      <PencilLine size={13} />
+                    </button>
+                  ) : null}
                 </>
               )}
             </div>
-            <Link href="/settings/account" className="sidebar-account-profile-link" onClick={onClose}>
-              账号管理
-            </Link>
+            {user ? (
+              <Link href="/settings/account" className="sidebar-account-profile-link" onClick={onClose}>
+                账号管理
+              </Link>
+            ) : null}
           </div>
           {nicknameError ? <p className="sidebar-account-profile-error">{nicknameError}</p> : null}
           {accountDetailsLoadStatus === "error" ? (
             <p className="sidebar-account-profile-error">账号概览同步失败，稍后重新打开可重试。</p>
           ) : null}
-          <span>账号 ID · {buildSidebarAccountId(user.userId)}</span>
-          <div className="sidebar-account-badges">
-            <span className="sidebar-account-badge">主账号</span>
-            <span className="sidebar-account-badge accent">{planLabel}</span>
-            {user.certificationLabel ? (
-              <span className="sidebar-account-badge success">{user.certificationLabel}</span>
-            ) : null}
-          </div>
+          <span>账号 ID · {user ? buildSidebarAccountId(user.userId) : ""}</span>
+          {user ? (
+            <div className="sidebar-account-badges">
+              <span className="sidebar-account-badge">主账号</span>
+              <span className="sidebar-account-badge accent">{planLabel}</span>
+              {user.certificationLabel ? (
+                <span className="sidebar-account-badge success">{user.certificationLabel}</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
 
       <div className="sidebar-account-metrics">
         <div className="sidebar-account-metric">
           <span>状态</span>
-          <strong>{formatUserStatus(user.status)}</strong>
+          <strong>{user ? formatUserStatus(user.status) : ""}</strong>
         </div>
         <div className="sidebar-account-metric">
           <span>会话</span>
-          <strong>{detailsLoading ? "同步中..." : user.activeSessionCount}</strong>
+          <strong>{user ? (detailsLoading ? "同步中..." : user.activeSessionCount) : ""}</strong>
         </div>
         <div className="sidebar-account-metric">
           <span>手机号</span>
-          <strong>{detailsLoading && !user.maskedPhone ? "同步中..." : user.maskedPhone || "待修正"}</strong>
+          <strong>{user ? (detailsLoading && !user.maskedPhone ? "同步中..." : user.maskedPhone || "待修正") : ""}</strong>
         </div>
       </div>
 
       <div className="sidebar-account-points-panel">
         <div className="sidebar-account-points-copy">
           <span>当前剩余积分</span>
-          <strong>{detailsLoading && user.availablePoints === 0 ? "同步中..." : formatPoints(user.availablePoints)}</strong>
+          <strong>{user ? (detailsLoading && user.availablePoints === 0 ? "同步中..." : formatPoints(user.availablePoints)) : ""}</strong>
         </div>
-        <Link href="/settings/usage" className="sidebar-account-points-link" onClick={onClose}>
-          用量账单
-        </Link>
+        {user ? (
+          <Link href="/settings/usage" className="sidebar-account-points-link" onClick={onClose}>
+            用量账单
+          </Link>
+        ) : null}
       </div>
 
-      <div className="sidebar-account-groups">
-        {userPanelGroups.map((group) => (
-          <section key={group.title} className="sidebar-account-group">
-            <p>{group.title}</p>
-            <div className="sidebar-account-shortcuts">
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <Link key={item.href} href={item.href} className="sidebar-account-shortcut" onClick={onClose}>
-                    <span className="sidebar-account-shortcut-icon">
-                      <Icon size={14} />
-                    </span>
-                    <span>{item.label}</span>
-                  </Link>
-                );
-              })}
-            </div>
-          </section>
-        ))}
-      </div>
+      {user ? (
+        <div className="sidebar-account-groups">
+          {userPanelGroups.map((group) => (
+            <section key={group.title} className="sidebar-account-group">
+              <p>{group.title}</p>
+              <div className="sidebar-account-shortcuts">
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <Link key={item.href} href={item.href} className="sidebar-account-shortcut" onClick={onClose}>
+                      <span className="sidebar-account-shortcut-icon">
+                        <Icon size={14} />
+                      </span>
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      ) : null}
 
       <button type="button" className="sidebar-account-logout" onClick={handleLogout} disabled={isLoggingOut}>
-        <LogOut size={14} />
-        <span>{isLoggingOut ? "退出中..." : "退出登录"}</span>
+        {isAuthenticated ? <LogOut size={14} /> : <LogIn size={14} />}
+        <span>{isAuthenticated ? (isLoggingOut ? "退出中..." : "退出登录") : "登录"}</span>
       </button>
     </div>
   );

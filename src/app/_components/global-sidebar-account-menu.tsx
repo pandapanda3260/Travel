@@ -27,6 +27,15 @@ type SidebarAccountDetailsLoadState = {
   status: "idle" | "loading" | "success" | "error";
 };
 
+export type SidebarAccountMenuState = {
+  shouldRender: true;
+  isAuthenticated: boolean;
+  nickname: string;
+  planLabel: string;
+  avatarText: string;
+  primaryActionLabel: "退出登录" | "登录";
+};
+
 function pickSidebarAccountDetails(user: SidebarUserSummary): SidebarAccountDetails {
   return {
     maskedPhone: user.maskedPhone,
@@ -35,8 +44,12 @@ function pickSidebarAccountDetails(user: SidebarUserSummary): SidebarAccountDeta
   };
 }
 
-function buildAvatarText(user: SidebarUserSummary) {
-  const nickname = user.nickname.trim();
+function buildAvatarText(user: SidebarUserSummary | null, nicknameOverride?: string) {
+  if (!user) {
+    return "";
+  }
+
+  const nickname = (nicknameOverride ?? user.nickname).trim();
   if (nickname) {
     return nickname.slice(0, 1).toUpperCase();
   }
@@ -48,11 +61,29 @@ function buildAvatarText(user: SidebarUserSummary) {
   return "U";
 }
 
-function buildPlanLabel(user: SidebarUserSummary) {
+function buildPlanLabel(user: SidebarUserSummary | null) {
+  if (!user) {
+    return "";
+  }
+
   if (user.planLevel) {
     return `L${user.planLevel} 会员`;
   }
   return "标准会员";
+}
+
+export function buildSidebarAccountMenuState(
+  user: SidebarUserSummary | null,
+  nicknameOverride?: string,
+): SidebarAccountMenuState {
+  return {
+    shouldRender: true,
+    isAuthenticated: Boolean(user),
+    nickname: user ? (nicknameOverride ?? user.nickname) : "",
+    planLabel: buildPlanLabel(user),
+    avatarText: buildAvatarText(user, nicknameOverride),
+    primaryActionLabel: user ? "退出登录" : "登录",
+  };
 }
 
 export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | null }) {
@@ -136,19 +167,18 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
     };
   }, [isPanelOpen]);
 
-  if (!user) {
-    return null;
-  }
-
-  const displayUser = {
-    ...user,
-    ...(accountDetailsResult?.userId === user.userId ? accountDetailsResult.details : pickSidebarAccountDetails(user)),
-    nickname: displayNickname,
-  };
+  const menuState = buildSidebarAccountMenuState(user, displayNickname);
+  const displayUser = user
+    ? {
+        ...user,
+        ...(accountDetailsResult?.userId === user.userId
+          ? accountDetailsResult.details
+          : pickSidebarAccountDetails(user)),
+        nickname: menuState.nickname,
+      }
+    : null;
   const accountDetailsLoadStatus =
-    accountDetailsLoadState.userId === user.userId ? accountDetailsLoadState.status : "idle";
-  const avatarText = buildAvatarText(displayUser);
-  const planLabel = buildPlanLabel(displayUser);
+    user && accountDetailsLoadState.userId === user.userId ? accountDetailsLoadState.status : "idle";
 
   return (
     <div className={`sidebar-account-shell ${isPanelOpen ? "open" : ""}`} ref={panelRef}>
@@ -158,22 +188,23 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
         onClick={() => {
           const nextOpen = !isPanelOpen;
           setIsPanelOpen(nextOpen);
-          if (nextOpen) {
+          if (nextOpen && user) {
             void loadAccountDetails();
           }
         }}
         aria-expanded={isPanelOpen}
+        aria-label={menuState.isAuthenticated ? "打开账号菜单" : "打开登录菜单"}
       >
         <span
-          className={`sidebar-account-avatar ${displayUser.avatar ? "image-fill" : ""}`}
-          style={displayUser.avatar ? { backgroundImage: `url(${displayUser.avatar})` } : undefined}
+          className={`sidebar-account-avatar ${displayUser?.avatar ? "image-fill" : ""}`}
+          style={displayUser?.avatar ? { backgroundImage: `url(${displayUser.avatar})` } : undefined}
           aria-hidden="true"
         >
-          {displayUser.avatar ? null : avatarText}
+          {displayUser?.avatar ? null : menuState.avatarText}
         </span>
         <span className="sidebar-account-trigger-copy">
-          <strong>{displayUser.nickname}</strong>
-          <span>{planLabel}</span>
+          <strong>{menuState.nickname}</strong>
+          <span>{menuState.planLabel}</span>
         </span>
         <span className="sidebar-account-trigger-arrow" aria-hidden="true">
           <ChevronRight size={15} />
@@ -183,8 +214,8 @@ export function GlobalSidebarAccountMenu({ user }: { user: SidebarUserSummary | 
       {isPanelOpen ? (
         <GlobalSidebarAccountPopover
           user={displayUser}
-          avatarText={avatarText}
-          planLabel={planLabel}
+          avatarText={menuState.avatarText}
+          planLabel={menuState.planLabel}
           accountDetailsLoadStatus={accountDetailsLoadStatus}
           onClose={() => setIsPanelOpen(false)}
           onNicknameUpdated={setDisplayNickname}
