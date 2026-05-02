@@ -1,18 +1,39 @@
-.next
-node_modules
-npm-debug.log*
 .env
 .env.local
-.env.*.local
+.env.production
+.env.*
 video.env.local
 image.env.local
 audio.env.local
 text.env.local
 fal.env.local
 kling.env.local
+
+node_modules
+.next
 dist
+build
+output
+logs
+*.log
+.DS_Store
+.playwright-cli
+.playwright-mcp
 playwright-report
 test-results/
+tsconfig.tsbuildinfo
+
+*.mp4
+*.mov
+*.avi
+*.wav
+*.mp3
+*.zip
+*.tar
+*.gz
+*.sqlite
+*.db
+*.bak
 
 # Runtime JSON data stores
 data/video-tasks.json
@@ -42,8 +63,9 @@ public/generated-images
 public/generated-audio
 public/generated-subtitles
 public/video-materials
+public/product-archives
+public/video-tasks
 
-# 🔥 必加（解决你当前问题）
+# Local runtime stores
 data/
-*.db
-*.bak
+.dbg/
