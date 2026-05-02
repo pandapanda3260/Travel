@@ -442,7 +442,9 @@ function applyMaterialPreferenceRules(input: {
 
   const sanitizedBeats = input.beats.map((beat) => {
     const targetMaterialIds = beat.targetMaterialIds.filter((assetId) => !forbiddenIds.has(assetId));
-    return targetMaterialIds.length === beat.targetMaterialIds.length ? beat : { ...beat, targetMaterialIds };
+    return targetMaterialIds.length === beat.targetMaterialIds.length
+      ? { ...beat, targetMaterialIds: [...beat.targetMaterialIds] }
+      : { ...beat, targetMaterialIds };
   });
 
   for (const forbiddenId of forbiddenIds) {
@@ -600,6 +602,24 @@ function mapAssetSourceType(sourceType: RealPhotoMaterialBriefItem["sourceType"]
   }
 }
 
+function decideFallbackNeed(
+  material: RealPhotoMaterialBriefItem | null,
+): { needsAiFallback: boolean; fallbackReason: string | null } {
+  if (!material) {
+    return { needsAiFallback: true, fallbackReason: "该镜头没有匹配到可用的用户上传素材" };
+  }
+  if (material.forbidden) {
+    return { needsAiFallback: true, fallbackReason: "用户已禁止使用该素材" };
+  }
+  if (material.qualityScore < 30) {
+    return { needsAiFallback: true, fallbackReason: `素材质量评分过低（${material.qualityScore}/100）` };
+  }
+  if (!material.canDirectI2V && !material.needEnhancement) {
+    return { needsAiFallback: true, fallbackReason: "素材不适合直接图生视频，且没有可用增强路径" };
+  }
+  return { needsAiFallback: false, fallbackReason: null };
+}
+
 function buildShotFromBeat(input: {
   beat: RealPhotoNarrationBeat;
   index: number;
@@ -614,8 +634,14 @@ function buildShotFromBeat(input: {
   const location = material?.sceneType ? `${material.sceneType}` : "实拍素材";
   const primaryAssetId = material?.assetId ?? input.beat.targetMaterialIds[0] ?? null;
   const backupAssetIds = input.beat.targetMaterialIds.filter((assetId) => assetId !== primaryAssetId);
-  const needsAiFallback = !material;
-  const fallbackReason = needsAiFallback ? "该镜头没有匹配到可用的用户上传素材" : null;
+  const { needsAiFallback, fallbackReason } = decideFallbackNeed(material);
+  const generationMode = needsAiFallback
+    ? "ai_generated_broll"
+    : material?.needEnhancement
+      ? "photo_enhanced_i2v"
+      : "photo_direct_i2v";
+  const resolvedTargetMaterialIds = needsAiFallback ? [] : input.beat.targetMaterialIds;
+  const resolvedBackupAssetIds = needsAiFallback ? [] : backupAssetIds;
 
   return {
     shotId: `shot-${shotIndex}`,
@@ -654,23 +680,26 @@ function buildShotFromBeat(input: {
     sourceSpokenText: input.beat.spokenText,
     sourceSubtitleText: input.beat.subtitleText,
     narrationEstimatedDurationSeconds: input.beat.estimatedDurationSeconds,
-    targetMaterialIds: input.beat.targetMaterialIds,
+    targetMaterialIds: resolvedTargetMaterialIds,
     shotScale: input.beat.phase === "offer_value" ? "medium/detail" : "medium",
     compositionHint: "保留用户上传图片的主体与真实意图，必要时只做轻度运动。",
     rhythmTag: input.beat.phase === "opening_hook" ? "hook" : input.beat.phase === "action_close" ? "close" : "proof",
     mood: input.beat.phase === "opening_hook" ? "带问题感" : "自然可信",
     sellingPointTags: [input.beat.phase, ...(material?.tags ?? [])].slice(0, 6),
-    assetId: primaryAssetId,
-    backupAssetIds,
-    assetSourceType: mapAssetSourceType(material?.sourceType),
+    assetId: needsAiFallback ? null : primaryAssetId,
+    backupAssetIds: resolvedBackupAssetIds,
+    assetSourceType: needsAiFallback ? null : mapAssetSourceType(material?.sourceType),
     assetSubjectSummary: material?.subjectSummary ?? null,
-    sourceMaterialId: material?.sourceType === "video_material" || material?.sourceType === "user_video" ? material.assetId : null,
+    sourceMaterialId:
+      !needsAiFallback && (material?.sourceType === "video_material" || material?.sourceType === "user_video")
+        ? material.assetId
+        : null,
     sourceStartAtSeconds: null,
     sourceEndAtSeconds: null,
     sourceTimeRangeLabel: null,
-    referenceImageUrl: material?.fileUrl ?? null,
-    generationMode: needsAiFallback ? "ai_generated_broll" : material?.needEnhancement ? "photo_enhanced_i2v" : "photo_direct_i2v",
-    sourceTrace: mapSourceTrace(material?.sourceType),
+    referenceImageUrl: needsAiFallback ? null : (material?.fileUrl ?? null),
+    generationMode,
+    sourceTrace: needsAiFallback ? null : mapSourceTrace(material?.sourceType),
     needsAiFallback,
     fallbackReason,
     preRollSeconds: 0,
@@ -678,7 +707,7 @@ function buildShotFromBeat(input: {
     transitionType: "narration-led",
     negativePrompt: null,
     userOverride: false,
-    needImageEnhancement: material?.needEnhancement ?? false,
+    needImageEnhancement: needsAiFallback ? false : (material?.needEnhancement ?? false),
     needImageToVideo: true,
     isAtmosphereInsert: input.beat.phase === "context_setup" && material?.priority === "support",
     img2imgPrompt: null,

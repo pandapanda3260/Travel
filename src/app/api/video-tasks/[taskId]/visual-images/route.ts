@@ -355,8 +355,17 @@ function loadTaskVisualImagesPayload(taskId: string) {
 
 function shouldSeedReferenceBackedShot(shot: TaskVisualImageShotDraft) {
   return Boolean(
+    !shot.needsAiFallback &&
     shot.referenceImageUrl &&
     (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v"),
+  );
+}
+
+function shouldUseReferenceForImageGeneration(shot: TaskVisualImageShotDraft) {
+  return Boolean(
+    !shot.needsAiFallback &&
+      shot.referenceImageUrl &&
+      (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v"),
   );
 }
 
@@ -481,8 +490,7 @@ async function executeVisualImageBatchGeneration(input: {
         for (const shot of targets) {
           tracker.start(`shot-${shot.shotIndex}`, `镜头 ${shot.shotIndex} 参考图生成中...`);
           const hotelReferenceAsset =
-            shot.referenceImageUrl &&
-            (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v")
+            shouldUseReferenceForImageGeneration(shot) && shot.referenceImageUrl
               ? loadHotelReferenceImage(shot.referenceImageUrl)
               : null;
 
@@ -698,8 +706,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       });
       let assets;
       const hotelReferenceAsset =
-        shot.referenceImageUrl &&
-        (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v")
+        shouldUseReferenceForImageGeneration(shot) && shot.referenceImageUrl
           ? loadHotelReferenceImage(shot.referenceImageUrl)
           : null;
       if (shot.generationMode === "photo_direct_i2v" && hotelReferenceAsset) {
