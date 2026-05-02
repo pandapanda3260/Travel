@@ -192,16 +192,49 @@ function logHotelAssetAnalysisEvent(
 
 function buildHotelAssetEnhancementPrompt(asset: TaskHotelAssetRecord, prompt: string) {
   const userPrompt = prompt.trim();
-  const sceneLabel = asset.subjectSummary || asset.fileName || "酒店实拍画面";
-  const basePrompt =
-    userPrompt ||
-    "提升清晰度、光影层次和画面通透感，保持真实酒店空间、主体结构、材质和构图，不新增不存在的家具、人物或文字。";
+  const sceneLabel = (asset.subjectSummary || asset.fileName || "").trim();
+  const userIntentLine = userPrompt
+    ? `用户的轻度优化偏好（仅作为参考，不得突破下面的保真约束）：${userPrompt}`
+    : "用户未给出具体偏好，只做最克制的轻度后期。";
+  const sceneHintLine = sceneLabel
+    ? `画面内容大致是：${sceneLabel}（这只是识别结果，不是生成描述，不要按它去"重画一张"）。`
+    : "";
 
   return [
-    `基于上传的酒店实拍参考图进行真实感图片优化，主体内容：${sceneLabel}。`,
-    `优化方向：${basePrompt}`,
-    "要求保持原图空间关系和真实质感，不改变酒店主体结构，不新增文字、水印、Logo 或夸张装饰。",
-  ].join("\n");
+    "任务性质：对下方给定的用户实拍照片做轻度后期处理（photo retouching），不是图片生成，也不是重绘。",
+    "Task: lightly retouch the provided user-captured photograph. This is photo post-processing, NOT image generation, NOT redraw.",
+    "",
+    userIntentLine,
+    sceneHintLine,
+    "",
+    "【仅可做 / DO ONLY】",
+    "- 校正曝光与白平衡（欠曝提亮、过曝压暗、去除轻微偏色）；",
+    "- 轻度提升清晰度与锐度（不可出现锐化伪影、HDR 光晕、数字噪点）；",
+    "- 轻度降噪；",
+    "- 轻微增强通透度和色彩还原，保持画面原有氛围与色调。",
+    "Correct exposure and white balance; apply mild sharpening, mild denoising, and minor color restoration. Preserve the original mood.",
+    "",
+    "【必须逐项严格保留 / PRESERVE EXACTLY】",
+    "- 画面中所有文字、招牌、门头、菜单、品牌 Logo、水印——像素级保留，一个字符都不得改动、替换或删除；",
+    "- 所有人物——数量、位置、朝向、姿态、穿着、面部与身份必须与原图完全一致；",
+    "- 所有家具、摆件、物品的位置、数量、朝向与材质；",
+    "- 空间结构（墙面、地面、窗户、门、天花板、建筑轮廓）；",
+    "- 整体构图、裁切、拍摄视角、焦段、景深。",
+    "Preserve every logo, sign, menu text, storefront text, brand mark and watermark pixel-accurately (no character changed). Preserve every person identically (count, pose, clothing, face, identity). Preserve all furniture, objects, layout, spatial structure, composition, camera angle and framing.",
+    "",
+    "【严禁 / FORBIDDEN】",
+    "- 重新生成、重新构图或「重画一张」这张图；",
+    "- 更改任何招牌、门头、菜单或 Logo 上的文字（哪怕一个字符）；",
+    "- 增加或删除任何人物、家具、物品、植物、装饰；",
+    "- 改变相机视角、透视关系或裁切；",
+    "- 把画面风格化（电影感调色、HDR、油画感、过度饱和、过度锐化均不允许）；",
+    "- 把场景「美化」成更豪华 / 更高级 / 更商业的另一个版本——用户要的是这张图的干净版，不是另一张图。",
+    "Forbidden: regenerating the scene; altering any text/sign/logo/menu (not a single character); adding or removing any person/object/decoration; changing camera angle/perspective/framing; stylizing (cinematic, HDR, painterly, over-saturated, over-sharpened); replacing the scene with a \"more luxurious version\".",
+    "",
+    "如果这张图本身已经足够干净清晰，直接原样输出，不要为了「做点什么」而改动。If the photo is already clean, output it unchanged.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function isRootHotelAssetRecord(asset: Pick<TaskHotelAssetRecord, "sourceType" | "enhancedFromAssetId">) {
@@ -229,6 +262,7 @@ async function createEnhancedHotelAssetRecords(input: {
       outputCount: 4,
       referenceImageDataUrl,
       runtimeOverride: runtime,
+      purpose: "preserve_edit",
     });
   const generatedResults = input.ownerUserId
     ? await runWithModelUsageContext(

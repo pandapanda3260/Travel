@@ -15,6 +15,8 @@ import {
 import { withRetry } from "./retry";
 import { callTaskGenerationLlm } from "./task-generation-runtime";
 
+export type ImageGenerationPurpose = "creative_generation" | "preserve_edit";
+
 export type ImageGenerationRequest = {
   prompt: string;
   size: string;
@@ -24,6 +26,7 @@ export type ImageGenerationRequest = {
   outputCount?: number;
   referenceImageDataUrl?: string | null;
   runtimeOverride?: ImageGenerationRuntime;
+  purpose?: ImageGenerationPurpose;
 };
 
 export type ImageGenerationResult = {
@@ -82,6 +85,20 @@ const IMAGE_NEGATIVE_PROMPT = [
   "extra people, wrong number of people, duplicate person, clone",
   "blurry, low resolution, pixelated, overexposed, underexposed, oversaturated",
   "unrealistic proportions, physically impossible, floating objects, gravity defying",
+].join(", ");
+
+const IMAGE_PRESERVE_EDIT_NEGATIVE_PROMPT = [
+  "regenerated scene, redrawn, reimagined, artistic reinterpretation, different photograph",
+  "different camera angle, different composition, recropped, shifted viewpoint, changed perspective",
+  "missing logo, altered logo, replaced logo, blurred logo, logo removed, logo erased",
+  "missing signage, altered signage, replaced sign, changed storefront text, replaced menu text, different storefront name, different brand mark",
+  "missing person, added person, different pose, different clothing, face changed, identity changed, extra people added, person removed",
+  "added furniture, removed furniture, rearranged objects, different layout, added decoration, removed decoration",
+  "added plants, added flowers, added artwork, added ornaments, AI-hallucinated decoration",
+  "HDR look, cinematic color grading, over-saturated, over-sharpened, heavy vignette",
+  "stylized, painterly, illustration look, cartoon, anime, 3D render, digital art",
+  "fantasy lighting, dreamy atmosphere, luxury upgrade, prettified version, different room, different building",
+  "deformed face, distorted hands, extra fingers, extra limbs, broken anatomy",
 ].join(", ");
 
 function parseRequestedSize(size: string) {
@@ -489,6 +506,8 @@ async function requestLiangxinImageEdits(
 
 export async function generateSeedreamImages(input: ImageGenerationRequest) {
   const runtime = input.runtimeOverride ?? getImageGenerationRuntime();
+  const purpose: ImageGenerationPurpose = input.purpose ?? "creative_generation";
+  const isPreserveEdit = purpose === "preserve_edit";
 
   if (!runtime.liveEnabled) {
     return createMockImageResults({
@@ -498,9 +517,16 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
     });
   }
 
-  const hardenedPrompt = applyImagePromptHardRequirements(input.prompt, input.size);
-  const enhancedPrompt = enhancePromptWithDetailPreset(hardenedPrompt, input.guidanceScale);
+  const hardenedPrompt = isPreserveEdit
+    ? normalizePromptWhitespace(input.prompt)
+    : applyImagePromptHardRequirements(input.prompt, input.size);
+  const enhancedPrompt = isPreserveEdit
+    ? hardenedPrompt
+    : enhancePromptWithDetailPreset(hardenedPrompt, input.guidanceScale);
   const sanitizedPrompt = sanitizeImagePromptForModeration(enhancedPrompt);
+  const seedreamNegativePrompt = isPreserveEdit
+    ? IMAGE_PRESERVE_EDIT_NEGATIVE_PROMPT
+    : IMAGE_NEGATIVE_PROMPT;
   const outputCount = Math.max(1, Math.min(10, input.outputCount ?? 4));
   const pricingKey = resolveDefaultModelPricingKey(runtime.modelId);
   const commercialCharge = prepareCommercialModelUsageCharge({
@@ -525,7 +551,7 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
                 runtime.apiKey,
                 runtime.modelId,
                 prompt,
-                IMAGE_NEGATIVE_PROMPT,
+                seedreamNegativePrompt,
                 input.size,
                 input.watermark,
                 input.referenceImageDataUrl,
