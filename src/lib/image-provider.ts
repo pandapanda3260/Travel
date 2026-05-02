@@ -339,7 +339,6 @@ async function requestLiangxinImages(
         size: normalizeSizeForLiangxin(size),
         n: outputCount,
         ...(runtime.quality ? { quality: runtime.quality } : {}),
-        ...(referenceImageDataUrl ? { image: referenceImageDataUrl } : {}),
       }),
     });
 

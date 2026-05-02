@@ -6,7 +6,9 @@ import {
   autoGroupTaskHotelAssetByScene,
   createTaskHotelAsset,
   deleteTaskHotelAssetsByTaskId,
+  getTaskHotelAsset,
   listTaskHotelAssets,
+  patchTaskHotelAsset,
   type TaskHotelAssetRecord,
 } from "./task-hotel-asset-store";
 
@@ -155,6 +157,34 @@ test("getHotelAssetDisplayOrder 会优先按用户排序展示", () => {
       getHotelAssetDisplayOrder(listTaskHotelAssets(taskId)).map((asset) => asset.displayName),
       ["图片3", "图片1", "图片2"],
     );
+  } finally {
+    deleteTaskHotelAssetsByTaskId(taskId);
+  }
+});
+
+test("酒店素材默认必须使用，用户手动取消后会持久保留", () => {
+  const taskId = createTaskId();
+
+  try {
+    const created = createAsset(taskId, {
+      displayName: "默认使用图",
+      sceneType: "exterior",
+      fileUrl: "/video-tasks/demo/hotel-assets/default-must-use.jpg",
+      sortOrder: 0,
+    });
+
+    assert.equal(created.mustUse, true);
+    assert.equal(created.forbidden, false);
+
+    patchTaskHotelAsset(created.assetId, {
+      mustUse: false,
+      forbidden: false,
+      usagePreferenceUpdatedAt: "2026-05-02T00:00:00.000Z",
+    });
+
+    const updated = getTaskHotelAsset(created.assetId);
+    assert.equal(updated?.mustUse, false);
+    assert.equal(updated?.forbidden, false);
   } finally {
     deleteTaskHotelAssetsByTaskId(taskId);
   }

@@ -36,6 +36,7 @@ export type TaskHotelAssetRecord = {
   durationSuggestion: number | null;
   mustUse: boolean;
   forbidden: boolean;
+  usagePreferenceUpdatedAt?: string | null;
   width: number;
   height: number;
   orientation: HotelAssetOrientation;
@@ -176,7 +177,8 @@ function normalizeRecord(record: Partial<TaskHotelAssetRecord>): TaskHotelAssetR
   const height = Math.max(0, Math.round(record.height ?? 0));
   const createdAt = record.createdAt ?? new Date().toISOString();
   const forbidden = Boolean(record.forbidden);
-  const mustUse = Boolean(record.mustUse) && !forbidden;
+  const hasUsagePreferenceTouch = Boolean(record.usagePreferenceUpdatedAt);
+  const mustUse = !forbidden && (record.mustUse !== false || !hasUsagePreferenceTouch);
 
   return {
     assetId: record.assetId ?? crypto.randomUUID(),
@@ -209,6 +211,7 @@ function normalizeRecord(record: Partial<TaskHotelAssetRecord>): TaskHotelAssetR
     durationSuggestion: normalizeDurationSuggestion(record.durationSuggestion),
     mustUse,
     forbidden,
+    usagePreferenceUpdatedAt: record.usagePreferenceUpdatedAt ?? null,
     width,
     height,
     orientation:

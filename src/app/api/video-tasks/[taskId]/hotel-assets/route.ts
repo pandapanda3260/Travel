@@ -871,6 +871,8 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const hasForbiddenPatch = typeof body.forbidden === "boolean";
     const nextForbidden = hasForbiddenPatch ? Boolean(body.forbidden) : hasMustUsePatch && body.mustUse ? false : asset.forbidden;
     const nextMustUse = hasMustUsePatch ? Boolean(body.mustUse) && !nextForbidden : nextForbidden ? false : asset.mustUse;
+    const usagePreferenceUpdatedAt =
+      hasMustUsePatch || hasForbiddenPatch ? new Date().toISOString() : asset.usagePreferenceUpdatedAt;
     const shouldQueueReanalysis = Boolean(body.reanalyze);
 
     const updated = patchTaskHotelAsset(asset.assetId, {
@@ -883,6 +885,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       sceneType: nextSceneType,
       mustUse: nextMustUse,
       forbidden: nextForbidden,
+      usagePreferenceUpdatedAt,
       ...(nextRecommendedPosition !== undefined ? { recommendedPosition: nextRecommendedPosition } : {}),
       ...(nextSellingPoints !== undefined ? { sellingPoints: nextSellingPoints } : {}),
       ...(nextDurationSuggestion !== undefined ? { durationSuggestion: nextDurationSuggestion } : {}),

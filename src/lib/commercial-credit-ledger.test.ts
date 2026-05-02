@@ -245,3 +245,60 @@ test("后台可以按余额排序查看商业积分账户", async () => {
   assert.equal(balances[0]?.userId, "user-credit-balance-list-high");
   assert.equal(balances[1]?.userId, "user-credit-balance-list-low");
 });
+
+test("释放后同幂等键再次冻结会重新激活而非返回已释放记录", async () => {
+  const ledger = await loadLedger();
+  ledger.grantCredits({
+    userId: "user-credit-refreeze",
+    credits: 10_000,
+    sourceType: "membership_grant",
+    sourceBizId: "order-refreeze",
+    idempotencyKey: "grant:order-refreeze",
+  });
+
+  const first = ledger.freezeCredits({
+    userId: "user-credit-refreeze",
+    credits: 1_200,
+    sourceType: "usage_charge",
+    sourceBizId: "task-img",
+    idempotencyKey: "freeze:task-img:image",
+    taskId: "task-img",
+    featureCode: "metered_image_generation",
+  });
+  assert.equal(first.freeze.status, "frozen");
+  assert.equal(first.balance.availableCredits, 8_800);
+  assert.equal(first.balance.frozenCredits, 1_200);
+
+  ledger.releaseCreditFreeze({
+    freezeId: first.freeze.freezeId,
+    reason: "provider_failed",
+  });
+
+  const refrozen = ledger.freezeCredits({
+    userId: "user-credit-refreeze",
+    credits: 1_200,
+    sourceType: "usage_charge",
+    sourceBizId: "task-img",
+    idempotencyKey: "freeze:task-img:image",
+    taskId: "task-img",
+    featureCode: "metered_image_generation",
+  });
+  assert.equal(refrozen.freeze.freezeId, first.freeze.freezeId);
+  assert.equal(refrozen.freeze.status, "frozen");
+  assert.equal(refrozen.freeze.releasedAt, null);
+  assert.equal(refrozen.balance.availableCredits, 8_800);
+  assert.equal(refrozen.balance.frozenCredits, 1_200);
+
+  const confirmed = ledger.confirmCreditFreeze({
+    freezeId: refrozen.freeze.freezeId,
+    idempotencyKey: "charge:task-img:image",
+    realCostRmb: 0.8,
+    chargedRevenueRmb: 1.2,
+    grossMarginRate: 0.333,
+    provider: "liangxin",
+    modelId: "gpt-image-2",
+  });
+  assert.equal(confirmed.balance.availableCredits, 8_800);
+  assert.equal(confirmed.balance.frozenCredits, 0);
+  assert.equal(confirmed.balance.lifetimeUsedCredits, 1_200);
+});

@@ -405,7 +405,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
 	          kind: "optimized" as const,
 	          asset,
 	          label: asset.displayName || `优化图${index + 1}`,
-	          buttonLabel: "选择并替换原图",
+	          buttonLabel: "选择并替换",
 	        };
 	      })
 	      .filter((item): item is NonNullable<typeof item> => Boolean(item));
@@ -1068,17 +1068,11 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                       </button>
                     </div>
                   </div>
-	                  <span className="hotel-asset-sequence-label">{`图片${index + 1}`}</span>
-	                  <span className="hotel-asset-strip-caption">
-	                    {currentAsset.forbidden
-	                      ? "禁止使用"
-	                      : isAssetMustUse(currentAsset)
-	                        ? "必须使用"
-	                        : currentAsset.reviewStatus === "pending"
-	                          ? "场景识别中…"
-	                          : sceneLabelMap[currentAsset.sceneType]}
-	                  </span>
-                </article>
+		                  <span className="hotel-asset-sequence-label">{`图片${index + 1}`}</span>
+		                  <span className="hotel-asset-strip-caption">
+		                    {sceneLabelMap[currentAsset.sceneType]}
+		                  </span>
+	                </article>
               );
             })}
           </div>
@@ -1218,7 +1212,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                         type="checkbox"
                         onChange={() =>
                           void handleAssetPreferenceChange(activeAsset.assetId, {
-                            mustUse: false,
+                            mustUse: activeAsset.forbidden,
                             forbidden: !activeAsset.forbidden,
                           })
                         }
@@ -1290,9 +1284,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                           </button>
                           <span className="hotel-asset-enhancement-label">
                             <span>{item.label}</span>
-                            {item.asset.assetId === activeAsset.assetId ? (
-                              <em>当前使用中</em>
-                            ) : item.kind === "history" ? (
+                            {item.asset.assetId !== activeAsset.assetId && item.kind === "history" ? (
                               <em>历史原图</em>
                             ) : null}
                           </span>

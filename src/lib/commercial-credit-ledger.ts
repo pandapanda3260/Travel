@@ -489,16 +489,75 @@ export function grantCredits(input: GrantCreditsInput) {
   })();
 }
 
+function reactivateReleasedFreeze(released: CommercialCreditFreezeRecord, input: FreezeCreditsInput) {
+  return db.transaction(() => {
+    const timestamp = nowIso();
+    const current = getOrCreateBalance(released.userId, timestamp);
+    if (current.availableCredits <= 0) {
+      throw new CommercialCreditLedgerError(
+        "INSUFFICIENT_CREDITS",
+        `可用积分已用尽，当前 ${current.availableCredits}，请先充值后再使用。`,
+      );
+    }
+
+    const availableCredits = current.availableCredits - input.credits;
+    const frozenCredits = current.frozenCredits + input.credits;
+
+    db.prepare(
+      `
+        UPDATE commercial_user_credit_balances
+        SET available_credits = ?,
+            frozen_credits = ?,
+            last_changed_at = ?,
+            updated_at = ?
+        WHERE user_id = ?
+      `,
+    ).run(availableCredits, frozenCredits, timestamp, timestamp, released.userId);
+
+    db.prepare(
+      `
+        UPDATE commercial_credit_freeze_records
+        SET status = 'frozen',
+            frozen_credits = ?,
+            released_at = NULL,
+            released_reason = NULL,
+            updated_at = ?
+        WHERE freeze_id = ?
+      `,
+    ).run(input.credits, timestamp, released.freezeId);
+
+    const freeze: CommercialCreditFreezeRecord = {
+      ...released,
+      frozenCredits: input.credits,
+      status: "frozen",
+      releasedAt: null,
+      releasedReason: null,
+      updatedAt: timestamp,
+    };
+
+    return {
+      freeze,
+      balance: getCommercialCreditBalance(released.userId),
+    };
+  })();
+}
+
 export function freezeCredits(input: FreezeCreditsInput) {
   assertPositiveIntegerCredits(input.credits);
   ensureCommercialCreditLedgerSchema();
 
   const existing = getFreezeByIdempotencyKey(input.idempotencyKey);
   if (existing) {
-    return {
-      freeze: existing,
-      balance: getCommercialCreditBalance(existing.userId),
-    };
+    if (existing.status === "frozen" || existing.status === "confirmed") {
+      return {
+        freeze: existing,
+        balance: getCommercialCreditBalance(existing.userId),
+      };
+    }
+
+    if (existing.status === "released") {
+      return reactivateReleasedFreeze(existing, input);
+    }
   }
 
   return db.transaction(() => {
