@@ -8,7 +8,7 @@ const signedInUser: SidebarUserSummary = {
   userId: "user-test-001",
   nickname: "Mark",
   avatar: null,
-  status: "active",
+  status: "normal",
   planLevel: 5,
   certificationLabel: null,
   maskedPhone: "156****8369",

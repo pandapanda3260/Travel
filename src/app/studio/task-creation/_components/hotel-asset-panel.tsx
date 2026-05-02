@@ -93,6 +93,23 @@ function getReviewTone(status: TaskHotelAssetRecord["reviewStatus"]) {
   }
 }
 
+function formatRecommendedPosition(position: TaskHotelAssetRecord["recommendedPosition"]) {
+  switch (position) {
+    case "opening":
+      return "推荐用于开头";
+    case "selling_point":
+      return "推荐用于卖点展示";
+    case "transition":
+      return "推荐用于转场";
+    case "ending":
+      return "推荐用于结尾";
+    case "atmosphere":
+      return "推荐用于氛围镜头";
+    default:
+      return "待分配";
+  }
+}
+
 function sliceDisplayName(value: string) {
   return Array.from(value.trim()).slice(0, 6).join("");
 }
@@ -941,9 +958,34 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
               return (
                 <article
                   key={asset.assetId}
-                  className={`task-visual-shot-strip-item hotel-asset-strip-item${isActive ? " active" : ""}`}
+                  className={`task-visual-shot-strip-item hotel-asset-strip-item${isActive ? " active" : ""}${
+                    draggingAssetId === asset.assetId ? " dragging" : ""
+                  }`}
+                  onDragOver={(event) => {
+                    if (draggingAssetId && draggingAssetId !== asset.assetId) {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    void handleReorderRootAsset(draggingAssetId, asset.assetId);
+                  }}
                 >
                   <div className="hotel-asset-strip-media-shell">
+                    <span
+                      className="hotel-asset-drag-handle"
+                      draggable
+                      title="拖拽调整图片顺序"
+                      onDragEnd={() => setDraggingAssetId("")}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", asset.assetId);
+                        setDraggingAssetId(asset.assetId);
+                      }}
+                    >
+                      ⠿
+                    </span>
                     <button
                       className="task-visual-shot-strip-media hotel-asset-strip-media-button"
                       type="button"
@@ -991,9 +1033,15 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                       </button>
                     </div>
                   </div>
-	                  <span className="hotel-asset-sequence-label">{draft.displayName}</span>
+	                  <span className="hotel-asset-sequence-label">{`图片${index + 1}`}</span>
 	                  <span className="hotel-asset-strip-caption">
-	                    {currentAsset.reviewStatus === "pending" ? "场景识别中…" : sceneLabelMap[currentAsset.sceneType]}
+	                    {currentAsset.forbidden
+	                      ? "禁止使用"
+	                      : currentAsset.mustUse
+	                        ? "必须使用"
+	                        : currentAsset.reviewStatus === "pending"
+	                          ? "场景识别中…"
+	                          : sceneLabelMap[currentAsset.sceneType]}
 	                  </span>
                 </article>
               );
@@ -1108,6 +1156,39 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                         ))}
                     </select>
                   </label>
+                  <div className="hotel-asset-usage-controls" aria-label="素材使用规则">
+                    <span className="hotel-asset-position-tag">
+                      {formatRecommendedPosition(activeAsset.recommendedPosition)}
+                    </span>
+                    <label className={`hotel-asset-toggle${activeAsset.mustUse ? " active" : ""}`}>
+                      <input
+                        checked={activeAsset.mustUse}
+                        disabled={hasAssetOperationInFlight}
+                        type="checkbox"
+                        onChange={() =>
+                          void handleAssetPreferenceChange(activeAsset.assetId, {
+                            mustUse: !activeAsset.mustUse,
+                            forbidden: false,
+                          })
+                        }
+                      />
+                      <span>必须使用</span>
+                    </label>
+                    <label className={`hotel-asset-toggle danger${activeAsset.forbidden ? " active" : ""}`}>
+                      <input
+                        checked={activeAsset.forbidden}
+                        disabled={hasAssetOperationInFlight}
+                        type="checkbox"
+                        onChange={() =>
+                          void handleAssetPreferenceChange(activeAsset.assetId, {
+                            mustUse: false,
+                            forbidden: !activeAsset.forbidden,
+                          })
+                        }
+                      />
+                      <span>禁止使用</span>
+                    </label>
+                  </div>
                   <label className="setting-field hotel-asset-card-field hotel-asset-detail-note-field">
                     <span>图片优化提示词输入</span>
                     <textarea
