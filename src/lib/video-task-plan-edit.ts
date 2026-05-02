@@ -38,6 +38,14 @@ export type ShotPlanEditorShot = {
   hasVoice: boolean;
   hasSubtitle: boolean;
   requiresLipSync: boolean;
+  assetId?: string | null;
+  assetSubjectSummary?: string | null;
+  referenceImageUrl?: string | null;
+  sourceTrace?: ShotPlanItem["sourceTrace"];
+  generationMode?: ShotPlanItem["generationMode"];
+  needsAiFallback?: boolean;
+  fallbackReason?: string | null;
+  backupAssetIds?: string[];
   imagePrompt: string;
   videoPrompt: string;
   narrationHint: string;
@@ -329,6 +337,14 @@ export function buildShotPlanEditorState(
               hasVoice: shot.hasVoice,
               hasSubtitle: shot.hasSubtitle,
               requiresLipSync: shot.requiresLipSync,
+              assetId: shot.assetId ?? null,
+              assetSubjectSummary: shot.assetSubjectSummary ?? null,
+              referenceImageUrl: shot.referenceImageUrl ?? null,
+              sourceTrace: shot.sourceTrace ?? null,
+              generationMode: shot.generationMode,
+              needsAiFallback: shot.needsAiFallback ?? false,
+              fallbackReason: shot.fallbackReason ?? null,
+              backupAssetIds: shot.backupAssetIds ?? [],
               imagePrompt: shot.imagePrompt,
               videoPrompt: shot.videoPrompt,
               narrationHint: shot.narrationHint,

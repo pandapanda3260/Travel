@@ -38,14 +38,14 @@ export function getHotelAssetDisplayOrder<T extends HotelAssetOrderable>(assets:
       return sourceRankDelta;
     }
 
+    if (left.sortOrder !== right.sortOrder) {
+      return left.sortOrder - right.sortOrder;
+    }
+
     const leftPictureOrder = getPictureOrderValue(left);
     const rightPictureOrder = getPictureOrderValue(right);
     if (leftPictureOrder !== rightPictureOrder) {
       return leftPictureOrder - rightPictureOrder;
-    }
-
-    if (left.sortOrder !== right.sortOrder) {
-      return left.sortOrder - right.sortOrder;
     }
 
     return getCreatedTime(left) - getCreatedTime(right);

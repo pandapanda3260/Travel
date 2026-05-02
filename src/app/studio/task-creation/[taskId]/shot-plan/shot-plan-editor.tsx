@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { formatDurationSecondsLabel, formatTimelineSecondLabel } from "../../../../../lib/duration-format";
+import type { TaskCreationWorkflowMode } from "../../../../../lib/task-creation-workflow-mode";
 import type { ShotPlanEditorState } from "../../../../../lib/video-task-plan-edit";
 
 type SaveStatus = "idle" | "dirty" | "saving" | "saved" | "error" | "conflict";
@@ -15,6 +16,7 @@ type ShotPlanEditorProps = {
   updatedAt: string;
   returnHref: string;
   highlightedShotIndex: number | null;
+  workflowMode: TaskCreationWorkflowMode;
   initialEditorState: ShotPlanEditorState;
 };
 
@@ -47,6 +49,38 @@ function formatTime(seconds: number) {
 
 function formatBooleanField(value: boolean) {
   return value ? "是" : "否";
+}
+
+function formatShotSourceTraceLabel(shot: EditorShot) {
+  if (shot.needsAiFallback || shot.generationMode === "ai_generated_broll" || shot.sourceTrace === "ai_generated") {
+    return "AI 补图";
+  }
+  switch (shot.sourceTrace) {
+    case "user_photo":
+      return "用户原图";
+    case "enhanced_from_user_photo":
+      return "AI 增强图";
+    case "reference_video_keyframe":
+      return "参考视频帧";
+    default:
+      return shot.referenceImageUrl ? "已绑定素材" : "未绑定素材";
+  }
+}
+
+function getShotSourceTraceClass(shot: EditorShot) {
+  if (shot.needsAiFallback || shot.generationMode === "ai_generated_broll" || shot.sourceTrace === "ai_generated") {
+    return "ai";
+  }
+  switch (shot.sourceTrace) {
+    case "user_photo":
+      return "user";
+    case "enhanced_from_user_photo":
+      return "enhanced";
+    case "reference_video_keyframe":
+      return "video";
+    default:
+      return shot.referenceImageUrl ? "bound" : "missing";
+  }
 }
 
 function formatShotPlanText(shot: EditorShot) {
@@ -282,6 +316,7 @@ export function ShotPlanEditor({
   updatedAt,
   returnHref,
   highlightedShotIndex,
+  workflowMode,
   initialEditorState,
 }: ShotPlanEditorProps) {
   const [editorState, setEditorState] = useState<LocalEditorState>(() => toLocalEditorState(initialEditorState));
@@ -295,6 +330,7 @@ export function ShotPlanEditor({
   const baseUpdatedAtRef = useRef(updatedAt);
   const savingRef = useRef(false);
   const queuedSaveRef = useRef(false);
+  const isRealPhotoWorkflow = workflowMode === "real_photo_to_video";
 
   useEffect(() => {
     latestEditorStateRef.current = editorState;
@@ -545,7 +581,7 @@ export function ShotPlanEditor({
                 <th>片段</th>
                 <th>Shot Plan</th>
                 <th>时间参数</th>
-                <th>文生图提示词</th>
+                <th>{isRealPhotoWorkflow ? "绑定素材" : "文生图提示词"}</th>
                 <th>图生视频提示词</th>
                 <th>解说词</th>
               </tr>
@@ -650,12 +686,38 @@ export function ShotPlanEditor({
                       {segment.shots.map((shot) => (
                         <article key={`image-${shot.shotId}`} className="shot-plan-cell-block">
                           <strong>{`镜头 ${shot.shotIndex}`}</strong>
-                          <AutoGrowTextarea
-                            className="shot-plan-editor-table-textarea"
-                            label="文生图提示词"
-                            value={shot.imagePrompt}
-                            onChange={(value) => updateShot(segment.segmentIndex, shot.shotIndex, "imagePrompt", value)}
-                          />
+                          {isRealPhotoWorkflow ? (
+                            <div className="shot-plan-asset-binding-card">
+                              {shot.referenceImageUrl ? (
+                                <span
+                                  aria-label={`镜头 ${shot.shotIndex} 绑定素材预览`}
+                                  className="shot-plan-asset-thumb"
+                                  role="img"
+                                  style={{ backgroundImage: `url("${shot.referenceImageUrl}")` }}
+                                />
+                              ) : (
+                                <span className="shot-plan-asset-missing">未绑定素材</span>
+                              )}
+                              <div className="shot-plan-asset-meta">
+                                <span className={`shot-plan-source-tag ${getShotSourceTraceClass(shot)}`}>
+                                  {formatShotSourceTraceLabel(shot)}
+                                </span>
+                                <p>{shot.assetSubjectSummary || shot.assetId || "等待素材绑定"}</p>
+                                {shot.fallbackReason ? (
+                                  <small className="shot-plan-fallback-reason">{shot.fallbackReason}</small>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : (
+                            <AutoGrowTextarea
+                              className="shot-plan-editor-table-textarea"
+                              label="文生图提示词"
+                              value={shot.imagePrompt}
+                              onChange={(value) =>
+                                updateShot(segment.segmentIndex, shot.shotIndex, "imagePrompt", value)
+                              }
+                            />
+                          )}
                         </article>
                       ))}
                     </div>

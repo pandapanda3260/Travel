@@ -246,6 +246,27 @@ type KeyMaterialWorkflowResponse = {
   error?: string;
 };
 
+function formatRealPhotoShotAssetSource(input: {
+  sourceTrace?: string | null;
+  generationMode?: string | null;
+  needsAiFallback?: boolean;
+  referenceImageUrl?: string | null;
+}) {
+  if (input.needsAiFallback || input.generationMode === "ai_generated_broll" || input.sourceTrace === "ai_generated") {
+    return "AI 补图";
+  }
+  switch (input.sourceTrace) {
+    case "user_photo":
+      return "用户上传";
+    case "enhanced_from_user_photo":
+      return "AI 增强";
+    case "reference_video_keyframe":
+      return "参考视频帧";
+    default:
+      return input.referenceImageUrl ? "已绑定素材" : "未绑定素材";
+  }
+}
+
 type TaskShellResponse = {
   task?: VideoTaskRecord | null;
   generatedVideo?: VideoTaskGeneratedVideoRecord | null;
@@ -3217,6 +3238,13 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
       hasVoice: Boolean(shot.hasVoice),
       hasSubtitle: Boolean(shot.hasSubtitle),
       requiresLipSync: Boolean(shot.requiresLipSync),
+      assetId: "assetId" in shot ? (shot.assetId ?? null) : null,
+      assetSubjectSummary: "assetSubjectSummary" in shot ? (shot.assetSubjectSummary ?? null) : null,
+      referenceImageUrl: "referenceImageUrl" in shot ? (shot.referenceImageUrl ?? null) : null,
+      sourceTrace: "sourceTrace" in shot ? (shot.sourceTrace ?? null) : null,
+      generationMode: "generationMode" in shot ? (shot.generationMode ?? null) : null,
+      needsAiFallback: "needsAiFallback" in shot ? Boolean(shot.needsAiFallback) : false,
+      fallbackReason: "fallbackReason" in shot ? (shot.fallbackReason ?? null) : null,
       narrationText: String(
         ("sourceSpokenText" in shot && shot.sourceSpokenText
           ? shot.sourceSpokenText
@@ -4484,6 +4512,40 @@ export function TaskCreationWorkflowPage({ workflowMode = null }: TaskCreationIn
                             详情查看与编辑
                           </Link>
                         </div>
+                        {selectedTaskCapturedMaterialFirst && shotPlanDisplay ? (
+                          <div className="task-plan-asset-binding-strip" aria-label="镜头绑定素材预览">
+                            {shotPlanDisplay.shots.map((shot) => {
+                              const sourceLabel = formatRealPhotoShotAssetSource(shot);
+                              return (
+                                <article
+                                  key={`shot-asset-binding-${shot.shotIndex}`}
+                                  className={`task-plan-asset-binding-item${shot.needsAiFallback ? " needs-fallback" : ""}`}
+                                >
+                                  {shot.referenceImageUrl ? (
+                                    <span
+                                      aria-label={`镜头 ${shot.shotIndex} 绑定素材`}
+                                      className="task-plan-asset-binding-thumb"
+                                      role="img"
+                                      style={{ backgroundImage: `url("${shot.referenceImageUrl}")` }}
+                                    />
+                                  ) : (
+                                    <span className="task-plan-asset-binding-thumb missing">补图</span>
+                                  )}
+                                  <div className="task-plan-asset-binding-copy">
+                                    <strong>{`镜头 ${shot.shotIndex}`}</strong>
+                                    <span>{sourceLabel}</span>
+                                    <p>
+                                      {shot.assetSubjectSummary ||
+                                        shot.fallbackReason ||
+                                        shot.assetId ||
+                                        "等待素材绑定"}
+                                    </p>
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
                       <div className="task-create-parameter-stack task-plan-parameter-stack">
                         <section className="task-inline-parameter-group">

@@ -4,6 +4,13 @@ export type VideoTaskStatus = "CREATED" | "SUBTITLE_AUDIO_READY" | "IMAGES_READY
 
 export type ShotGenerationMode = "photo_direct_i2v" | "photo_enhanced_i2v" | "ai_generated_broll";
 export type ShotSourceTrace = "user_photo" | "enhanced_from_user_photo" | "reference_video_keyframe" | "ai_generated";
+export type HotelAssetRecommendedPosition =
+  | "opening"
+  | "selling_point"
+  | "transition"
+  | "ending"
+  | "atmosphere"
+  | null;
 
 export type HotelAssetSceneType =
   | "exterior"
@@ -209,6 +216,7 @@ export type ShotPlanItem = {
   sourceSubtitleText?: string | null;
   narrationEstimatedDurationSeconds?: number | null;
   targetMaterialIds?: string[];
+  backupAssetIds?: string[];
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;
@@ -224,6 +232,13 @@ export type ShotPlanItem = {
   referenceImageUrl?: string | null;
   generationMode?: ShotGenerationMode;
   sourceTrace?: ShotSourceTrace | null;
+  needsAiFallback?: boolean;
+  fallbackReason?: string | null;
+  preRollSeconds?: number;
+  postRollSeconds?: number;
+  transitionType?: string | null;
+  negativePrompt?: string | null;
+  userOverride?: boolean;
   needImageEnhancement?: boolean;
   needImageToVideo?: boolean;
   isAtmosphereInsert?: boolean;
@@ -344,6 +359,12 @@ export type RealPhotoMaterialBriefItem = {
   fileUrl?: string | null;
   canDirectI2V: boolean;
   needEnhancement: boolean;
+  recommendedPosition?: HotelAssetRecommendedPosition;
+  sellingPoints?: string[];
+  durationSuggestion?: number | null;
+  compositionScore?: number;
+  mustUse?: boolean;
+  forbidden?: boolean;
 };
 
 export type RealPhotoMaterialBrief = {
@@ -455,6 +476,7 @@ export type DirectorStoryShot = {
   sourceSubtitleText?: string | null;
   narrationEstimatedDurationSeconds?: number | null;
   targetMaterialIds?: string[];
+  backupAssetIds?: string[];
   shotScale?: string;
   compositionHint?: string;
   rhythmTag?: string;
@@ -470,6 +492,13 @@ export type DirectorStoryShot = {
   referenceImageUrl?: string | null;
   generationMode?: ShotGenerationMode;
   sourceTrace?: ShotSourceTrace | null;
+  needsAiFallback?: boolean;
+  fallbackReason?: string | null;
+  preRollSeconds?: number;
+  postRollSeconds?: number;
+  transitionType?: string | null;
+  negativePrompt?: string | null;
+  userOverride?: boolean;
   needImageEnhancement?: boolean;
   needImageToVideo?: boolean;
   isAtmosphereInsert?: boolean;

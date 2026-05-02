@@ -39,7 +39,7 @@ import {
 } from "../../../../../lib/task-hotel-asset-optimization-store";
 import { resolveRuntimeAssetUrlToPath } from "../../../../../lib/runtime-storage";
 import { writeUploadedFileToPath } from "../../../../../lib/file-stream";
-import type { HotelAssetSceneType } from "../../../../../lib/video-task-schema";
+import type { HotelAssetRecommendedPosition, HotelAssetSceneType } from "../../../../../lib/video-task-schema";
 
 type RouteContext = {
   params: Promise<{
@@ -57,6 +57,11 @@ type PatchHotelAssetRequest = {
   userNote?: string;
   reviewStatus?: TaskHotelAssetRecord["reviewStatus"];
   sortOrder?: number;
+  mustUse?: boolean;
+  forbidden?: boolean;
+  recommendedPosition?: HotelAssetRecommendedPosition;
+  sellingPoints?: unknown;
+  durationSuggestion?: number | null;
   assetOrders?: Array<{
     assetId?: string;
     sortOrder?: number;
@@ -66,6 +71,42 @@ type PatchHotelAssetRequest = {
 
 const maxFileSizeBytes = 25 * 1024 * 1024;
 const supportedMimeTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+function normalizeRecommendedPosition(value: unknown): HotelAssetRecommendedPosition | undefined {
+  switch (value) {
+    case "opening":
+    case "selling_point":
+    case "transition":
+    case "ending":
+    case "atmosphere":
+    case null:
+      return value;
+    case undefined:
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeSellingPoints(value: unknown) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : undefined;
+}
+
+function normalizeDurationSuggestion(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Number(Math.min(30, Math.max(0, numeric)).toFixed(1)) : undefined;
+}
 
 function getGeneratedImageExtension(contentType: string) {
   if (contentType.includes("png")) {
@@ -807,6 +848,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         : asset.sceneType;
     const nextUserNote = typeof body.userNote === "string" ? body.userNote.trim() : asset.userNote;
     const nextDisplayName = normalizeDisplayName(body.displayName) || asset.displayName || asset.fileName;
+    const nextRecommendedPosition = normalizeRecommendedPosition(body.recommendedPosition);
+    const nextSellingPoints = normalizeSellingPoints(body.sellingPoints);
+    const nextDurationSuggestion = normalizeDurationSuggestion(body.durationSuggestion);
+    const hasMustUsePatch = typeof body.mustUse === "boolean";
+    const hasForbiddenPatch = typeof body.forbidden === "boolean";
+    const nextForbidden = hasForbiddenPatch ? Boolean(body.forbidden) : hasMustUsePatch && body.mustUse ? false : asset.forbidden;
+    const nextMustUse = hasMustUsePatch ? Boolean(body.mustUse) && !nextForbidden : nextForbidden ? false : asset.mustUse;
     const shouldQueueReanalysis = Boolean(body.reanalyze);
 
     const updated = patchTaskHotelAsset(asset.assetId, {
@@ -817,6 +865,11 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           ? Math.max(0, Math.round(body.sortOrder))
           : asset.sortOrder,
       sceneType: nextSceneType,
+      mustUse: nextMustUse,
+      forbidden: nextForbidden,
+      ...(nextRecommendedPosition !== undefined ? { recommendedPosition: nextRecommendedPosition } : {}),
+      ...(nextSellingPoints !== undefined ? { sellingPoints: nextSellingPoints } : {}),
+      ...(nextDurationSuggestion !== undefined ? { durationSuggestion: nextDurationSuggestion } : {}),
       reviewStatus: shouldQueueReanalysis ? "pending" : (body.reviewStatus ?? asset.reviewStatus),
       analyzedAt: shouldQueueReanalysis ? null : asset.analyzedAt,
     });

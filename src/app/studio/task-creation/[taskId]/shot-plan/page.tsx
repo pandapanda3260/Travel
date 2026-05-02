@@ -36,7 +36,8 @@ export default async function ShotPlanPromptTablePage({ params, searchParams }: 
   const highlightedShotIndex =
     Number.isFinite(targetShotIndex) && targetShotIndex > 0 ? Math.round(targetShotIndex) : null;
   const videoTypeProfile = getVideoTaskTypeProfile(task.parameters.video.videoType);
-  const workflowConfig = getTaskCreationWorkflowModeConfig(getTaskCreationWorkflowModeForTask(task));
+  const workflowMode = getTaskCreationWorkflowModeForTask(task);
+  const workflowConfig = getTaskCreationWorkflowModeConfig(workflowMode);
   const returnHref = `${workflowConfig.href}?taskId=${encodeURIComponent(task.taskId)}`;
 
   return (
@@ -47,6 +48,7 @@ export default async function ShotPlanPromptTablePage({ params, searchParams }: 
       updatedAt={task.updatedAt}
       returnHref={returnHref}
       highlightedShotIndex={highlightedShotIndex}
+      workflowMode={workflowMode}
       initialEditorState={buildShotPlanEditorState(task)}
     />
   );

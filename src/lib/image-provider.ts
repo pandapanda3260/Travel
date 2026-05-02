@@ -33,6 +33,17 @@ function normalizeApiBase(apiBase: string) {
   return apiBase.endsWith("/api/v3") ? apiBase : `${apiBase.replace(/\/$/, "")}/api/v3`;
 }
 
+function resolveLiangxinImageGenerationEndpoint(apiBase: string) {
+  const normalizedApiBase = apiBase.trim().replace(/\/+$/, "");
+  if (/\/images\/generations$/i.test(normalizedApiBase)) {
+    return normalizedApiBase;
+  }
+  if (/\/(?:v1|api\/v3)$/i.test(normalizedApiBase)) {
+    return `${normalizedApiBase}/images/generations`;
+  }
+  return `${normalizedApiBase}/v1/images/generations`;
+}
+
 const IMAGE_POSITIVE_SUFFIX =
   "photorealistic, real photograph, shot on DSLR camera, natural lighting, single continuous image, realistic perspective and proportions, natural human anatomy, realistic limb count, no extra or missing arms, legs, hands or feet";
 
@@ -300,6 +311,56 @@ async function requestSingleSeedreamImage(
   });
 }
 
+async function requestLiangxinImages(
+  runtime: ImageGenerationRuntime,
+  prompt: string,
+  size: string,
+  outputCount: number,
+  referenceImageDataUrl?: string | null,
+) {
+  return withRetry(async () => {
+    const response = await fetch(resolveLiangxinImageGenerationEndpoint(runtime.apiBase), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${runtime.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: runtime.modelId,
+        prompt,
+        size,
+        n: outputCount,
+        ...(referenceImageDataUrl ? { image: referenceImageDataUrl } : {}),
+      }),
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: { message?: string };
+      message?: string;
+      data?: Array<{ url?: string; b64_json?: string; b64Json?: string }>;
+      images?: Array<{ url?: string; b64_json?: string; b64Json?: string }>;
+    };
+
+    if (!response.ok) {
+      throw new Error(payload.error?.message ?? payload.message ?? "图片生成失败");
+    }
+
+    const items = payload.data ?? payload.images ?? [];
+    const results = items
+      .map((item) => ({
+        url: item.url ?? null,
+        b64Json: item.b64_json ?? item.b64Json ?? null,
+      }))
+      .filter((item) => item.url || item.b64Json);
+
+    if (!results.length) {
+      throw new Error("图片生成结果为空");
+    }
+
+    return results.slice(0, outputCount) satisfies ImageGenerationResult[];
+  });
+}
+
 export async function generateSeedreamImages(input: ImageGenerationRequest) {
   const runtime = input.runtimeOverride ?? getImageGenerationRuntime();
 
@@ -324,21 +385,24 @@ export async function generateSeedreamImages(input: ImageGenerationRequest) {
       requestCount: 1,
     },
   });
-  const requestBatch = (prompt: string) =>
-    Promise.all(
-      Array.from({ length: outputCount }, () =>
-        requestSingleSeedreamImage(
-          runtime.apiBase,
-          runtime.apiKey,
-          runtime.modelId,
-          prompt,
-          IMAGE_NEGATIVE_PROMPT,
-          input.size,
-          input.watermark,
-          input.referenceImageDataUrl,
-        ),
-      ),
-    );
+  const requestBatch =
+    runtime.provider === "liangxin"
+      ? (prompt: string) => requestLiangxinImages(runtime, prompt, input.size, outputCount, input.referenceImageDataUrl)
+      : (prompt: string) =>
+          Promise.all(
+            Array.from({ length: outputCount }, () =>
+              requestSingleSeedreamImage(
+                runtime.apiBase,
+                runtime.apiKey,
+                runtime.modelId,
+                prompt,
+                IMAGE_NEGATIVE_PROMPT,
+                input.size,
+                input.watermark,
+                input.referenceImageDataUrl,
+              ),
+            ),
+          );
 
   try {
     const results = await requestBatch(sanitizedPrompt);

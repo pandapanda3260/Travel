@@ -291,7 +291,9 @@ function buildShotPayload(taskId: string) {
         subtitleGoal: storyboard?.subtitleGoal ?? null,
         needsAiFallback:
           storyboard?.needsAiFallback ??
+          shot.needsAiFallback ??
           (!shot.assetId && shot.generationMode !== "photo_direct_i2v" && shot.generationMode !== "photo_enhanced_i2v"),
+        fallbackReason: shot.fallbackReason ?? null,
         referenceImageUrl: shot.referenceImageUrl ?? null,
         size: shot.size,
         guidanceScale: shot.guidanceScale,

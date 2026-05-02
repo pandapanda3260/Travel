@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { applyImagePromptHardRequirements, SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE } from "./image-provider";
+import {
+  applyImagePromptHardRequirements,
+  generateSeedreamImages,
+  SENSITIVE_IMAGE_PROMPT_RETRY_FAILED_MESSAGE,
+} from "./image-provider";
 import {
   getImageCleaningRuntime,
   getImageGenerationRuntime,
@@ -10,6 +14,10 @@ import {
 
 const IMAGE_MODEL_ENV_KEYS = [
   "TRAVEL_SHARED_ENV_FILE",
+  "LIANGXIN_IMAGE_PROVIDER",
+  "LIANGXIN_IMAGE_API_KEY",
+  "LIANGXIN_IMAGE_BASE_URL",
+  "LIANGXIN_IMAGE_MODEL",
   "VOLCENGINE_IMAGE_MODEL",
   "VOLCENGINE_VIDEO_PIPELINE_IMAGE_MODEL",
   "VOLCENGINE_IMAGE_CLEAN_MODEL",
@@ -104,4 +112,94 @@ test("图片生成运行时默认回落到 seedream 4.5 且尊重显式模型覆
       );
     },
   );
+});
+
+test("良心中转站配置会启用 image2 运行时并补全 HTTPS base url", () => {
+  withImageModelEnv(
+    {
+      LIANGXIN_IMAGE_PROVIDER: "liangxin",
+      LIANGXIN_IMAGE_API_KEY: "test-liangxin-key",
+      LIANGXIN_IMAGE_BASE_URL: "gateway.example.com",
+      LIANGXIN_IMAGE_MODEL: "gpt-image-2",
+    },
+    () => {
+      const runtime = getImageGenerationRuntime();
+
+      assert.equal(runtime.provider, "liangxin");
+      assert.equal(runtime.modelId, "gpt-image-2");
+      assert.equal(runtime.apiBase, "https://gateway.example.com");
+      assert.equal(runtime.providerLabel, "良心中转站 · gpt-image-2");
+      assert.equal(runtime.liveEnabled, true);
+      assert.equal(runtime.hasApiKey, true);
+    },
+  );
+});
+
+test("良心中转站 image2 adapter 使用 OpenAI 图片请求形态且不夹带 Seedream 专属字段", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const previousStrictMode = process.env.USAGE_BILLING_STRICT_MODE;
+  const previousRequirePricing = process.env.USAGE_BILLING_REQUIRE_PRICING;
+  process.env.USAGE_BILLING_STRICT_MODE = "false";
+  process.env.USAGE_BILLING_REQUIRE_PRICING = "false";
+  globalThis.fetch = (async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+    });
+    return new Response(
+      JSON.stringify({
+        data: [
+          { b64_json: Buffer.from("image-1").toString("base64") },
+          { url: "https://cdn.example.com/image-2.png" },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const results = await generateSeedreamImages({
+      prompt: "海边酒店夜景",
+      size: "1024x1024",
+      guidanceScale: 7.5,
+      watermark: false,
+      seed: null,
+      outputCount: 2,
+      runtimeOverride: {
+        provider: "liangxin",
+        liveEnabled: true,
+        hasApiKey: true,
+        apiBase: "https://gateway.example.com",
+        apiKey: "test-liangxin-key",
+        modelId: "gpt-image-2",
+        providerLabel: "良心中转站 · gpt-image-2",
+        configFileName: "test",
+      },
+    });
+
+    assert.equal(results.length, 2);
+    assert.equal(results[0]?.b64Json, Buffer.from("image-1").toString("base64"));
+    assert.equal(results[1]?.url, "https://cdn.example.com/image-2.png");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, "https://gateway.example.com/v1/images/generations");
+    assert.equal(calls[0]?.body.model, "gpt-image-2");
+    assert.equal(calls[0]?.body.n, 2);
+    assert.equal(calls[0]?.body.size, "1024x1024");
+    assert.equal("negative_prompt" in calls[0]!.body, false);
+    assert.equal("watermark" in calls[0]!.body, false);
+    assert.equal("optimize_prompt_options" in calls[0]!.body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousStrictMode === undefined) {
+      delete process.env.USAGE_BILLING_STRICT_MODE;
+    } else {
+      process.env.USAGE_BILLING_STRICT_MODE = previousStrictMode;
+    }
+    if (previousRequirePricing === undefined) {
+      delete process.env.USAGE_BILLING_REQUIRE_PRICING;
+    } else {
+      process.env.USAGE_BILLING_REQUIRE_PRICING = previousRequirePricing;
+    }
+  }
 });

@@ -341,6 +341,21 @@ test("seedream 4.5 resolves pricing and records image usage", async () => {
   assert.equal(usagePayload.records.some((item: any) => item.usageId === record.usageId), true);
 });
 
+test("良心中转站 gpt-image-2 resolves image2 pricing rule", async () => {
+  const { modelUsageService } = await loadModules();
+
+  assert.equal(modelUsageService.resolveDefaultModelPricingKey("gpt-image-2"), "liangxin.gpt-image-2");
+
+  const snapshot = modelUsageService.getModelUsageAdminSnapshot();
+  const rule = snapshot.pricingRules.find((item: any) => item.pricingKey === "liangxin.gpt-image-2");
+
+  assert.equal(rule?.provider, "liangxin");
+  assert.equal(rule?.serviceName, "image.generate");
+  assert.equal(rule?.modelId, "gpt-image-2");
+  assert.equal(rule?.enabled, true);
+  assert.equal(rule?.meters.some((item: any) => item.meter === "image_count" && item.unitPrice > 0), true);
+});
+
 test("recordModelUsage is idempotent across usage audit records", async () => {
   const { authStore, modelUsageService } = await loadModules();
   const userId = "user-model-usage-idempotent";

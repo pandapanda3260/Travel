@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { dbDelete, dbGet, dbGetAll, dbUpsert } from "./db";
 import { joinRuntimePublicStoragePath, resolveRuntimeAssetUrlToPath } from "./runtime-storage";
-import type { HotelAssetSceneType } from "./video-task-schema";
+import type { HotelAssetRecommendedPosition, HotelAssetSceneType } from "./video-task-schema";
 
 export type HotelAssetSourceType = "user_upload" | "enhanced" | "ai_generated";
 export type HotelAssetOrientation = "portrait" | "landscape" | "square";
@@ -30,6 +30,12 @@ export type TaskHotelAssetRecord = {
   needEnhancement: boolean;
   qualityScore: number;
   commercialScore: number;
+  compositionScore: number;
+  recommendedPosition: HotelAssetRecommendedPosition;
+  sellingPoints: string[];
+  durationSuggestion: number | null;
+  mustUse: boolean;
+  forbidden: boolean;
   width: number;
   height: number;
   orientation: HotelAssetOrientation;
@@ -40,6 +46,34 @@ export type TaskHotelAssetRecord = {
   createdAt: string;
   updatedAt: string;
 };
+
+type TaskHotelAssetCreateInput = Omit<
+  TaskHotelAssetRecord,
+  | "assetId"
+  | "createdAt"
+  | "updatedAt"
+  | "orientation"
+  | "compositionScore"
+  | "recommendedPosition"
+  | "sellingPoints"
+  | "durationSuggestion"
+  | "mustUse"
+  | "forbidden"
+> &
+  Partial<
+    Pick<
+      TaskHotelAssetRecord,
+      | "compositionScore"
+      | "recommendedPosition"
+      | "sellingPoints"
+      | "durationSuggestion"
+      | "mustUse"
+      | "forbidden"
+    >
+  > & {
+    assetId?: string;
+    orientation?: HotelAssetOrientation;
+  };
 
 const COLLECTION = "task-hotel-assets";
 const hotelAssetSceneSortOrder: HotelAssetSceneType[] = [
@@ -104,10 +138,45 @@ function normalizeReviewStatus(value: string | null | undefined): HotelAssetRevi
   }
 }
 
+function normalizeRecommendedPosition(value: string | null | undefined): HotelAssetRecommendedPosition {
+  switch (value) {
+    case "opening":
+    case "selling_point":
+    case "transition":
+    case "ending":
+    case "atmosphere":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeSellingPoints(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+}
+
+function normalizeDurationSuggestion(value: unknown): number | null {
+  if (value == null) {
+    return null;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return Number(Math.min(30, Math.max(0, numeric)).toFixed(1));
+}
+
 function normalizeRecord(record: Partial<TaskHotelAssetRecord>): TaskHotelAssetRecord {
   const width = Math.max(0, Math.round(record.width ?? 0));
   const height = Math.max(0, Math.round(record.height ?? 0));
   const createdAt = record.createdAt ?? new Date().toISOString();
+  const forbidden = Boolean(record.forbidden);
+  const mustUse = Boolean(record.mustUse) && !forbidden;
 
   return {
     assetId: record.assetId ?? crypto.randomUUID(),
@@ -134,6 +203,12 @@ function normalizeRecord(record: Partial<TaskHotelAssetRecord>): TaskHotelAssetR
     needEnhancement: Boolean(record.needEnhancement),
     qualityScore: Math.max(0, Math.min(100, Math.round(Number(record.qualityScore ?? 0)))),
     commercialScore: Math.max(0, Math.min(100, Math.round(Number(record.commercialScore ?? 0)))),
+    compositionScore: Math.max(0, Math.min(100, Math.round(Number(record.compositionScore ?? 0)))),
+    recommendedPosition: normalizeRecommendedPosition(record.recommendedPosition),
+    sellingPoints: normalizeSellingPoints(record.sellingPoints),
+    durationSuggestion: normalizeDurationSuggestion(record.durationSuggestion),
+    mustUse,
+    forbidden,
     width,
     height,
     orientation:
@@ -185,12 +260,7 @@ export function getTaskHotelAsset(assetId: string) {
   return record ? normalizeRecord(record) : null;
 }
 
-export function createTaskHotelAsset(
-  input: Omit<TaskHotelAssetRecord, "assetId" | "createdAt" | "updatedAt" | "orientation"> & {
-    assetId?: string;
-    orientation?: HotelAssetOrientation;
-  },
-) {
+export function createTaskHotelAsset(input: TaskHotelAssetCreateInput) {
   const now = new Date().toISOString();
   const record = normalizeRecord({
     ...input,

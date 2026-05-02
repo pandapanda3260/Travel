@@ -468,6 +468,9 @@ export function resolveDefaultModelPricingKey(modelId: string | null | undefined
   if (normalizedModelId.startsWith("gpt-4o")) {
     return "openai.gpt-4o";
   }
+  if (normalizedModelId === "gpt-image-2" || normalizedModelId === "image2") {
+    return "liangxin.gpt-image-2";
+  }
   if (normalizedModelId.includes("doubao-seed-2.0-pro")) {
     return "doubao.seed.2.0.pro";
   }

@@ -87,6 +87,8 @@ export type TaskVisualImageShotDraft = {
   assetId?: string | null;
   assetSubjectSummary?: string | null;
   referenceImageUrl?: string | null;
+  needsAiFallback?: boolean;
+  fallbackReason?: string | null;
   img2imgPrompt?: string | null;
   i2vPrompt?: string | null;
   hasMainCharacter: boolean;
@@ -582,6 +584,8 @@ export function parseTaskVisualImageShots(task: VideoTaskRecord): TaskVisualImag
     assetId: shot.assetId ?? null,
     assetSubjectSummary: shot.assetSubjectSummary ?? null,
     referenceImageUrl: shot.referenceImageUrl ?? null,
+    needsAiFallback: shot.needsAiFallback ?? false,
+    fallbackReason: shot.fallbackReason ?? null,
     img2imgPrompt: shot.img2imgPrompt ?? null,
     i2vPrompt: shot.i2vPrompt ?? null,
     hasMainCharacter:

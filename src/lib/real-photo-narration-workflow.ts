@@ -219,6 +219,12 @@ export function buildRealPhotoMaterialBrief(input: BuildRealPhotoMaterialBriefIn
     fileUrl: asset.fileUrl,
     canDirectI2V: asset.canDirectI2V,
     needEnhancement: asset.needEnhancement,
+    recommendedPosition: asset.recommendedPosition,
+    sellingPoints: asset.sellingPoints,
+    durationSuggestion: asset.durationSuggestion,
+    compositionScore: asset.compositionScore,
+    mustUse: asset.mustUse,
+    forbidden: asset.forbidden,
   }));
 
   if (!items.length && input.source.videoMaterialId) {
@@ -538,6 +544,10 @@ function buildShotFromBeat(input: {
   const durationSeconds = input.beat.estimatedDurationSeconds;
   const sceneSummary = material?.subjectSummary || input.beat.title;
   const location = material?.sceneType ? `${material.sceneType}` : "实拍素材";
+  const primaryAssetId = material?.assetId ?? input.beat.targetMaterialIds[0] ?? null;
+  const backupAssetIds = input.beat.targetMaterialIds.filter((assetId) => assetId !== primaryAssetId);
+  const needsAiFallback = !material;
+  const fallbackReason = needsAiFallback ? "该镜头没有匹配到可用的用户上传素材" : null;
 
   return {
     shotId: `shot-${shotIndex}`,
@@ -582,7 +592,8 @@ function buildShotFromBeat(input: {
     rhythmTag: input.beat.phase === "opening_hook" ? "hook" : input.beat.phase === "action_close" ? "close" : "proof",
     mood: input.beat.phase === "opening_hook" ? "带问题感" : "自然可信",
     sellingPointTags: [input.beat.phase, ...(material?.tags ?? [])].slice(0, 6),
-    assetId: material?.assetId ?? input.beat.targetMaterialIds[0] ?? null,
+    assetId: primaryAssetId,
+    backupAssetIds,
     assetSourceType: mapAssetSourceType(material?.sourceType),
     assetSubjectSummary: material?.subjectSummary ?? null,
     sourceMaterialId: material?.sourceType === "video_material" || material?.sourceType === "user_video" ? material.assetId : null,
@@ -590,8 +601,15 @@ function buildShotFromBeat(input: {
     sourceEndAtSeconds: null,
     sourceTimeRangeLabel: null,
     referenceImageUrl: material?.fileUrl ?? null,
-    generationMode: material?.needEnhancement ? "photo_enhanced_i2v" : "photo_direct_i2v",
+    generationMode: needsAiFallback ? "ai_generated_broll" : material?.needEnhancement ? "photo_enhanced_i2v" : "photo_direct_i2v",
     sourceTrace: mapSourceTrace(material?.sourceType),
+    needsAiFallback,
+    fallbackReason,
+    preRollSeconds: 0,
+    postRollSeconds: 0,
+    transitionType: "narration-led",
+    negativePrompt: null,
+    userOverride: false,
     needImageEnhancement: material?.needEnhancement ?? false,
     needImageToVideo: true,
     isAtmosphereInsert: input.beat.phase === "context_setup" && material?.priority === "support",
