@@ -188,6 +188,7 @@ async function ensureSelectedImagesForClipGeneration(taskId: string) {
 
     try {
       if (
+        !shot.needsAiFallback &&
         shot.referenceImageUrl &&
         (shot.generationMode === "photo_direct_i2v" || shot.generationMode === "photo_enhanced_i2v")
       ) {
@@ -276,7 +277,7 @@ async function submitShotClipJob(taskId: string, shotIndex: number) {
       ? resolveDirectMaterialClipPlan(currentShotPayload.sourceShots, preferredDurationSeconds)
       : null;
   const sourceShotVisualFallback =
-    currentShotPayload?.sourceShots.find((shot) => shot.selectedVisualImageUrl || shot.referenceImageUrl) ?? null;
+    currentShotPayload?.sourceShots.find((shot) => !shot.needsAiFallback && (shot.selectedVisualImageUrl || shot.referenceImageUrl)) ?? null;
   const directMaterial =
     directMaterialClipPlan && directMaterialClipPlan.materialId
       ? getVideoMaterial(directMaterialClipPlan.materialId)

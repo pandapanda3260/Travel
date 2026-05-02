@@ -144,26 +144,6 @@ export function CompositionSettingsPanel({
     () => getSubtitleFontSizeInputRange(subtitleAspectRatio),
     [subtitleAspectRatio],
   );
-  const subtitleOutputFontSizeRange = useMemo(() => {
-    const minMetrics = getSubtitleOutputTypographyMetrics(
-      {
-        ...subtitleConfig,
-        fontSizeRatio: convertSubtitleFontSizeDisplayToRatio(subtitleFontSizeRange.min, subtitleAspectRatio),
-      },
-      subtitleAspectRatio,
-    );
-    const maxMetrics = getSubtitleOutputTypographyMetrics(
-      {
-        ...subtitleConfig,
-        fontSizeRatio: convertSubtitleFontSizeDisplayToRatio(subtitleFontSizeRange.max, subtitleAspectRatio),
-      },
-      subtitleAspectRatio,
-    );
-    return {
-      min: minMetrics.fontSizePx,
-      max: maxMetrics.fontSizePx,
-    };
-  }, [subtitleAspectRatio, subtitleConfig, subtitleFontSizeRange.max, subtitleFontSizeRange.min]);
   const [subtitleFontSizeDraft, setSubtitleFontSizeDraft] = useState(() => String(subtitleDisplayFontSize));
 
   useEffect(() => {
@@ -498,7 +478,6 @@ export function CompositionSettingsPanel({
                         +
                       </button>
                     </div>
-                    <small className="task-subtitle-number-hint">{`前端字号 ${subtitleFontSizeRange.min}-${subtitleFontSizeRange.max}，成片约 ${subtitleOutputFontSizeRange.min}-${subtitleOutputFontSizeRange.max}px，当前约 ${subtitleOutputTypography.fontSizePx}px`}</small>
                   </div>
                 </label>
                 <label className="task-subtitle-setting-field">

@@ -6,10 +6,12 @@ import {
   buildRealPhotoMaterialBrief,
   buildShotPlanFromRealPhotoNarrationBlueprint,
   normalizeRealPhotoNarrationBlueprintCandidate,
+  sanitizeAiFallbackShotFields,
 } from "./real-photo-narration-workflow";
 import { validateNarrationResult } from "./generation-validator";
 import type { NarrationResultRecord } from "./narration-result-store";
 import { normalizeSubtitlePlanSource } from "./subtitle-plan-source";
+import { restoreRealPhotoNarrationFieldsForShot } from "./real-photo-narration-source";
 import { resolveTaskClipPayloadDurationSeconds, resolveTaskClipPayloadText } from "./task-clip-store";
 import { recoverNarrationResultTextFromTask } from "./task-narration-result-recovery";
 import { buildDirectorPlanFromTaskData, buildShotPlanFromDirectorPlan } from "./video-task-director";
@@ -869,4 +871,121 @@ test("P3+P5 联动: 中间 beat 拆 3 个子镜头时 preRoll 只在第一个、
   assert.equal(beat2Shots[1]!.postRollSeconds, 0);
   assert.equal(beat2Shots[2]!.preRollSeconds, 0);
   assert.equal(beat2Shots[2]!.postRollSeconds, 0.3);
+});
+
+// ---------------------------------------------------------------------------
+// 防御性清理：sanitizeAiFallbackShotFields
+// ---------------------------------------------------------------------------
+
+test("sanitizeAiFallbackShotFields: needsAiFallback=true 时清空所有资产字段", () => {
+  const shot = {
+    needsAiFallback: true,
+    assetId: "img-stale",
+    referenceImageUrl: "/uploads/stale.jpg",
+    targetMaterialIds: ["img-stale"],
+    backupAssetIds: ["img-backup"],
+    assetSourceType: "user_upload" as const,
+    sourceTrace: "user_upload" as const,
+    generationMode: "photo_direct_i2v" as const,
+    needImageEnhancement: true,
+    fallbackReason: "质量评分过低",
+  };
+
+  const sanitized = sanitizeAiFallbackShotFields(shot);
+
+  assert.equal(sanitized.assetId, null);
+  assert.equal(sanitized.referenceImageUrl, null);
+  assert.deepEqual(sanitized.targetMaterialIds, []);
+  assert.deepEqual(sanitized.backupAssetIds, []);
+  assert.equal(sanitized.assetSourceType, null);
+  assert.equal(sanitized.sourceTrace, null);
+  assert.equal(sanitized.generationMode, "ai_generated_broll");
+  assert.equal(sanitized.needImageEnhancement, false);
+  assert.equal(sanitized.needsAiFallback, true);
+  assert.equal(sanitized.fallbackReason, "质量评分过低");
+});
+
+test("sanitizeAiFallbackShotFields: needsAiFallback=false 时不修改任何字段", () => {
+  const shot = {
+    needsAiFallback: false,
+    assetId: "img-good",
+    referenceImageUrl: "/uploads/good.jpg",
+    targetMaterialIds: ["img-good"],
+    backupAssetIds: [],
+    generationMode: "photo_direct_i2v" as const,
+  };
+
+  const sanitized = sanitizeAiFallbackShotFields(shot);
+
+  assert.equal(sanitized.assetId, "img-good");
+  assert.equal(sanitized.referenceImageUrl, "/uploads/good.jpg");
+  assert.deepEqual(sanitized.targetMaterialIds, ["img-good"]);
+  assert.equal(sanitized.generationMode, "photo_direct_i2v");
+});
+
+test("低质量素材 shot 经 buildShotPlan 后所有资产字段为 null/空", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({
+    source: buildSource(),
+    hotelAssets: [
+      asset("img-bad", "room", "低质量客房照片", "画面极暗", 0, {
+        qualityScore: 20,
+        commercialScore: 30,
+        canDirectI2V: true,
+        needEnhancement: false,
+      }),
+    ],
+    now,
+  });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: buildParameters(),
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  for (const shot of shotPlan.shots) {
+    if (shot.needsAiFallback) {
+      assert.equal(shot.assetId, null, `shot ${shot.shotIndex} assetId should be null`);
+      assert.equal(shot.referenceImageUrl, null, `shot ${shot.shotIndex} referenceImageUrl should be null`);
+      assert.deepEqual(shot.targetMaterialIds, [], `shot ${shot.shotIndex} targetMaterialIds should be empty`);
+      assert.deepEqual(shot.backupAssetIds, [], `shot ${shot.shotIndex} backupAssetIds should be empty`);
+      assert.equal(shot.assetSourceType, null);
+      assert.equal(shot.sourceTrace, null);
+      assert.equal(shot.generationMode, "ai_generated_broll");
+    }
+  }
+});
+
+test("restoreRealPhotoNarrationFieldsForShot 不回填 fallback 镜头的 targetMaterialIds", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
+  const blueprint = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: buildParameters(),
+    materialBrief,
+    now,
+  });
+  const shotPlan = buildShotPlanFromRealPhotoNarrationBlueprint({
+    blueprint,
+    materialBrief,
+    parameters: buildParameters(),
+  });
+
+  const fakeFallbackShot = {
+    ...shotPlan.shots[0]!,
+    needsAiFallback: true,
+    assetId: null,
+    referenceImageUrl: null,
+    targetMaterialIds: [] as string[],
+    backupAssetIds: [] as string[],
+    generationMode: "ai_generated_broll" as const,
+  };
+
+  const restored = restoreRealPhotoNarrationFieldsForShot(fakeFallbackShot, shotPlan);
+
+  assert.deepEqual(restored.targetMaterialIds, []);
 });

@@ -8,6 +8,8 @@ audio.env.local
 text.env.local
 fal.env.local
 kling.env.local
+travel.shared.env.local
+travel.env.shared.local
 
 node_modules
 .next

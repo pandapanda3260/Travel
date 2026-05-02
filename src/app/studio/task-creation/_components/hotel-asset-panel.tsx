@@ -2,6 +2,19 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bath,
+  BedDouble,
+  Building2,
+  Coffee,
+  Dumbbell,
+  Hotel,
+  MapPin,
+  Sparkles,
+  Utensils,
+  Waves,
+  type LucideIcon,
+} from "lucide-react";
 
 import { getHotelAssetDisplayOrder } from "../../../../lib/hotel-asset-ordering";
 import {
@@ -78,6 +91,20 @@ const sceneLabelMap: Record<HotelAssetSceneType, string> = {
   service_detail: "服务细节",
   atmosphere: "氛围镜头",
   other: "其他",
+};
+
+const hotelAssetSceneIconMap: Record<HotelAssetSceneType, LucideIcon> = {
+  exterior: Building2,
+  lobby: Hotel,
+  room: BedDouble,
+  bathroom: Bath,
+  dining: Utensils,
+  food: Coffee,
+  facility: Dumbbell,
+  neighborhood: MapPin,
+  service_detail: Sparkles,
+  atmosphere: Waves,
+  other: Sparkles,
 };
 
 function getReviewTone(status: TaskHotelAssetRecord["reviewStatus"]) {
@@ -917,6 +944,10 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
     return null;
   }
 
+  const ActiveAssetSceneIcon = activeAsset
+    ? hotelAssetSceneIconMap[assetDrafts[activeAsset.assetId]?.sceneType ?? activeAsset.sceneType]
+    : Sparkles;
+
   return (
     <section className="composer-card hotel-asset-panel-shell">
       <div className="hotel-asset-panel-heading">酒店实拍图片</div>
@@ -1041,7 +1072,7 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
 	                  <span className="hotel-asset-strip-caption">
 	                    {currentAsset.forbidden
 	                      ? "禁止使用"
-	                      : currentAsset.mustUse
+	                      : isAssetMustUse(currentAsset)
 	                        ? "必须使用"
 	                        : currentAsset.reviewStatus === "pending"
 	                          ? "场景识别中…"
@@ -1094,7 +1125,9 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
             <div className="hotel-asset-workspace">
               <div className="hotel-asset-info-card">
                 <div className="hotel-asset-info-head">
-                  <span className="hotel-asset-info-icon">图</span>
+                  <span className="hotel-asset-info-icon" aria-hidden="true">
+                    <ActiveAssetSceneIcon size={20} strokeWidth={2.1} />
+                  </span>
                   <div className="hotel-asset-info-copy">
                     <strong>
                       {assetDrafts[activeAsset.assetId]?.displayName || activeAsset.displayName || activeAsset.fileName}
@@ -1164,14 +1197,14 @@ export function HotelAssetPanel({ taskId, videoType, ensureTaskId, onAssetCountC
                     <span className="hotel-asset-position-tag">
                       {formatRecommendedPosition(activeAsset.recommendedPosition)}
                     </span>
-                    <label className={`hotel-asset-toggle${activeAsset.mustUse ? " active" : ""}`}>
+                    <label className={`hotel-asset-toggle${isAssetMustUse(activeAsset) ? " active" : ""}`}>
                       <input
-                        checked={activeAsset.mustUse}
+                        checked={isAssetMustUse(activeAsset)}
                         disabled={hasAssetOperationInFlight}
                         type="checkbox"
                         onChange={() =>
                           void handleAssetPreferenceChange(activeAsset.assetId, {
-                            mustUse: !activeAsset.mustUse,
+                            mustUse: !isAssetMustUse(activeAsset),
                             forbidden: false,
                           })
                         }

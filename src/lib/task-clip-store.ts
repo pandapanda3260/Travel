@@ -120,6 +120,7 @@ export type TaskClipSourceShot = {
   selectedVisualImageSessionId?: string | null;
   needImageEnhancement?: boolean;
   isAtmosphereInsert?: boolean;
+  needsAiFallback?: boolean;
 };
 
 function getTaskClipThumbnailDir(taskId: string) {
@@ -441,6 +442,7 @@ export async function buildTaskClipShotPayloads(task: VideoTaskRecord, options?:
         selectedVisualImageSessionId: selectedVisualImage?.sessionId ?? null,
         needImageEnhancement: shot.needImageEnhancement ?? false,
         isAtmosphereInsert: shot.isAtmosphereInsert ?? false,
+        needsAiFallback: shot.needsAiFallback ?? false,
       } satisfies TaskClipSourceShot;
 
       if (current) {

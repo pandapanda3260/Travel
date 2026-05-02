@@ -637,6 +637,21 @@ function decideFallbackNeed(
   return { needsAiFallback: false, fallbackReason: null };
 }
 
+export function sanitizeAiFallbackShotFields<T extends { needsAiFallback?: boolean }>(shot: T): T {
+  if (!shot.needsAiFallback) return shot;
+  return {
+    ...shot,
+    assetId: null,
+    referenceImageUrl: null,
+    targetMaterialIds: [],
+    backupAssetIds: [],
+    assetSourceType: null,
+    sourceTrace: null,
+    generationMode: "ai_generated_broll" as const,
+    needImageEnhancement: false,
+  };
+}
+
 function buildShotFromBeat(input: {
   beat: RealPhotoNarrationBeat;
   index: number;
@@ -661,7 +676,7 @@ function buildShotFromBeat(input: {
   const resolvedTargetMaterialIds = needsAiFallback ? [] : input.beat.targetMaterialIds;
   const resolvedBackupAssetIds = needsAiFallback ? [] : backupAssetIds;
 
-  return {
+  return sanitizeAiFallbackShotFields({
     shotId: `shot-${shotIndex}`,
     shotIndex,
     segmentId: `segment-${shotIndex}`,
@@ -745,7 +760,7 @@ function buildShotFromBeat(input: {
       nextTransition: input.beat.phase === "action_close" ? "收束" : "自然引到下一个证据",
       transitionType: "narration-led",
     },
-  };
+  });
 }
 
 function decideSubShotCount(beat: RealPhotoNarrationBeat): number {
@@ -828,7 +843,7 @@ function buildSubShotsFromBeat(input: {
       const primary = result[0];
       const { needsAiFallback, fallbackReason } = decideFallbackNeed(material);
       const shotIndex = input.shotIndexOffset + sub + 1;
-      result.push({
+      result.push(sanitizeAiFallbackShotFields({
         ...primary,
         shotId: `${primary.shotId}-sub-${sub + 1}`,
         shotIndex,
@@ -858,7 +873,7 @@ function buildSubShotsFromBeat(input: {
         preRollSeconds: 0,
         postRollSeconds: sub === count - 1 ? rolls.postRollSeconds : 0,
         userOverride: false,
-      });
+      }));
     }
     cursor += subDuration;
   }

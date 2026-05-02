@@ -69,6 +69,14 @@ function parseRequestedSize(size: string) {
   };
 }
 
+function normalizeSizeForLiangxin(size: string) {
+  const { width, height } = parseRequestedSize(size);
+  if (!width || !height) return size;
+  const w = Math.round(width / 16) * 16;
+  const h = Math.round(height / 16) * 16;
+  return `${w}x${h}`;
+}
+
 function buildOrientationGuardClause(size: string, includeOrientationLabel = true) {
   const { width, height } = parseRequestedSize(size);
 

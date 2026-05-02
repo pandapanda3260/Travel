@@ -19,6 +19,7 @@ type ShotLike = Pick<ShotPlanItem, "shotIndex" | "narrationHint"> &
       | "sourceSubtitleText"
       | "narrationEstimatedDurationSeconds"
       | "targetMaterialIds"
+      | "needsAiFallback"
     >
   >;
 
@@ -176,7 +177,7 @@ export function restoreRealPhotoNarrationFieldsForShot<T extends ShotLike>(
     sourceSpokenText: source.spokenText || shot.sourceSpokenText || null,
     sourceSubtitleText: source.subtitleText || source.spokenText || shot.sourceSubtitleText || null,
     narrationEstimatedDurationSeconds: source.narrationEstimatedDurationSeconds,
-    targetMaterialIds: source.targetMaterialIds ?? shot.targetMaterialIds,
+    targetMaterialIds: shot.needsAiFallback ? [] : (source.targetMaterialIds ?? shot.targetMaterialIds),
   };
 }
 

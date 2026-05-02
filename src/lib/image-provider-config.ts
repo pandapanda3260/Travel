@@ -12,6 +12,7 @@ export type ImageGenerationRuntime = {
   apiBase: string;
   apiKey: string;
   modelId: string;
+  quality: string | null;
   providerLabel: string;
   configFileName: string;
 };
