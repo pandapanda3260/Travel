@@ -249,6 +249,51 @@ test("normalize blueprint candidate 会保留 LLM 台词，但过滤不存在的
   assert.equal(normalized.beats[1]?.spokenText, fallback.beats[1]?.spokenText);
 });
 
+test("normalize blueprint candidate 会移除禁止素材，并优先补上必须使用素材", () => {
+  const materialBrief = buildRealPhotoMaterialBrief({
+    source: buildSource(),
+    hotelAssets: buildAssets().map((item) =>
+      item.assetId === "img-room"
+        ? { ...item, mustUse: true }
+        : item.assetId === "img-opening"
+          ? { ...item, forbidden: true }
+          : item,
+    ),
+    now,
+  });
+  const fallback = buildFallbackRealPhotoNarrationBlueprint({
+    source: buildSource(),
+    parameters: buildParameters(),
+    materialBrief,
+    now,
+  });
+
+  const normalized = normalizeRealPhotoNarrationBlueprintCandidate({
+    candidate: {
+      beats: [
+        {
+          phase: "opening_hook",
+          spokenText: "这家店先别只看价格，开篇先看真实到达感。",
+          targetMaterialIds: ["img-opening"],
+        },
+        {
+          phase: "context_setup",
+          spokenText: "第二句先承接整体环境，再看是不是适合带娃。",
+          targetMaterialIds: ["img-lobby"],
+        },
+      ],
+    },
+    fallback,
+    materialBrief,
+    now,
+  });
+
+  assert.equal(normalized.beats.some((beat) => beat.targetMaterialIds.includes("img-opening")), false);
+  assert.equal(normalized.beats.some((beat) => beat.targetMaterialIds[0] === "img-room"), true);
+  assert.ok(normalized.warnings.some((warning) => warning.includes("禁止使用")));
+  assert.ok(normalized.warnings.some((warning) => warning.includes("必须使用")));
+});
+
 test("叙事优先实拍计划允许每个镜头服务口播，不触发旧混剪稀疏口播规则", () => {
   const materialBrief = buildRealPhotoMaterialBrief({ source: buildSource(), hotelAssets: buildAssets(), now });
   const blueprint = buildFallbackRealPhotoNarrationBlueprint({
