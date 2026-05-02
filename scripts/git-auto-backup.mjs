@@ -4,7 +4,7 @@ import path from "node:path";
 
 const remote = process.env.AUTO_BACKUP_REMOTE ?? "origin";
 const baseBranch = process.env.AUTO_BACKUP_BASE_BRANCH ?? "main";
-const backupBranch = process.env.AUTO_BACKUP_BRANCH ?? "codex/auto-backup-main";
+const backupBranch = process.env.AUTO_BACKUP_BRANCH ?? "";
 const pushMain = process.env.AUTO_BACKUP_PUSH_MAIN !== "0";
 const maxFileBytes = Number(process.env.AUTO_BACKUP_MAX_FILE_MB ?? "95") * 1024 * 1024;
 
@@ -159,10 +159,15 @@ function pushBranches() {
     }
   }
 
-  run("git", ["push", "--force-with-lease", remote, `HEAD:refs/heads/${backupBranch}`], {
-    stdio: "inherit",
-  });
-  log(`updated backup branch ${backupBranch}`);
+  const trimmedBackupBranch = backupBranch.trim();
+  if (trimmedBackupBranch && trimmedBackupBranch !== "0" && trimmedBackupBranch !== "false") {
+    run("git", ["push", "--force-with-lease", remote, `HEAD:refs/heads/${trimmedBackupBranch}`], {
+      stdio: "inherit",
+    });
+    log(`updated backup branch ${trimmedBackupBranch}`);
+  } else {
+    log("backup branch push disabled");
+  }
 }
 
 ensureSafeState();

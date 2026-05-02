@@ -265,7 +265,7 @@ export function buildRealPhotoMaterialBrief(input: BuildRealPhotoMaterialBriefIn
 }
 
 function getTargetBeatCount(input: BuildFallbackRealPhotoNarrationBlueprintInput) {
-  const materialCount = input.materialBrief.items.length;
+  const materialCount = getAssignableMaterialItems(input.materialBrief).length;
   const requested = Math.max(1, Math.round(input.parameters.video.storyShotCount || input.parameters.video.segmentCount || 5));
   if (materialCount > 0) {
     return Math.max(1, Math.min(phaseTemplates.length, requested, materialCount));
@@ -293,17 +293,30 @@ function materialMatchesScene(material: RealPhotoMaterialBriefItem, sceneTypes: 
   return material.sceneType ? sceneTypes.includes(material.sceneType) : false;
 }
 
+function getAssignableMaterialItems(materialBrief: RealPhotoMaterialBrief) {
+  return materialBrief.items.filter((item) => !item.forbidden);
+}
+
 function chooseMaterialForTemplate(
   template: PhaseTemplate,
   materialBrief: RealPhotoMaterialBrief,
   usedMaterialIds: Set<string>,
 ) {
-  const unused = materialBrief.items.filter((item) => !usedMaterialIds.has(item.assetId));
+  const assignable = getAssignableMaterialItems(materialBrief);
+  const unused = assignable.filter((item) => !usedMaterialIds.has(item.assetId));
+  const preferredMustUse = unused.find((item) => item.mustUse && materialMatchesScene(item, template.scenePreference));
+  if (preferredMustUse) {
+    return preferredMustUse;
+  }
+  const anyMustUse = unused.find((item) => item.mustUse);
+  if (anyMustUse) {
+    return anyMustUse;
+  }
   const preferred = unused.find((item) => materialMatchesScene(item, template.scenePreference));
   if (preferred) {
     return preferred;
   }
-  return unused[0] ?? materialBrief.items.find((item) => materialMatchesScene(item, template.scenePreference)) ?? null;
+  return unused[0] ?? assignable.find((item) => materialMatchesScene(item, template.scenePreference)) ?? null;
 }
 
 function estimateBeatDurationSeconds(text: string) {
@@ -340,7 +353,7 @@ function readStringArray(value: unknown) {
 
 function buildTextContext(source: VideoTaskSource, materialBrief: RealPhotoMaterialBrief): RealPhotoNarrationTextContext {
   const productTitle = compactText(source.productInfoTitle, "这家店");
-  const topMaterial = materialBrief.items
+  const topMaterial = getAssignableMaterialItems(materialBrief)
     .slice(0, 4)
     .map((item) => item.subjectSummary)
     .filter(Boolean)
@@ -407,9 +420,56 @@ export function buildFallbackRealPhotoNarrationBlueprint(
     beats,
     totalEstimatedDurationSeconds: Math.round(beats.reduce((sum, beat) => sum + beat.estimatedDurationSeconds, 0) * 10) / 10,
     materialStrategy: "每个镜头优先绑定一个最能证明当前台词的实拍素材，素材不足时减少镜头而不是一张图反复硬拆。",
-    warnings: [...input.materialBrief.warnings],
+    warnings: [
+      ...input.materialBrief.warnings,
+      ...input.materialBrief.items
+        .filter((item) => item.forbidden)
+        .map((item) => `${item.displayName} 已被用户标记为禁止使用，兜底镜头规划不会分配这张图。`),
+    ],
     generatedAt: nowIso(input.now),
   };
+}
+
+function applyMaterialPreferenceRules(input: {
+  beats: RealPhotoNarrationBeat[];
+  materialBrief: RealPhotoMaterialBrief;
+}): { beats: RealPhotoNarrationBeat[]; warnings: string[] } {
+  const forbiddenIds = new Set(input.materialBrief.items.filter((item) => item.forbidden).map((item) => item.assetId));
+  const mustUseIds = input.materialBrief.items
+    .filter((item) => item.mustUse && !item.forbidden)
+    .map((item) => item.assetId);
+  const warnings: string[] = [];
+
+  const sanitizedBeats = input.beats.map((beat) => {
+    const targetMaterialIds = beat.targetMaterialIds.filter((assetId) => !forbiddenIds.has(assetId));
+    return targetMaterialIds.length === beat.targetMaterialIds.length ? beat : { ...beat, targetMaterialIds };
+  });
+
+  for (const forbiddenId of forbiddenIds) {
+    if (input.beats.some((beat) => beat.targetMaterialIds.includes(forbiddenId))) {
+      warnings.push(`素材 ${forbiddenId} 被用户标记为禁止使用，已从镜头绑定中移除。`);
+    }
+  }
+
+  const usedIds = new Set(sanitizedBeats.flatMap((beat) => beat.targetMaterialIds));
+  const missedMustUseIds = mustUseIds.filter((assetId) => !usedIds.has(assetId));
+  for (const assetId of missedMustUseIds) {
+    const targetBeat =
+      sanitizedBeats.find((beat) => !beat.targetMaterialIds.length) ??
+      sanitizedBeats.find((beat) => !beat.targetMaterialIds.some((targetId) => mustUseIds.includes(targetId))) ??
+      null;
+    if (!targetBeat) {
+      warnings.push(`素材 ${assetId} 被用户标记为必须使用，但当前没有可分配镜头，请增加镜头数或调整素材标记。`);
+      continue;
+    }
+    targetBeat.targetMaterialIds = [assetId, ...targetBeat.targetMaterialIds.filter((targetId) => targetId !== assetId)].slice(
+      0,
+      2,
+    );
+    warnings.push(`素材 ${assetId} 被用户标记为必须使用，已优先分配到 ${targetBeat.title}。`);
+  }
+
+  return { beats: sanitizedBeats, warnings };
 }
 
 export function normalizeRealPhotoNarrationBlueprintCandidate(
@@ -428,6 +488,7 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
   }
 
   const allowedMaterialIds = new Set(input.materialBrief.items.map((item) => item.assetId));
+  const forbiddenMaterialIds = new Set(input.materialBrief.items.filter((item) => item.forbidden).map((item) => item.assetId));
   const candidateByPhase = new Map<RealPhotoNarrationPhase, Record<string, unknown>>();
   const candidateByIndex = new Map<number, Record<string, unknown>>();
 
@@ -459,8 +520,8 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
         },
       ) || fallbackBeat.spokenText;
     const subtitleText = spokenText;
-    const targetMaterialIds = readStringArray(candidateBeat.targetMaterialIds).filter((assetId) =>
-      allowedMaterialIds.has(assetId),
+    const targetMaterialIds = readStringArray(candidateBeat.targetMaterialIds).filter(
+      (assetId) => allowedMaterialIds.has(assetId) && !forbiddenMaterialIds.has(assetId),
     );
 
     return {
@@ -475,6 +536,11 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
     };
   });
 
+  const preferenceResult = applyMaterialPreferenceRules({
+    beats,
+    materialBrief: input.materialBrief,
+  });
+
   return {
     ...input.fallback,
     structureInfluenceScore: 60,
@@ -482,9 +548,11 @@ export function normalizeRealPhotoNarrationBlueprintCandidate(
     speakingStyle: readString(candidate.speakingStyle) || input.fallback.speakingStyle,
     targetAudience: readString(candidate.targetAudience) || input.fallback.targetAudience,
     coreQuestion: readString(candidate.coreQuestion) || input.fallback.coreQuestion,
-    beats,
-    totalEstimatedDurationSeconds: Math.round(beats.reduce((sum, beat) => sum + beat.estimatedDurationSeconds, 0) * 10) / 10,
+    beats: preferenceResult.beats,
+    totalEstimatedDurationSeconds:
+      Math.round(preferenceResult.beats.reduce((sum, beat) => sum + beat.estimatedDurationSeconds, 0) * 10) / 10,
     materialStrategy: readString(candidate.materialStrategy) || input.fallback.materialStrategy,
+    warnings: [...input.fallback.warnings, ...preferenceResult.warnings],
     generatedAt: nowIso(input.now),
   };
 }

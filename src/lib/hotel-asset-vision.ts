@@ -7,7 +7,7 @@ import {
   resolveDefaultModelPricingKey,
 } from "./model-usage-service";
 import { getVisionRuntime } from "./vision-provider-config";
-import type { HotelAssetSceneType } from "./video-task-schema";
+import type { HotelAssetRecommendedPosition, HotelAssetSceneType } from "./video-task-schema";
 import type {
   HotelAssetReviewStatus,
   HotelAssetShotScale,
@@ -36,6 +36,10 @@ type HotelAssetAnalysisResult = Pick<
   | "needEnhancement"
   | "qualityScore"
   | "commercialScore"
+  | "compositionScore"
+  | "recommendedPosition"
+  | "sellingPoints"
+  | "durationSuggestion"
   | "reviewStatus"
 > & {
   analysisMode: "model" | "fallback";
@@ -53,6 +57,10 @@ type RawHotelAssetVisionResult = {
   needEnhancement?: boolean;
   qualityScore?: number;
   commercialScore?: number;
+  compositionScore?: number;
+  recommendedPosition?: string | null;
+  sellingPoints?: unknown;
+  durationSuggestion?: number | null;
   reviewStatus?: string;
 };
 
@@ -66,17 +74,21 @@ const HOTEL_ASSET_ANALYSIS_SYSTEM_PROMPT = [
   "2. 如果用户提供了场景偏好，请尽量优先采用该场景，除非明显冲突。",
   "3. sceneType 仅可取：exterior,lobby,room,bathroom,dining,food,facility,neighborhood,service_detail,atmosphere,other。",
   "4. recommendedShotScale 仅可取：wide,medium,close,detail。",
-  "5. reviewStatus 仅可取：passed,warning,rejected。",
-  "6. qualityScore 与 commercialScore 取 0-100 的整数。",
-  "7. subjectSummary 请用一句中文概括主体内容，避免空泛词。",
+  "5. recommendedPosition 仅可取：opening,selling_point,transition,ending,atmosphere,null。",
+  "6. reviewStatus 仅可取：passed,warning,rejected。",
+  "7. qualityScore、commercialScore、compositionScore 取 0-100 的整数。",
+  "8. subjectSummary 请用一句中文概括主体内容，避免空泛词。",
+  "9. sellingPoints 是这张图能承载的商业卖点，最多 8 个；durationSuggestion 是适合承载的画面秒数，范围 2-12。",
   "",
   "判断重点：",
   "- 是否适合作为酒店探店视频首镜头/主镜头",
   "- 是否适合做近景或特写",
   "- 是否可以直接图生视频，还是更适合先做图像增强",
   "- 画面是否清晰、构图是否稳定、商业表达是否明确",
+  "- 这张图最适合放在开头、卖点展示、转场、结尾还是氛围铺垫",
+  "- 它能证明哪些具体卖点，以及适合承载几秒画面",
   "",
-  '输出格式：{"sceneType":"...","subjectSummary":"...","tags":["..."],"compositionType":"...","recommendedShotScale":"wide|medium|close|detail","isHeroCandidate":true,"isCloseupCandidate":false,"canDirectI2V":true,"needEnhancement":false,"qualityScore":88,"commercialScore":86,"reviewStatus":"passed"}',
+  '输出格式：{"sceneType":"...","subjectSummary":"...","tags":["..."],"compositionType":"...","recommendedShotScale":"wide|medium|close|detail","recommendedPosition":"opening|selling_point|transition|ending|atmosphere|null","sellingPoints":["..."],"durationSuggestion":5,"isHeroCandidate":true,"isCloseupCandidate":false,"canDirectI2V":true,"needEnhancement":false,"qualityScore":88,"commercialScore":86,"compositionScore":82,"reviewStatus":"passed"}',
 ].join("\n");
 
 function normalizeSceneType(value: string | null | undefined): HotelAssetSceneType {
@@ -118,6 +130,38 @@ function normalizeReviewStatus(value: string | null | undefined): HotelAssetRevi
     default:
       return "warning";
   }
+}
+
+function normalizeRecommendedPosition(value: string | null | undefined): HotelAssetRecommendedPosition {
+  switch (value) {
+    case "opening":
+    case "selling_point":
+    case "transition":
+    case "ending":
+    case "atmosphere":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeSellingPoints(value: unknown, fallback: string[]) {
+  return Array.isArray(value)
+    ? value
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : fallback;
+}
+
+function normalizeDurationSuggestion(value: number | null | undefined, fallback: number | null) {
+  if (value === null) {
+    return null;
+  }
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Number(Math.max(2, Math.min(12, Number(value))).toFixed(1));
 }
 
 function clampScore(value: number | null | undefined, fallback: number) {
@@ -199,6 +243,31 @@ function inferDefaultShotScale(sceneType: HotelAssetSceneType): HotelAssetShotSc
   }
 }
 
+function inferRecommendedPosition(sceneType: HotelAssetSceneType): HotelAssetRecommendedPosition {
+  switch (sceneType) {
+    case "exterior":
+    case "lobby":
+    case "atmosphere":
+      return "opening";
+    case "room":
+    case "dining":
+    case "food":
+    case "facility":
+    case "service_detail":
+      return "selling_point";
+    case "neighborhood":
+      return "transition";
+    default:
+      return null;
+  }
+}
+
+function inferSellingPoints(sceneType: HotelAssetSceneType, subjectSummary: string) {
+  const label = sceneLabelMap[sceneType];
+  const points = [subjectSummary, label].map((item) => item.trim()).filter(Boolean);
+  return Array.from(new Set(points)).slice(0, 4);
+}
+
 export function buildFallbackHotelAssetAnalysis(input: VisionAssetInput): HotelAssetAnalysisResult {
   const orientation = input.width > input.height ? "landscape" : input.width < input.height ? "portrait" : "square";
   const noteText = `${input.userNote ?? ""} ${input.fileName ?? ""}`.trim();
@@ -213,13 +282,19 @@ export function buildFallbackHotelAssetAnalysis(input: VisionAssetInput): HotelA
   const commercialScore = Math.max(40, Math.min(96, qualityScore + commercialBonus));
   const reviewStatus: HotelAssetReviewStatus = qualityScore >= 72 ? "passed" : qualityScore >= 58 ? "warning" : "rejected";
   const recommendedShotScale = inferDefaultShotScale(inferredSceneType);
+  const subjectSummary = input.userNote?.trim() || `${sceneLabelMap[inferredSceneType]}实拍图`;
+  const compositionScore = Math.max(35, Math.min(96, qualityScore - (orientation === "square" ? 4 : 0)));
+  const recommendedPosition = inferRecommendedPosition(inferredSceneType);
 
   return {
     sceneType: inferredSceneType,
-    subjectSummary: input.userNote?.trim() || `${sceneLabelMap[inferredSceneType]}实拍图`,
+    subjectSummary,
     tags: Array.from(new Set([sceneLabelMap[inferredSceneType], orientation, recommendedShotScale])).filter(Boolean),
     compositionType: orientation === "landscape" ? "横向稳定构图" : orientation === "portrait" ? "纵向主视觉构图" : "居中方构图",
     recommendedShotScale,
+    recommendedPosition,
+    sellingPoints: inferSellingPoints(inferredSceneType, subjectSummary),
+    durationSuggestion: inferredSceneType === "exterior" || inferredSceneType === "lobby" ? 5 : 4,
     isHeroCandidate:
       qualityScore >= 72 && orientation !== "portrait" && ["exterior", "lobby", "room"].includes(inferredSceneType),
     isCloseupCandidate: ["food", "service_detail", "bathroom"].includes(inferredSceneType),
@@ -227,6 +302,7 @@ export function buildFallbackHotelAssetAnalysis(input: VisionAssetInput): HotelA
     needEnhancement: qualityScore < 72,
     qualityScore,
     commercialScore,
+    compositionScore,
     reviewStatus,
     analysisMode: "fallback",
   };
@@ -256,12 +332,16 @@ function sanitizeAnalysisResult(raw: RawHotelAssetVisionResult, fallback: HotelA
       : fallback.tags,
     compositionType: raw.compositionType?.trim() || fallback.compositionType,
     recommendedShotScale: normalizeShotScale(raw.recommendedShotScale ?? fallback.recommendedShotScale),
+    recommendedPosition: normalizeRecommendedPosition(raw.recommendedPosition ?? fallback.recommendedPosition),
+    sellingPoints: normalizeSellingPoints(raw.sellingPoints, fallback.sellingPoints),
+    durationSuggestion: normalizeDurationSuggestion(raw.durationSuggestion, fallback.durationSuggestion),
     isHeroCandidate: Boolean(raw.isHeroCandidate ?? fallback.isHeroCandidate),
     isCloseupCandidate: Boolean(raw.isCloseupCandidate ?? fallback.isCloseupCandidate),
     canDirectI2V: Boolean(raw.canDirectI2V ?? fallback.canDirectI2V),
     needEnhancement: Boolean(raw.needEnhancement ?? fallback.needEnhancement),
     qualityScore: clampScore(raw.qualityScore, fallback.qualityScore),
     commercialScore: clampScore(raw.commercialScore, fallback.commercialScore),
+    compositionScore: clampScore(raw.compositionScore, fallback.compositionScore),
     reviewStatus: normalizeReviewStatus(raw.reviewStatus ?? fallback.reviewStatus),
     analysisMode: "model",
   };

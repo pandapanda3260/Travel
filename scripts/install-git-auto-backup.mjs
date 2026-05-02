@@ -82,7 +82,7 @@ ${envDict({
   PATH: pathEnv,
   AUTO_BACKUP_REMOTE: "origin",
   AUTO_BACKUP_BASE_BRANCH: "main",
-  AUTO_BACKUP_BRANCH: "codex/auto-backup-main",
+  AUTO_BACKUP_BRANCH: "",
   AUTO_BACKUP_PUSH_MAIN: "1",
   AUTO_BACKUP_MAX_FILE_MB: "95",
 })}

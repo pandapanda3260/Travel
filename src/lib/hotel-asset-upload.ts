@@ -23,6 +23,10 @@ export type PendingHotelAssetAnalysis = Pick<
   | "needEnhancement"
   | "qualityScore"
   | "commercialScore"
+  | "compositionScore"
+  | "recommendedPosition"
+  | "sellingPoints"
+  | "durationSuggestion"
   | "reviewStatus"
   | "analyzedAt"
 >;
@@ -49,6 +53,10 @@ export function buildPendingHotelAssetAnalysis(input: HotelAssetUploadSeedInput)
     needEnhancement: fallback.needEnhancement,
     qualityScore: fallback.qualityScore,
     commercialScore: fallback.commercialScore,
+    compositionScore: fallback.compositionScore,
+    recommendedPosition: fallback.recommendedPosition,
+    sellingPoints: fallback.sellingPoints,
+    durationSuggestion: fallback.durationSuggestion,
     reviewStatus: "pending",
     analyzedAt: null,
   };
